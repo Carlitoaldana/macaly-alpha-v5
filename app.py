@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
+from textwrap import dedent
 
 # =========================================================
 # MACALY + ALPHA V5
@@ -26,7 +27,7 @@ KALSHI_API = "https://api.elections.kalshi.com/trade-api/v2"
 UP_THRESHOLD = 3.5
 DOWN_THRESHOLD = -3.5
 
-st.markdown("""
+st.markdown(dedent("""
 <style>
 .stApp {
     background: #070b14;
@@ -159,7 +160,7 @@ st.markdown("""
     margin-top: 8px;
 }
 </style>
-""", unsafe_allow_html=True)
+"""), unsafe_allow_html=True)
 
 # =========================================================
 # DATA
@@ -193,7 +194,11 @@ def get_candles():
     for col in ["low", "high", "open", "close", "volume"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["datetime"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    df["datetime"] = pd.to_datetime(
+        df["time"],
+        unit="s",
+        utc=True
+    )
 
     return df
 
@@ -236,24 +241,31 @@ def get_kalshi_market():
         return None
 
     now = datetime.now(timezone.utc)
-
     future = []
 
     for m in markets:
         try:
             close_time = datetime.fromisoformat(
-                str(m["close_time"]).replace("Z", "+00:00")
+                str(m["close_time"]).replace(
+                    "Z",
+                    "+00:00"
+                )
             )
 
             if close_time > now:
-                future.append((close_time, m))
+                future.append(
+                    (close_time, m)
+                )
+
         except Exception:
             pass
 
     if not future:
         return markets[0]
 
-    future.sort(key=lambda x: x[0])
+    future.sort(
+        key=lambda x: x[0]
+    )
 
     return future[0][1]
 
@@ -262,7 +274,11 @@ def get_target(market):
     if not market:
         return None
 
-    for key in ["floor_strike", "cap_strike", "strike"]:
+    for key in [
+        "floor_strike",
+        "cap_strike",
+        "strike"
+    ]:
         value = market.get(key)
 
         if value is not None:
@@ -278,7 +294,9 @@ def get_event_ticker(market):
     if not market:
         return None
 
-    event_ticker = market.get("event_ticker")
+    event_ticker = market.get(
+        "event_ticker"
+    )
 
     if event_ticker:
         return str(event_ticker)
@@ -314,16 +332,24 @@ def extract_live_number(obj):
             normalized = {}
 
             for k, v in x.items():
-                key = str(k).lower().replace("-", "_")
+                key = (
+                    str(k)
+                    .lower()
+                    .replace("-", "_")
+                )
+
                 normalized[key] = v
 
             for key in preferred:
                 if key in normalized:
                     try:
-                        n = float(normalized[key])
+                        n = float(
+                            normalized[key]
+                        )
 
                         if 10000 < n < 1000000:
                             candidates.append(n)
+
                     except Exception:
                         pass
 
@@ -343,14 +369,17 @@ def extract_live_number(obj):
 
 
 def get_kalshi_live_btc(market):
-    event_ticker = get_event_ticker(market)
+    event_ticker = get_event_ticker(
+        market
+    )
 
     if not event_ticker:
         return None
 
     url = (
-        f"https://external-api.kalshi.com/"
-        f"trade-api/v2/live_data/events/{event_ticker}"
+        "https://external-api.kalshi.com/"
+        "trade-api/v2/live_data/events/"
+        f"{event_ticker}"
     )
 
     try:
@@ -366,7 +395,9 @@ def get_kalshi_live_btc(market):
 
         r.raise_for_status()
 
-        return extract_live_number(r.json())
+        return extract_live_number(
+            r.json()
+        )
 
     except Exception:
         return None
@@ -404,10 +435,20 @@ def calculate_indicators(df):
         adjust=False
     ).mean()
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = (
+        avg_gain /
+        avg_loss.replace(0, np.nan)
+    )
 
-    df["rsi"] = 100 - (100 / (1 + rs))
-    df["rsi"] = df["rsi"].fillna(50)
+    df["rsi"] = (
+        100 -
+        (100 / (1 + rs))
+    )
+
+    df["rsi"] = (
+        df["rsi"]
+        .fillna(50)
+    )
 
     typical = (
         df["high"] +
@@ -415,14 +456,24 @@ def calculate_indicators(df):
         df["close"]
     ) / 3
 
-    cumulative_volume = df["volume"].cumsum()
+    cumulative_volume = (
+        df["volume"].cumsum()
+    )
 
     df["vwap"] = (
         (typical * df["volume"]).cumsum()
-        / cumulative_volume.replace(0, np.nan)
+        /
+        cumulative_volume.replace(
+            0,
+            np.nan
+        )
     )
 
-    df["vol_ma20"] = df["volume"].rolling(20).mean()
+    df["vol_ma20"] = (
+        df["volume"]
+        .rolling(20)
+        .mean()
+    )
 
     return df
 
@@ -432,7 +483,8 @@ def dollar_momentum(df, bars):
         return 0.0
 
     return float(
-        df["close"].iloc[-1] -
+        df["close"].iloc[-1]
+        -
         df["close"].iloc[-1 - bars]
     )
 
@@ -447,14 +499,25 @@ def seconds_remaining(market):
 
     try:
         close_time = datetime.fromisoformat(
-            str(market["close_time"]).replace("Z", "+00:00")
+            str(
+                market["close_time"]
+            ).replace(
+                "Z",
+                "+00:00"
+            )
         )
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(
+            timezone.utc
+        )
 
         return max(
             0,
-            int((close_time - now).total_seconds())
+            int(
+                (
+                    close_time - now
+                ).total_seconds()
+            )
         )
 
     except Exception:
@@ -465,14 +528,22 @@ def format_countdown(seconds):
     minutes = seconds // 60
     secs = seconds % 60
 
-    return f"{minutes:02d}:{secs:02d}"
+    return (
+        f"{minutes:02d}:"
+        f"{secs:02d}"
+    )
 
 
 # =========================================================
 # MODEL
 # =========================================================
 
-def build_model(df, btc_price, target, time_left):
+def build_model(
+    df,
+    btc_price,
+    target,
+    time_left
+):
     last = df.iloc[-1]
 
     ema9 = float(last["ema9"])
@@ -480,61 +551,92 @@ def build_model(df, btc_price, target, time_left):
     rsi = float(last["rsi"])
     vwap = float(last["vwap"])
 
-    mom1 = dollar_momentum(df, 1)
-    mom5 = dollar_momentum(df, 5)
-    mom10 = dollar_momentum(df, 10)
-    mom30 = dollar_momentum(df, 30)
+    mom1 = dollar_momentum(
+        df,
+        1
+    )
 
-    volume = float(last["volume"])
+    mom5 = dollar_momentum(
+        df,
+        5
+    )
+
+    mom10 = dollar_momentum(
+        df,
+        10
+    )
+
+    mom30 = dollar_momentum(
+        df,
+        30
+    )
+
+    volume = float(
+        last["volume"]
+    )
 
     vol_ma = last["vol_ma20"]
 
-    if pd.isna(vol_ma) or vol_ma <= 0:
+    if (
+        pd.isna(vol_ma)
+        or vol_ma <= 0
+    ):
         volume_ratio = 1.0
+
     else:
-        volume_ratio = volume / float(vol_ma)
+        volume_ratio = (
+            volume /
+            float(vol_ma)
+        )
 
     technical_score = 0.0
 
     # EMA trend
     if ema9 > ema21:
         technical_score += 1.5
+
     elif ema9 < ema21:
         technical_score -= 1.5
 
     # Price vs VWAP
     if btc_price > vwap:
         technical_score += 1.0
+
     elif btc_price < vwap:
         technical_score -= 1.0
 
     # RSI
     if rsi >= 55:
         technical_score += 1.0
+
     elif rsi <= 45:
         technical_score -= 1.0
 
     # Momentum 1m
     if mom1 > 15:
         technical_score += 0.75
+
     elif mom1 < -15:
         technical_score -= 0.75
 
     # Momentum 5m
     if mom5 > 30:
         technical_score += 1.0
+
     elif mom5 < -30:
         technical_score -= 1.0
 
     # Momentum 10m
     if mom10 > 50:
         technical_score += 1.0
+
     elif mom10 < -50:
         technical_score -= 1.0
 
     # Momentum 30m
     if mom30 > 80:
         technical_score += 0.75
+
     elif mom30 < -80:
         technical_score -= 0.75
 
@@ -542,6 +644,7 @@ def build_model(df, btc_price, target, time_left):
     if volume_ratio >= 1.25:
         if mom1 > 0:
             technical_score += 0.5
+
         elif mom1 < 0:
             technical_score -= 0.5
 
@@ -549,39 +652,55 @@ def build_model(df, btc_price, target, time_left):
     target_score = 0.0
 
     if target is not None:
-        distance = btc_price - target
+        distance = (
+            btc_price - target
+        )
 
         if distance > 0:
             target_score += 2.0
+
         elif distance < 0:
             target_score -= 2.0
 
-        abs_distance = abs(distance)
+        abs_distance = abs(
+            distance
+        )
 
         if time_left <= 60:
             weight = 3.0
+
         elif time_left <= 180:
             weight = 2.5
+
         elif time_left <= 300:
             weight = 2.0
+
         else:
             weight = 1.25
 
         if distance > 0:
             target_score += weight
+
         elif distance < 0:
             target_score -= weight
 
         # Close to target = reduce confidence
         if abs_distance < 15:
             target_score *= 0.55
+
         elif abs_distance < 30:
             target_score *= 0.75
 
-    score = technical_score + target_score
+    score = (
+        technical_score +
+        target_score
+    )
 
     # Estimated probabilities
-    up_probability = 50 + (score * 6.5)
+    up_probability = (
+        50 +
+        (score * 6.5)
+    )
 
     if target is not None:
         distance_boost = np.clip(
@@ -590,39 +709,67 @@ def build_model(df, btc_price, target, time_left):
             15
         )
 
-        up_probability += distance_boost
+        up_probability += (
+            distance_boost
+        )
 
     up_probability = float(
-        np.clip(up_probability, 5, 95)
+        np.clip(
+            up_probability,
+            5,
+            95
+        )
     )
 
-    down_probability = 100 - up_probability
+    down_probability = (
+        100 -
+        up_probability
+    )
 
     if score >= UP_THRESHOLD:
         signal = "UP"
+
     elif score <= DOWN_THRESHOLD:
         signal = "DOWN"
+
     else:
         signal = "WAIT"
 
-    if mom5 > 0 and mom10 > 0:
+    if (
+        mom5 > 0
+        and mom10 > 0
+    ):
         momentum_bias = "UP"
-    elif mom5 < 0 and mom10 < 0:
+
+    elif (
+        mom5 < 0
+        and mom10 < 0
+    ):
         momentum_bias = "DOWN"
+
     else:
         momentum_bias = "MIXED"
 
     # Simple projected close based on recent momentum
     projected_move = (
-        mom1 * 0.30 +
-        mom5 * 0.20 +
+        mom1 * 0.30
+        +
+        mom5 * 0.20
+        +
         mom10 * 0.10
     )
 
-    projected_close = btc_price + projected_move
+    projected_close = (
+        btc_price +
+        projected_move
+    )
 
     if target is not None:
-        projected_gap = projected_close - target
+        projected_gap = (
+            projected_close -
+            target
+        )
+
     else:
         projected_gap = 0.0
 
@@ -654,9 +801,14 @@ def build_model(df, btc_price, target, time_left):
 # =========================================================
 
 def make_chart(df, target):
-    chart = df.tail(60).copy()
+    chart = (
+        df.tail(60)
+        .copy()
+    )
 
-    chart = chart.set_index("datetime")
+    chart = chart.set_index(
+        "datetime"
+    )
 
     data = pd.DataFrame(
         {
@@ -678,36 +830,64 @@ def make_chart(df, target):
 # =========================================================
 
 def dashboard():
+
     st.markdown(
-        """
+        dedent("""
         <div class="header-box">
             <div class="header-title">
                 ⚡ MACALY + ALPHA V5
             </div>
         </div>
-        """,
+        """),
         unsafe_allow_html=True
     )
 
     try:
-        df = calculate_indicators(get_candles())
+        df = calculate_indicators(
+            get_candles()
+        )
 
-        market = get_kalshi_market()
+        market = (
+            get_kalshi_market()
+        )
 
-        target = get_target(market)
+        target = get_target(
+            market
+        )
 
-        coinbase_price = get_coinbase_live()
+        coinbase_price = (
+            get_coinbase_live()
+        )
 
-        kalshi_price = get_kalshi_live_btc(market)
+        kalshi_price = (
+            get_kalshi_live_btc(
+                market
+            )
+        )
 
         if kalshi_price is not None:
-            btc_price = kalshi_price
-            source = "KALSHI LIVE 🟢"
-        else:
-            btc_price = coinbase_price
-            source = "COINBASE LIVE 🟡"
+            btc_price = (
+                kalshi_price
+            )
 
-        time_left = seconds_remaining(market)
+            source = (
+                "KALSHI LIVE 🟢"
+            )
+
+        else:
+            btc_price = (
+                coinbase_price
+            )
+
+            source = (
+                "COINBASE LIVE 🟡"
+            )
+
+        time_left = (
+            seconds_remaining(
+                market
+            )
+        )
 
         model = build_model(
             df,
@@ -739,8 +919,12 @@ def dashboard():
                 '</div>'
             )
 
+        # =================================================
+        # MAIN SIGNAL
+        # =================================================
+
         st.markdown(
-            f"""
+            dedent(f"""
             <div class="card">
                 <div class="card-title">
                     BTC • KALSHI 15 MIN
@@ -756,27 +940,36 @@ def dashboard():
                     BTC ${btc_price:,.2f}
                 </div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
 
-        # Probability
+        # =================================================
+        # PROBABILITY
+        # =================================================
+
         st.markdown(
-            f"""
+            dedent(f"""
             <div class="card">
                 <div class="card-title">
                     PROBABILIDAD ESTIMADA
                 </div>
 
                 <div class="row">
-                    <span class="label">🚀 UP</span>
+                    <span class="label">
+                        🚀 UP
+                    </span>
+
                     <span class="prob green">
                         {model["up_probability"]:.0f}%
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">🔻 DOWN</span>
+                    <span class="label">
+                        🔻 DOWN
+                    </span>
+
                     <span class="prob red">
                         {model["down_probability"]:.0f}%
                     </span>
@@ -787,36 +980,53 @@ def dashboard():
                     No representa certeza de resultado.
                 </div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
 
         ticker = (
-            market.get("ticker", "N/A")
-            if market else "N/A"
+            market.get(
+                "ticker",
+                "N/A"
+            )
+            if market
+            else "N/A"
         )
 
         if target is not None:
-            target_text = f"${target:,.2f}"
+            target_text = (
+                f"${target:,.2f}"
+            )
 
             if model["distance"] >= 0:
                 distance_text = (
                     f'+${model["distance"]:,.2f} ARRIBA'
                 )
-                distance_class = "green"
+
+                distance_class = (
+                    "green"
+                )
+
             else:
                 distance_text = (
                     f'-${abs(model["distance"]):,.2f} ABAJO'
                 )
-                distance_class = "red"
+
+                distance_class = (
+                    "red"
+                )
 
         else:
             target_text = "N/A"
             distance_text = "N/A"
             distance_class = "yellow"
 
+        # =================================================
+        # CURRENT ROUND
+        # =================================================
+
         st.markdown(
-            f"""
+            dedent(f"""
             <div class="card">
                 <div class="card-title">
                     RONDA ACTUAL
@@ -835,64 +1045,86 @@ def dashboard():
                 </div>
 
                 <div class="row">
-                    <span class="label">Target</span>
+                    <span class="label">
+                        Target
+                    </span>
+
                     <span class="value">
                         {target_text}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">BTC referencia</span>
+                    <span class="label">
+                        BTC referencia
+                    </span>
+
                     <span class="value">
                         ${btc_price:,.2f}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Fuente BTC</span>
+                    <span class="label">
+                        Fuente BTC
+                    </span>
+
                     <span class="value">
                         {source}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Distancia</span>
+                    <span class="label">
+                        Distancia
+                    </span>
+
                     <span class="value {distance_class}">
                         {distance_text}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Tiempo restante</span>
+                    <span class="label">
+                        Tiempo restante
+                    </span>
+
                     <span class="value">
                         {format_countdown(time_left)}
                     </span>
                 </div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
 
-        # Momentum
+        # =================================================
+        # MOMENTUM
+        # =================================================
+
         def momentum_html(value):
             if value > 0:
                 return (
-                    f'<span class="green">'
+                    '<span class="green">'
                     f'▲ +${value:,.2f}'
-                    f'</span>'
+                    '</span>'
                 )
 
             if value < 0:
                 return (
-                    f'<span class="red">'
+                    '<span class="red">'
                     f'▼ -${abs(value):,.2f}'
-                    f'</span>'
+                    '</span>'
                 )
 
-            return '<span class="yellow">$0.00</span>'
+            return (
+                '<span class="yellow">'
+                '$0.00'
+                '</span>'
+            )
 
         st.markdown(
-            f"""
+            dedent(f"""
             <div class="card">
                 <div class="card-title">
                     ⚡ IMPULSO A CORTO PLAZO
@@ -901,28 +1133,40 @@ def dashboard():
                 <div class="momentum-grid">
 
                     <div class="momentum-box">
-                        <div class="small-label">1M</div>
+                        <div class="small-label">
+                            1M
+                        </div>
+
                         <div class="big-number">
                             {momentum_html(model["mom1"])}
                         </div>
                     </div>
 
                     <div class="momentum-box">
-                        <div class="small-label">5M</div>
+                        <div class="small-label">
+                            5M
+                        </div>
+
                         <div class="big-number">
                             {momentum_html(model["mom5"])}
                         </div>
                     </div>
 
                     <div class="momentum-box">
-                        <div class="small-label">10M</div>
+                        <div class="small-label">
+                            10M
+                        </div>
+
                         <div class="big-number">
                             {momentum_html(model["mom10"])}
                         </div>
                     </div>
 
                     <div class="momentum-box">
-                        <div class="small-label">30M</div>
+                        <div class="small-label">
+                            30M
+                        </div>
+
                         <div class="big-number">
                             {momentum_html(model["mom30"])}
                         </div>
@@ -931,105 +1175,144 @@ def dashboard():
                 </div>
 
                 <div class="row">
-                    <span class="label">Momentum bias</span>
+                    <span class="label">
+                        Momentum bias
+                    </span>
+
                     <span class="value">
                         {model["momentum_bias"]}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Projected close</span>
+                    <span class="label">
+                        Projected close
+                    </span>
+
                     <span class="value">
                         ${model["projected_close"]:,.2f}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Projected gap</span>
+                    <span class="label">
+                        Projected gap
+                    </span>
+
                     <span class="value">
                         ${model["projected_gap"]:,.2f}
                     </span>
                 </div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
 
-        # Indicators
+        # =================================================
+        # INDICATORS
+        # =================================================
+
         st.markdown(
-            f"""
+            dedent(f"""
             <div class="card">
                 <div class="card-title">
                     INDICADORES
                 </div>
 
                 <div class="row">
-                    <span class="label">EMA9</span>
+                    <span class="label">
+                        EMA9
+                    </span>
+
                     <span class="value">
                         ${model["ema9"]:,.2f}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">EMA21</span>
+                    <span class="label">
+                        EMA21
+                    </span>
+
                     <span class="value">
                         ${model["ema21"]:,.2f}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">VWAP</span>
+                    <span class="label">
+                        VWAP
+                    </span>
+
                     <span class="value">
                         ${model["vwap"]:,.2f}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">RSI 14</span>
+                    <span class="label">
+                        RSI 14
+                    </span>
+
                     <span class="value">
                         {model["rsi"]:.1f}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Volume ratio</span>
+                    <span class="label">
+                        Volume ratio
+                    </span>
+
                     <span class="value">
                         {model["volume_ratio"]:.2f}x
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Score técnico</span>
+                    <span class="label">
+                        Score técnico
+                    </span>
+
                     <span class="value">
                         {model["technical_score"]:+.2f}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Score target</span>
+                    <span class="label">
+                        Score target
+                    </span>
+
                     <span class="value">
                         {model["target_score"]:+.2f}
                     </span>
                 </div>
 
                 <div class="row">
-                    <span class="label">Score total</span>
+                    <span class="label">
+                        Score total
+                    </span>
+
                     <span class="value">
                         {model["score"]:+.2f}
                     </span>
                 </div>
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
 
-        # Chart
+        # =================================================
+        # CHART
+        # =================================================
+
         st.markdown(
-            """
+            dedent("""
             <div class="card-title">
                 📈 GRÁFICA BTC + INDICADORES
             </div>
-            """,
+            """),
             unsafe_allow_html=True
         )
 
