@@ -2179,130 +2179,172 @@ def profit_target_cents(entry_cents, profit_pct):
     return min(100.0, float(entry_cents) * (1.0 + pct / 100.0))
 
 
-def render_auto_trading_page():
-    st.markdown(
-        '<a href="?page=signal" target="_self" style="text-decoration:none;color:#b9c9db;font-size:14px;font-weight:800">← Señal</a>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("## AUTO TRADING")
-    st.caption("Panel separado · el cerebro v4.6.1 no se modifica")
-
-    if "kalshi_key_id" not in st.session_state:
-        st.session_state.kalshi_key_id = ""
-    if "kalshi_private_key" not in st.session_state:
-        st.session_state.kalshi_private_key = ""
-    if "kalshi_balance" not in st.session_state:
-        st.session_state.kalshi_balance = None
-
-    st.markdown("### Conexión Kalshi")
-    key_id = st.text_input("API Key ID", value=st.session_state.kalshi_key_id)
-    private_key = st.text_area(
-        "Private Key (PEM)",
-        value="",
-        height=120,
-        placeholder="Pega aquí tu private key. No se guarda en SQLite.",
-    )
-    c1, c2 = st.columns(2)
-    if c1.button("Conectar / actualizar", use_container_width=True):
-        candidate_key = key_id.strip()
-        candidate_private = private_key.strip() or st.session_state.kalshi_private_key
-        if not candidate_key or not candidate_private:
-            st.error("Falta API Key ID o Private Key.")
-        else:
-            try:
-                balance, _ = kalshi_get_balance(candidate_key, candidate_private)
-                st.session_state.kalshi_key_id = candidate_key
-                st.session_state.kalshi_private_key = candidate_private
-                st.session_state.kalshi_balance = balance
-                st.success(f"Kalshi conectado · balance disponible ${balance:,.2f}")
-            except Exception as e:
-                st.session_state.kalshi_balance = None
-                st.error("No se pudo verificar Kalshi: " + str(e))
-    if c2.button("Desconectar", use_container_width=True):
-        st.session_state.kalshi_key_id = ""
-        st.session_state.kalshi_private_key = ""
-        st.session_state.kalshi_balance = None
-        st.rerun()
-
-    bal = st.session_state.kalshi_balance
-    if bal is not None:
-        st.metric("Balance Kalshi", f"${bal:,.2f}")
-    else:
-        st.info("Conecta Kalshi para leer el balance real. Puedes configurar la simulación sin conectar.")
-
-    st.markdown("### Configuración de compra")
-    mode = st.radio("Modo", ["SIMULACIÓN", "REAL"], horizontal=True, index=0)
-    if mode == "REAL":
-        st.warning("REAL permanece bloqueado en esta fase. La simulación sí está habilitada.")
-    enabled = st.toggle("Activar Auto Trading", value=False)
-
-    default_cap = min(20.0, bal) if bal is not None else 20.0
-    capital = st.number_input("Capital máximo que puede usar ($)", min_value=1.0, value=float(max(1.0, default_cap)), step=1.0)
-    if bal is not None and capital > bal:
-        st.error(f"El capital configurado (${capital:.2f}) supera tu balance disponible (${bal:.2f}).")
-
-    min_price = st.slider("Precio mínimo de compra (¢)", 1, 99, 20)
-    max_price = st.slider("Precio máximo de compra (¢)", min_price, 99, max(min_price, 70))
-    min_conf = st.slider("Confianza mínima de la señal (%)", 50, 99, 65)
-
-    st.markdown("### Profit / salida")
-    profit_on = st.toggle("Vender automáticamente al alcanzar profit", value=True)
-    profit_pct = st.slider("Profit objetivo (%)", 1, 100, 20, disabled=not profit_on)
-    stop_on = st.toggle("Stop Loss", value=False)
-    stop_pct = st.slider("Stop Loss (%)", 1, 100, 20, disabled=not stop_on)
-    st.caption("El Profit puede configurarse de 1% a 100%. Si está OFF, no vende por objetivo de profit.")
-
-    st.markdown("### Martingala")
-    martingale_on = st.toggle("Usar martingala", value=False)
-    levels = st.slider("Niveles", 1, 12, 4, disabled=not martingale_on)
-    multiplier = st.number_input("Multiplicador", min_value=1.0, max_value=3.0, value=2.0, step=0.1, disabled=not martingale_on)
-    plan = martingale_plan(capital, levels if martingale_on else 1, multiplier if martingale_on else 1.0)
-    plan_df = pd.DataFrame({"Nivel": list(range(1, len(plan)+1)), "Monto $": plan})
-    st.dataframe(plan_df, use_container_width=True, hide_index=True)
-    if any(x < 1.0 for x in plan):
-        st.warning("Con este capital algunos niveles quedan por debajo de $1. Reduce niveles o el multiplicador para que sean utilizables.")
-
-    st.markdown("### Protecciones")
-    one_per_round = st.toggle("Máximo una compra por ronda", value=True)
-    max_trades_day = st.slider("Máximo de operaciones por día", 1, 50, 12)
-    reserve = st.number_input("Reserva que el bot no puede tocar ($)", min_value=0.0, value=0.0, step=1.0)
-
-    # Resumen persistente solo en la sesión; no contiene secretos.
-    st.session_state.auto_config = {
-        "enabled": bool(enabled),
-        "mode": mode,
-        "capital": float(capital),
-        "min_price": int(min_price),
-        "max_price": int(max_price),
-        "min_conf": int(min_conf),
-        "profit_on": bool(profit_on),
-        "profit_pct": int(profit_pct),
-        "stop_on": bool(stop_on),
-        "stop_pct": int(stop_pct),
-        "martingale_on": bool(martingale_on),
-        "levels": int(levels if martingale_on else 1),
-        "multiplier": float(multiplier if martingale_on else 1.0),
-        "one_per_round": bool(one_per_round),
-        "max_trades_day": int(max_trades_day),
-        "reserve": float(reserve),
+def _auto_default_config():
+    return {
+        "enabled": False, "mode": "SIMULACIÓN", "capital": 20.0,
+        "min_price": 20, "max_price": 70, "min_conf": 65,
+        "profit_on": True, "profit_pct": 85,
+        "stop_on": False, "stop_pct": 20,
+        "martingale_on": False, "levels": 4, "multiplier": 2.0,
+        "one_per_round": True, "max_trades_day": 12, "reserve": 0.0,
+        "level_directions": ["Seguir señal"] * 12,
     }
 
-    st.markdown("### Estado")
-    if mode == "REAL":
-        st.error("REAL BLOQUEADO · no se enviarán órdenes reales.")
-    elif enabled:
-        st.success("SIMULACIÓN ACTIVADA · no mueve dinero real.")
-    else:
-        st.info("Auto Trading apagado.")
 
-    st.markdown("### COMPRAS / ÓRDENES")
-    orders = load_auto_orders(100)
-    if orders.empty:
-        st.caption("Todavía no hay operaciones registradas.")
-    else:
-        cols = ["created_at", "ticker", "mode", "side", "level", "entry_cents", "contracts", "amount", "take_profit_pct", "take_profit_cents", "status", "pnl"]
-        st.dataframe(orders[[c for c in cols if c in orders.columns]], use_container_width=True, hide_index=True)
+def _ensure_auto_config_table():
+    con = _auto_db()
+    con.execute("""CREATE TABLE IF NOT EXISTS auto_config (
+        id INTEGER PRIMARY KEY CHECK (id=1), config_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )""")
+    con.commit(); con.close()
 
+
+def load_auto_config():
+    _ensure_auto_config_table()
+    cfg = _auto_default_config()
+    con = _auto_db()
+    row = con.execute("SELECT config_json FROM auto_config WHERE id=1").fetchone()
+    con.close()
+    if row:
+        try:
+            saved = json.loads(row[0]); cfg.update(saved)
+        except Exception:
+            pass
+    dirs = cfg.get("level_directions") or []
+    cfg["level_directions"] = (dirs + ["Seguir señal"] * 12)[:12]
+    return cfg
+
+
+def save_auto_config(cfg):
+    _ensure_auto_config_table()
+    con = _auto_db()
+    con.execute("""INSERT INTO auto_config(id, config_json, updated_at)
+        VALUES(1, ?, ?) ON CONFLICT(id) DO UPDATE SET
+        config_json=excluded.config_json, updated_at=excluded.updated_at""",
+        (json.dumps(cfg), datetime.now(timezone.utc).isoformat()))
+    con.commit(); con.close()
+
+
+def _select_value(label, options, current, key, help_text=None, disabled=False):
+    if current not in options: current = options[0]
+    return st.selectbox(label, options, index=options.index(current), key=key,
+                        help=help_text, disabled=disabled)
+
+
+def render_auto_trading_page():
+    cfg = load_auto_config()
+    st.markdown("""
+    <style>
+    .block-container{max-width:760px!important;padding:18px 22px 120px!important}
+    .auto-head{display:flex;justify-content:space-between;align-items:center;margin:4px 0 24px}
+    .auto-head h2{font-size:27px;margin:0;font-weight:900}.auto-x{font-size:38px;color:#eef2f3;text-decoration:none;line-height:1}
+    .auto-section{font-size:20px;font-weight:950;letter-spacing:1.5px;margin:28px 0 10px;border-top:1px solid #20282a;padding-top:24px}
+    .auto-note{color:#87938f;font-size:13px;font-weight:650;margin:-5px 0 14px}
+    .level-card{border:1px solid #20282a;border-radius:13px;padding:13px 16px;margin:8px 0;background:#050909}
+    .level-title{font-weight:900;font-size:16px}.level-sub{color:#85918d;font-size:13px;font-weight:700;margin-top:3px}
+    .balance-box{border:1px solid #0b693f;background:#06160f;border-radius:10px;padding:14px 16px;color:#89948f;font-weight:750;margin:14px 0}.balance-box b{color:#31d184}
+    div[data-testid="stSelectbox"] label,div[data-testid="stNumberInput"] label{font-weight:850!important;color:#eef2f3!important}
+    div[data-baseweb="select"]>div{background:#080c0c!important;border-color:#303838!important;min-height:58px;border-radius:10px!important}
+    div[data-testid="stNumberInput"] input{background:#080c0c!important;color:#eef2f3!important;min-height:54px}
+    div[data-testid="stToggle"] label{font-weight:800!important}
+    .stButton>button{min-height:52px;border-radius:26px;font-weight:900}
+    </style>
+    <div class="auto-head"><h2>Ajustes del bot</h2><a class="auto-x" href="?page=signal" target="_self">×</a></div>
+    """, unsafe_allow_html=True)
+
+    # Credentials remain session-only; never persist the private key.
+    for k,v in [("kalshi_key_id",""),("kalshi_private_key",""),("kalshi_balance",None)]:
+        if k not in st.session_state: st.session_state[k]=v
+
+    st.markdown('<div class="auto-section" style="border-top:0;padding-top:0">CONEXIÓN KALSHI</div>', unsafe_allow_html=True)
+    with st.expander("Conectar / cambiar credenciales", expanded=False):
+        key_id = st.text_input("API Key ID", value=st.session_state.kalshi_key_id)
+        private_key = st.text_area("Private Key (PEM)", value="", height=100, placeholder="No se guarda en la configuración")
+        a,b=st.columns(2)
+        if a.button("CONECTAR", use_container_width=True):
+            kid=key_id.strip(); pk=private_key.strip() or st.session_state.kalshi_private_key
+            if not kid or not pk: st.error("Falta API Key ID o Private Key.")
+            else:
+                try:
+                    balance,_=kalshi_get_balance(kid,pk)
+                    st.session_state.kalshi_key_id=kid; st.session_state.kalshi_private_key=pk; st.session_state.kalshi_balance=balance
+                    st.success(f"Conectado · ${balance:,.2f} disponibles")
+                except Exception as e: st.error("No se pudo conectar: "+str(e))
+        if b.button("DESCONECTAR", use_container_width=True):
+            st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None; st.rerun()
+
+    st.markdown('<div class="auto-section">OPERACIÓN</div>', unsafe_allow_html=True)
+    mode=_select_value("Modo",["SIMULACIÓN","REAL"],cfg["mode"],"a_mode")
+    enabled=st.toggle("Auto Trading", value=bool(cfg["enabled"]), key="a_enabled")
+    capital_opts=[5,10,15,20,25,30,40,50,75,100,150,200,300,500,1000]
+    cap_current=min(capital_opts,key=lambda x:abs(x-float(cfg["capital"])))
+    capital=float(_select_value("Capital máximo a usar ($)",capital_opts,cap_current,"a_cap"))
+    min_price=_select_value("Precio mínimo de compra",list(range(5,96,5)),int(round(cfg["min_price"]/5)*5),"a_minp")
+    max_price=_select_value("Precio máximo de compra",list(range(5,100,5)),int(round(cfg["max_price"]/5)*5),"a_maxp")
+    min_conf=_select_value("Confianza mínima de señal",list(range(50,96,5)),int(round(cfg["min_conf"]/5)*5),"a_conf")
+    st.caption("Los precios están en centavos por contrato. El bot solo entra cuando cumple todos los filtros.")
+
+    st.markdown('<div class="auto-section">FINALIZACIÓN</div>', unsafe_allow_html=True)
+    profit_on=st.toggle("Tomar profit automáticamente",value=bool(cfg["profit_on"]),key="a_profiton")
+    profit_opts=list(range(5,101,5))
+    profit_pct=_select_value("Tomar profit",profit_opts,int(round(cfg["profit_pct"]/5)*5),"a_profit",disabled=not profit_on)
+    stop_on=st.toggle("Stop Loss",value=bool(cfg["stop_on"]),key="a_stopon")
+    stop_pct=_select_value("Stop Loss",list(range(5,101,5)),int(round(cfg["stop_pct"]/5)*5),"a_stop",disabled=not stop_on)
+
+    st.markdown('<div class="auto-section">MARTINGALA</div>', unsafe_allow_html=True)
+    martingale_on=st.toggle("Martingala",value=bool(cfg["martingale_on"]),key="a_marton")
+    levels=_select_value("Máximo de niveles",list(range(1,13)),int(cfg["levels"]),"a_levels",disabled=not martingale_on)
+    multiplier=_select_value("Multiplicador",[1.25,1.5,1.75,2.0,2.25,2.5,3.0],float(cfg["multiplier"]) if float(cfg["multiplier"]) in [1.25,1.5,1.75,2.0,2.25,2.5,3.0] else 2.0,"a_mult",disabled=not martingale_on)
+    plan=martingale_plan(capital,int(levels) if martingale_on else 1,float(multiplier) if martingale_on else 1.0)
+    bal=st.session_state.kalshi_balance
+    bal_text=f"${bal:,.2f}" if bal is not None else "sin conectar"
+    st.markdown(f'<div class="balance-box">Saldo disponible: <b>{bal_text}</b> · Capital autorizado: <b>${capital:,.2f}</b></div>',unsafe_allow_html=True)
+
+    st.markdown('<div class="auto-section">ELIGE LA DIRECCIÓN</div><div class="auto-note">Configura cada nivel por separado.</div>',unsafe_allow_html=True)
+    directions=[]
+    visible_levels=int(levels) if martingale_on else 1
+    dir_options=["Seguir señal","Solo UP","Solo DOWN","Contraria a la señal","No operar"]
+    for i in range(visible_levels):
+        amount=plan[i] if i<len(plan) else 0
+        title="Entrada inicial" if i==0 else f"Martingala {i}"
+        st.markdown(f'<div class="level-card"><div class="level-title">{title}</div><div class="level-sub">Nivel {i+1} · ${amount:.2f}</div></div>',unsafe_allow_html=True)
+        cur=cfg["level_directions"][i]
+        directions.append(_select_value(f"Dirección nivel {i+1}",dir_options,cur,f"a_dir_{i}"))
+    directions += cfg["level_directions"][visible_levels:12]
+
+    st.markdown('<div class="auto-section">PROTECCIONES</div>',unsafe_allow_html=True)
+    one_per_round=st.toggle("Máximo una compra por ronda",value=bool(cfg["one_per_round"]),key="a_one")
+    max_trades_day=_select_value("Máximo de operaciones por día",[1,2,3,5,10,12,15,20,25,30,40,50],int(cfg["max_trades_day"]) if int(cfg["max_trades_day"]) in [1,2,3,5,10,12,15,20,25,30,40,50] else 12,"a_maxday")
+    reserve_opts=[0,1,2,5,10,15,20,25,50,100]
+    reserve=float(_select_value("Reserva que el bot no puede tocar ($)",reserve_opts,min(reserve_opts,key=lambda x:abs(x-float(cfg["reserve"]))),"a_reserve"))
+
+    new_cfg={"enabled":bool(enabled),"mode":mode,"capital":capital,"min_price":int(min_price),"max_price":int(max_price),"min_conf":int(min_conf),"profit_on":bool(profit_on),"profit_pct":int(profit_pct),"stop_on":bool(stop_on),"stop_pct":int(stop_pct),"martingale_on":bool(martingale_on),"levels":int(levels),"multiplier":float(multiplier),"one_per_round":bool(one_per_round),"max_trades_day":int(max_trades_day),"reserve":reserve,"level_directions":directions[:12]}
+
+    st.markdown('<div class="auto-section">GUARDAR</div>',unsafe_allow_html=True)
+    c1,c2,c3=st.columns([1.2,1,1.25])
+    if c1.button("RESTAURAR",use_container_width=True):
+        save_auto_config(_auto_default_config()); st.rerun()
+    if c2.button("CANCELAR",use_container_width=True):
+        st.query_params["page"]="signal"; st.rerun()
+    if c3.button("GUARDAR CAMBIOS",type="primary",use_container_width=True):
+        if new_cfg["min_price"]>new_cfg["max_price"]: st.error("El precio mínimo no puede ser mayor que el máximo.")
+        elif new_cfg["reserve"]>=new_cfg["capital"]: st.error("La reserva debe ser menor que el capital autorizado.")
+        elif new_cfg["mode"]=="REAL": st.error("REAL continúa bloqueado por seguridad; guarda primero en SIMULACIÓN.")
+        else:
+            save_auto_config(new_cfg); st.session_state.auto_config=new_cfg
+            st.success("Configuración guardada. Auto Trading conservará estos ajustes al salir de esta pantalla.")
+
+    st.markdown('<div class="auto-section">ESTADO</div>',unsafe_allow_html=True)
+    saved=load_auto_config()
+    if saved["enabled"]: st.success(f'Auto Trading ENCENDIDO · {saved["mode"]}')
+    else: st.info("Auto Trading apagado.")
+    st.markdown('<div class="auto-section">COMPRAS / ÓRDENES</div>',unsafe_allow_html=True)
+    orders=load_auto_orders(100)
+    if orders.empty: st.caption("Todavía no hay operaciones registradas.")
+    else:
+        cols=["created_at","ticker","mode","side","level","entry_cents","contracts","amount","take_profit_pct","take_profit_cents","status","pnl"]
+        st.dataframe(orders[[c for c in cols if c in orders.columns]],use_container_width=True,hide_index=True)
 
 def render_history_page():
     # SOLO COLOR/CONTRASTE DEL HISTORIAL. No cambia datos ni lógica.
