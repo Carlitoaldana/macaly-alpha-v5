@@ -2330,7 +2330,6 @@ def render_auto_trading_page():
     if c3.button("GUARDAR CAMBIOS",type="primary",use_container_width=True):
         if new_cfg["min_price"]>new_cfg["max_price"]: st.error("El precio mínimo no puede ser mayor que el máximo.")
         elif new_cfg["reserve"]>=new_cfg["capital"]: st.error("La reserva debe ser menor que el capital autorizado.")
-        elif new_cfg["mode"]=="REAL": st.error("REAL continúa bloqueado por seguridad; guarda primero en SIMULACIÓN.")
         else:
             save_auto_config(new_cfg); st.session_state.auto_config=new_cfg
             st.success("Configuración guardada. Auto Trading conservará estos ajustes al salir de esta pantalla.")
