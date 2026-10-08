@@ -2658,13 +2658,24 @@ def load_execution_orders(limit=100):
 def render_execution_status():
     status = current_execution_worker().snapshot()
     cfg = load_auto_config()
-    st.info(f'Auto Trading · {cfg["mode"]} · {"ENCENDIDO" if cfg["enabled"] else "APAGADO"}\n\n{status["message"]}')
-    st.caption("Entrada directa por preseñal. Los porcentajes son puntuaciones heurísticas, sin calibración estadística.")
-    if status["heartbeat"]: st.caption("Último ciclo: " + status["heartbeat"])
+    st.markdown(f'**Auto Trading · {cfg["mode"]} · {"ENCENDIDO" if cfg["enabled"] else "APAGADO"}**')
     orders = load_execution_orders(20)
     if not orders.empty:
-        cols = ["created_at", "ticker", "side", "level", "entry_cents", "contracts", "remaining", "status", "pnl", "order_id"]
-        st.dataframe(orders[[c for c in cols if c in orders]], hide_index=True, use_container_width=True)
+        latest = orders.iloc[0]
+        side = str(latest.get("side", ""))
+        trade_status = str(latest.get("status", ""))
+        st.caption(f"Última operación: {side} · {trade_status}")
+    else:
+        st.caption("Todavía no hay operaciones registradas en este modo.")
+    st.caption("Ahora: " + str(status["message"]))
+    if status["heartbeat"]:
+        st.caption("Última revisión: " + status["heartbeat"])
+    with st.expander("Ver operaciones y detalles", expanded=False):
+        st.caption("Entrada directa por preseñal. Los porcentajes son puntuaciones heurísticas, sin calibración estadística.")
+        if not orders.empty:
+            cols = ["created_at", "ticker", "side", "level", "entry_cents", "contracts", "remaining", "status", "pnl", "order_id"]
+            st.dataframe(orders[[c for c in cols if c in orders]], hide_index=True, use_container_width=True)
+
 
 def _select_value(label, options, current, key, help_text=None, disabled=False):
     if current not in options: current = options[0]
