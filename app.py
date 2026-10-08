@@ -1,4 +1,9 @@
 import streamlit as st
+# requirements.txt: streamlit>=1.40, requests>=2.31, pandas>=2.0,
+# numpy>=1.26, cryptography>=42
+# Secrets opcionales para reconectar tras reiniciar:
+# KALSHI_KEY_ID = "tu API Key ID"
+# KALSHI_PRIVATE_KEY = PEM multilinea de tu cuenta (nunca subirlo al repositorio).
 import requests
 import pandas as pd
 import numpy as np
@@ -10,6 +15,10 @@ import threading
 import time
 import base64
 import math
+import uuid
+import hashlib
+import fcntl
+from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
@@ -2055,8 +2064,8 @@ def render_live_candles(df, live_price, target, active, timeframe="1m"):
 
 # =========================================================
 # AUTO TRADING — PANEL SEPARADO (NO MODIFICA build_signal)
-# Primera fase: configuración + conexión Kalshi + simulación segura.
-# Las credenciales viven SOLO en la sesión de Streamlit y no se escriben en SQLite.
+# Configuración, conexión, simulación y ejecución REAL mediante el worker.
+# Las credenciales viven en memoria del servidor; nunca se escriben en SQLite.
 # =========================================================
 
 KALSHI_API_BASE = "https://external-api.kalshi.com"
@@ -2188,6 +2197,7 @@ def _auto_default_config():
         "martingale_on": False, "levels": 4, "multiplier": 2.0,
         "one_per_round": True, "max_trades_day": 12, "reserve": 0.0,
         "level_directions": ["Seguir señal"] * 12,
+        "entry_source": "PRESEÑAL",
     }
 
 
@@ -2225,6 +2235,357 @@ def save_auto_config(cfg):
         (json.dumps(cfg), datetime.now(timezone.utc).isoformat()))
     con.commit(); con.close()
 
+
+# =========================================================
+# EJECUCIÓN AUTÓNOMA: PRESEÑAL DIRECTA + ÓRDENES KALSHI V2
+# Uso individual: proteger el acceso al despliegue y sus ajustes.
+# Credenciales solo en memoria; al reiniciar se necesita reconectar
+# o configurar KALSHI_KEY_ID / KALSHI_PRIVATE_KEY en st.secrets.
+# =========================================================
+
+def execution_choice(sig, cfg, secs):
+    pre = build_presignal(sig, secs)
+    if cfg.get("entry_source", "PRESEÑAL") == "PRESEÑAL":
+        return pre["direction"], pre["percent"]
+    side = sig.get("candidate")
+    return side, sig.get("up_probability" if side == "UP" else "down_probability", 50)
+
+
+def v2_order_payload(ticker, direction, action, quantity, price, client_id):
+    # V2 cotiza siempre el lado YES. Compra NO = ask YES.
+    yes_price = price if direction == "UP" else 1.0 - price
+    bid = (direction == "UP") == (action == "buy")
+    if not (0 < yes_price < 1) or quantity <= 0:
+        raise ValueError("Precio o cantidad inválidos")
+    return {"ticker": ticker, "client_order_id": client_id,
+            "side": "bid" if bid else "ask", "count": f"{quantity:.2f}",
+            "price": f"{yes_price:.4f}",
+            "time_in_force": "immediate_or_cancel",
+            "self_trade_prevention_type": "taker_at_cross",
+            "reduce_only": action == "sell", "cancel_order_on_pause": True}
+
+
+class ExecutionWorker:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.key_id = ""; self.pem = ""
+        self.message = "Conecta Kalshi para operar en REAL"
+        self.heartbeat = None
+        self.balance = None
+        self.thread = threading.Thread(target=self.run, name="alpha-execution", daemon=True)
+        self.thread.start()
+
+    def connect(self, key_id, pem):
+        with self.lock:
+            if self.key_id and self.key_id != key_id:
+                raise ValueError("Desconecta la cuenta actual antes de cambiarla")
+            self.key_id, self.pem = key_id, pem
+
+    def disconnect(self):
+        with self.lock:
+            self.key_id = ""; self.pem = ""
+            self.message = "Desconectado: compras y ventas automáticas detenidas"
+
+    def scope(self, mode):
+        account = hashlib.sha256(self.key_id.encode()).hexdigest()[:20] if mode == "REAL" else "paper"
+        return mode + ":" + account
+
+    def database(self):
+        c = sqlite3.connect(AUTO_DB, timeout=15)
+        c.execute("CREATE TABLE IF NOT EXISTS execution_ledger(scope TEXT PRIMARY KEY,payload TEXT NOT NULL)")
+        return c
+
+    def read_ledger(self, scope):
+        c = self.database()
+        try:
+            row = c.execute("SELECT payload FROM execution_ledger WHERE scope=?", (scope,)).fetchone()
+            return json.loads(row[0]) if row else {"positions": [], "pending": None}
+        finally:
+            c.close()
+
+    def write_ledger(self, scope, ledger):
+        c = self.database()
+        try:
+            c.execute("INSERT INTO execution_ledger VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload",
+                      (scope, json.dumps(ledger)))
+            c.commit()
+        finally:
+            c.close()
+
+    def api(self, method, path, payload=None, params=None):
+        headers = kalshi_auth_headers(method, path, self.key_id, self.pem)
+        r = requests.request(method, KALSHI_API_BASE + path, headers=headers,
+                             json=payload, params=params, timeout=10)
+        r.raise_for_status()
+        return r.json()
+
+    def market(self, ticker):
+        r = requests.get(KALSHI_API_BASE + "/trade-api/v2/markets/" + ticker, timeout=8)
+        r.raise_for_status()
+        return r.json()["market"]
+
+    def position(self, ticker):
+        data = self.api("GET", "/trade-api/v2/portfolio/positions", params={"ticker": ticker})
+        return sum(float(p.get("position_fp", p.get("position", 0))) for p in data.get("market_positions", [])
+                   if p.get("ticker") == ticker)
+
+    def reconcile(self, intent):
+        # Nunca repetir un POST cuyo resultado sea desconocido.
+        cursor = ""
+        for _ in range(20):
+            data = self.api("GET", "/trade-api/v2/portfolio/orders",
+                            params={"ticker": intent["ticker"], "limit": 200, "cursor": cursor})
+            for order in data.get("orders", []):
+                if order.get("client_order_id") == intent["client_id"]:
+                    if order.get("status") not in ("executed", "canceled"):
+                        return None
+                    oid = order["order_id"]
+                    fills = []; fc = ""
+                    for _ in range(20):
+                        d = self.api("GET", "/trade-api/v2/portfolio/fills",
+                                     params={"order_id": oid, "limit": 200, "cursor": fc})
+                        fills += d.get("fills", [])
+                        fc = d.get("cursor", "")
+                        if not fc: break
+                    else:
+                        raise ValueError("Fills incompletos; esperando reconciliación")
+                    qty = sum(float(f.get("count_fp", f.get("count", 0))) for f in fills)
+                    expected = float(order.get("fill_count_fp", order.get("fill_count", 0)))
+                    if abs(qty - expected) > .0001: return None
+                    value = sum(float(f.get("count_fp", f.get("count", 0))) *
+                                float(f["yes_price_dollars"] if intent["direction"] == "UP" else f["no_price_dollars"])
+                                for f in fills)
+                    fees = sum(float(f.get("fee_cost", 0)) for f in fills)
+                    return {"quantity": qty, "value": value, "fees": fees, "order_id": oid}
+            cursor = data.get("cursor", "")
+            if not cursor: break
+        return None
+
+    def apply_result(self, ledger, result):
+        it = ledger["pending"]; qty = result["quantity"]
+        if qty > it["quantity"] + .0001:
+            raise ValueError("Cantidad ejecutada inesperada")
+        if qty > 0 and it["action"] == "buy":
+            ledger["positions"].append({
+                "id": it["client_id"], "created_at": it["created_at"], "ticker": it["ticker"],
+                "mode": it["mode"], "side": it["direction"], "level": it["level"],
+                "contracts": qty, "remaining": qty,
+                "entry_cents": result["value"] / qty * 100,
+                "amount": result["value"] + result["fees"], "proceeds": 0.0,
+                "take_profit_pct": it["cfg"]["profit_pct"],
+                "take_profit_cents": profit_target_cents(result["value"]/qty*100, it["cfg"]["profit_pct"]),
+                "stop_loss_pct": it["cfg"]["stop_pct"], "cfg": it["cfg"],
+                "status": "ABIERTA", "pnl": None, "order_id": result["order_id"],
+                "note": it.get("note", "")
+            })
+        elif qty > 0:
+            p = next(p for p in ledger["positions"] if p["id"] == it["position_id"])
+            p["remaining"] = max(0, p["remaining"] - qty)
+            p["proceeds"] += result["value"] - result["fees"]
+            if p["remaining"] < .0001:
+                p["status"] = it["reason"]; p["closed_at"] = datetime.now(timezone.utc).isoformat()
+                p["pnl"] = round(p["proceeds"] - p["amount"], 6)
+        ledger["pending"] = None
+        self.message = (f'{it["action"].upper()} {it["direction"]}: {qty:g} contratos ejecutados'
+                        if qty else "Orden sin ejecución: liquidez insuficiente; reevalúa en próximo ciclo")
+
+    def submit(self, scope, ledger, intent):
+        ledger["pending"] = intent
+        self.write_ledger(scope, ledger)  # durable antes de contactar el exchange
+        if intent["mode"] == "SIMULACIÓN":
+            result = {"quantity": intent["quantity"], "value": intent["quantity"] * intent["price"],
+                      "fees": 0, "order_id": "SIM-" + intent["client_id"]}
+        else:
+            body = v2_order_payload(intent["ticker"], intent["direction"], intent["action"],
+                                    intent["quantity"], intent["price"], intent["client_id"])
+            try:
+                d = self.api("POST", "/trade-api/v2/portfolio/events/orders", body)
+            except requests.HTTPError as e:
+                # 409/5xx son ambiguos: conservar el intento para reconciliar.
+                if e.response is not None and e.response.status_code in (400, 401, 403, 404, 422, 429):
+                    ledger["pending"] = None; self.write_ledger(scope, ledger)
+                raise
+            qty = float(d["fill_count"])
+            if qty > 0 and ("average_fill_price" not in d or "average_fee_paid" not in d):
+                result = self.reconcile(intent)
+                if result is None: return
+            else:
+                yes_price = float(d.get("average_fill_price", 0))
+                cost = yes_price if intent["direction"] == "UP" else 1 - yes_price
+                result = {"quantity": qty, "value": qty * cost,
+                          "fees": qty * float(d.get("average_fee_paid", 0)), "order_id": d["order_id"]}
+        self.apply_result(ledger, result)
+        self.write_ledger(scope, ledger)
+
+    def manage(self, scope, ledger, mode):
+        for p in ledger["positions"]:
+            if p["remaining"] <= .0001: continue
+            m = self.market(p["ticker"])
+            if m.get("status") == "settled" and m.get("result") in ("yes", "no"):
+                winner = "UP" if m["result"] == "yes" else "DOWN"
+                p["proceeds"] += p["remaining"] if p["side"] == winner else 0
+                p["remaining"] = 0; p["status"] = "LIQUIDADA"
+                p["closed_at"] = datetime.now(timezone.utc).isoformat()
+                p["pnl"] = round(p["proceeds"] - p["amount"], 6)
+                self.write_ledger(scope, ledger)
+                continue
+            if m.get("status") != "active": continue
+            bid = numeric_kalshi_price(m.get("yes_bid_dollars" if p["side"] == "UP" else "no_bid_dollars"),
+                                      m.get("yes_bid" if p["side"] == "UP" else "no_bid"))
+            if bid is None or bid <= 0: continue
+            change = (bid * 100 / p["entry_cents"] - 1) * 100
+            cfg = p["cfg"]
+            reason = "TAKE PROFIT" if cfg["profit_on"] and change >= cfg["profit_pct"] else (
+                     "STOP LOSS" if cfg["stop_on"] and change <= -cfg["stop_pct"] else None)
+            if reason:
+                if mode == "REAL":
+                    actual = self.position(p["ticker"])
+                    expected = p["remaining"] if p["side"] == "UP" else -p["remaining"]
+                    if abs(actual - expected) > .0001:
+                        raise ValueError("Posición cambió fuera del bot; revisar Kalshi antes de vender")
+                intent = {"client_id": str(uuid.uuid4()), "ticker": p["ticker"], "direction": p["side"],
+                          "action": "sell", "quantity": p["remaining"], "price": bid,
+                          "position_id": p["id"], "mode": mode, "reason": reason,
+                          "created_at": datetime.now(timezone.utc).isoformat()}
+                self.submit(scope, ledger, intent)
+                if ledger["pending"]: return
+
+    def tick(self, mode, cfg):
+        scope = self.scope(mode); ledger = self.read_ledger(scope)
+        if ledger["pending"]:
+            if mode == "REAL":
+                result = self.reconcile(ledger["pending"])
+                if result is None:
+                    self.message = "Orden pendiente de reconciliar con Kalshi; no se duplica"
+                    return
+                self.apply_result(ledger, result); self.write_ledger(scope, ledger)
+            else:
+                raise ValueError("Intento de simulación interrumpido; revisar el registro")
+        self.manage(scope, ledger, mode)
+        if ledger["pending"]: return
+        if cfg["mode"] != mode or not cfg["enabled"]:
+            self.message = "Compras apagadas; continúa gestionando posiciones existentes"
+            return
+        if any(p["remaining"] > .0001 for p in ledger["positions"]):
+            self.message = "Gestionando compra abierta: profit / stop / liquidación"
+            return
+        m = _background_get_market()
+        if not m or m.get("status") != "active": self.message = "Sin mercado activo"; return
+        secs = get_seconds_remaining(m); target = get_target_from_market(m)
+        if secs is None or secs <= 0 or target is None:
+            self.message = "Sin reloj o target válidos"; return
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            candles_job = pool.submit(_background_get_btc_data)
+            price_job = pool.submit(_background_get_live_price, m)
+            df = candles_job.result()
+            live_price = price_job.result()
+        if (datetime.now(timezone.utc) - df.iloc[-1]["time"].to_pydatetime()).total_seconds() > 120:
+            self.message = "Velas desactualizadas"; return
+        sig = build_signal(df, target, secs, live_price)
+        side, confidence = execution_choice(sig, cfg, secs)
+        if side not in ("UP", "DOWN") or confidence < cfg["min_conf"]:
+            self.message = f'Preseñal {side or "NEUTRAL"} {confidence}%: mínimo {cfg["min_conf"]}%'; return
+        positions = ledger["positions"]
+        if cfg["one_per_round"] and any(p["ticker"] == m["ticker"] for p in positions):
+            self.message = "Esta ronda ya tuvo una compra"; return
+        today = datetime.now(ZoneInfo("America/New_York")).date()
+        count = sum(datetime.fromisoformat(p["created_at"]).astimezone(ZoneInfo("America/New_York")).date() == today
+                    for p in positions)
+        if count >= cfg["max_trades_day"]: self.message = "Límite diario alcanzado"; return
+        losses = 0
+        for p in reversed(positions):
+            if p["pnl"] is not None and p["pnl"] < 0: losses += 1
+            else: break
+        levels = cfg["levels"] if cfg["martingale_on"] else 1
+        if cfg["martingale_on"] and losses >= levels:
+            self.message = "Ciclo de martingala agotado; revisar ajustes"; return
+        level = losses if cfg["martingale_on"] else 0
+        rule = cfg["level_directions"][level]
+        if rule == "No operar": self.message = "Nivel configurado: No operar"; return
+        if rule == "Solo UP": side = "UP"
+        elif rule == "Solo DOWN": side = "DOWN"
+        elif rule == "Contraria a la señal": side = "DOWN" if side == "UP" else "UP"
+        price = get_yes_ask(m) if side == "UP" else get_no_ask(m)
+        if price is None or not cfg["min_price"] <= price * 100 <= cfg["max_price"]:
+            self.message = f'{side}: precio fuera de {cfg["min_price"]}–{cfg["max_price"]}¢'; return
+        # Capital = presupuesto global: descuenta pérdidas netas y costes abiertos.
+        realized = sum(p["pnl"] or 0 for p in positions)
+        available = max(0, cfg["capital"] + min(0, realized))
+        allocation = martingale_plan(max(0, cfg["capital"] - cfg["reserve"]), levels,
+                                     cfg["multiplier"] if cfg["martingale_on"] else 1)[level]
+        budget = min(allocation, max(0, available - cfg["reserve"]))
+        if mode == "REAL":
+            bal, _ = kalshi_get_balance(self.key_id, self.pem); self.balance = bal
+            budget = min(budget, max(0, bal - cfg["reserve"]))
+            if abs(self.position(m["ticker"])) > .0001:
+                self.message = "Ya hay posición externa en esta ronda; revisar Kalshi"; return
+        # Reserva conservadora para fees (hasta 7¢ por contrato); no promete costes.
+        fee_buffer = .07 if mode == "REAL" else 0
+        qty = math.floor((budget + 1e-9) / (price + fee_buffer))
+        if qty < 1: self.message = "Presupuesto insuficiente para 1 contrato y comisiones"; return
+        intent = {"client_id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
+                  "ticker": m["ticker"], "direction": side, "action": "buy", "quantity": qty,
+                  "price": price, "level": level + 1, "mode": mode, "cfg": cfg,
+                  "note": f'{cfg.get("entry_source","PRESEÑAL")} {confidence}% · sin esperar confirmación principal'}
+        self.submit(scope, ledger, intent)
+
+    def run(self):
+        # Exclusión entre procesos sobre la misma carpeta / SQLite.
+        with open(AUTO_DB + ".worker.lock", "a") as handle:
+            try: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self.message = "Otro proceso está gestionando este bot"; return
+            while True:
+                with self.lock:
+                    try:
+                        cfg = load_auto_config()
+                        modes = ["SIMULACIÓN"]
+                        if self.key_id and self.pem: modes.append("REAL")
+                        for mode in modes:
+                            self.tick(mode, cfg)
+                        if cfg["mode"] == "REAL" and cfg["enabled"] and not self.key_id:
+                            self.message = "REAL activado: falta conectar Kalshi"
+                    except Exception as e:
+                        self.message = "No se ejecutó otra orden: " + str(e)[:240]
+                    self.heartbeat = datetime.now(timezone.utc).isoformat()
+                time.sleep(2)
+
+    def snapshot(self):
+        # Lectura sin bloquear la UI durante solicitudes de red.
+        return {"message": self.message, "heartbeat": self.heartbeat, "connected": bool(self.key_id),
+                "balance": self.balance}
+
+@st.cache_resource
+def execution_worker():
+    return ExecutionWorker()
+
+
+def load_execution_orders(limit=100):
+    worker = execution_worker()
+    mode = load_auto_config()["mode"]
+    ledger = worker.read_ledger(worker.scope(mode))
+    rows = []
+    for p in reversed(ledger["positions"][-limit:]):
+        rows.append({k: v for k, v in p.items() if k != "cfg"})
+    if ledger["pending"]:
+        it = ledger["pending"]
+        rows.insert(0, {"created_at": it["created_at"], "ticker": it["ticker"],
+                        "mode": it["mode"], "side": it["direction"],
+                        "status": "RECONCILIANDO", "order_id": it["client_id"]})
+    return pd.DataFrame(rows)
+
+
+@st.fragment(run_every="2s")
+def render_execution_status():
+    status = execution_worker().snapshot()
+    cfg = load_auto_config()
+    st.info(f'Auto Trading · {cfg["mode"]} · {"ENCENDIDO" if cfg["enabled"] else "APAGADO"}\n\n{status["message"]}')
+    st.caption("Entrada directa por preseñal. Los porcentajes son puntuaciones heurísticas, sin calibración estadística.")
+    if status["heartbeat"]: st.caption("Último ciclo: " + status["heartbeat"])
+    orders = load_execution_orders(20)
+    if not orders.empty:
+        cols = ["created_at", "ticker", "side", "level", "entry_cents", "contracts", "remaining", "status", "pnl", "order_id"]
+        st.dataframe(orders[[c for c in cols if c in orders]], hide_index=True, use_container_width=True)
 
 def _select_value(label, options, current, key, help_text=None, disabled=False):
     if current not in options: current = options[0]
@@ -2268,14 +2629,18 @@ def render_auto_trading_page():
             else:
                 try:
                     balance,_=kalshi_get_balance(kid,pk)
+                    execution_worker().connect(kid, pk)
                     st.session_state.kalshi_key_id=kid; st.session_state.kalshi_private_key=pk; st.session_state.kalshi_balance=balance
                     st.success(f"Conectado · ${balance:,.2f} disponibles")
                 except Exception as e: st.error("No se pudo conectar: "+str(e))
         if b.button("DESCONECTAR", use_container_width=True):
+            execution_worker().disconnect()
             st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None; st.rerun()
 
     st.markdown('<div class="auto-section">OPERACIÓN</div>', unsafe_allow_html=True)
     mode=_select_value("Modo",["SIMULACIÓN","REAL"],cfg["mode"],"a_mode")
+    entry_source=_select_value("Entrar usando",["PRESEÑAL","SEÑAL PRINCIPAL"],cfg.get("entry_source","PRESEÑAL"),"a_source")
+    st.caption("PRESEÑAL compra sin esperar confirmación principal. Se mantienen precio, presupuesto y límite diario.")
     enabled=st.toggle("Auto Trading", value=bool(cfg["enabled"]), key="a_enabled")
     capital_opts=[5,10,15,20,25,30,40,50,75,100,150,200,300,500,1000]
     cap_current=min(capital_opts,key=lambda x:abs(x-float(cfg["capital"])))
@@ -2284,6 +2649,7 @@ def render_auto_trading_page():
     max_price=_select_value("Precio máximo de compra",list(range(5,100,5)),int(round(cfg["max_price"]/5)*5),"a_maxp")
     min_conf=_select_value("Confianza mínima de señal",list(range(50,96,5)),int(round(cfg["min_conf"]/5)*5),"a_conf")
     st.caption("Los precios están en centavos por contrato. El bot solo entra cuando cumple todos los filtros.")
+    st.caption("Sigue operando al cerrar esta pantalla mientras el servidor esté encendido. Si Streamlit suspende o reinicia el servidor, necesita reconectar; configura Secrets para reconectar automáticamente.")
 
     st.markdown('<div class="auto-section">FINALIZACIÓN</div>', unsafe_allow_html=True)
     profit_on=st.toggle("Tomar profit automáticamente",value=bool(cfg["profit_on"]),key="a_profiton")
@@ -2296,7 +2662,7 @@ def render_auto_trading_page():
     martingale_on=st.toggle("Martingala",value=bool(cfg["martingale_on"]),key="a_marton")
     levels=_select_value("Máximo de niveles",list(range(1,13)),int(cfg["levels"]),"a_levels",disabled=not martingale_on)
     multiplier=_select_value("Multiplicador",[1.25,1.5,1.75,2.0,2.25,2.5,3.0],float(cfg["multiplier"]) if float(cfg["multiplier"]) in [1.25,1.5,1.75,2.0,2.25,2.5,3.0] else 2.0,"a_mult",disabled=not martingale_on)
-    plan=martingale_plan(capital,int(levels) if martingale_on else 1,float(multiplier) if martingale_on else 1.0)
+    plan=martingale_plan(max(0,capital-float(cfg["reserve"])),int(levels) if martingale_on else 1,float(multiplier) if martingale_on else 1.0)
     bal=st.session_state.kalshi_balance
     bal_text=f"${bal:,.2f}" if bal is not None else "sin conectar"
     st.markdown(f'<div class="balance-box">Saldo disponible: <b>{bal_text}</b> · Capital autorizado: <b>${capital:,.2f}</b></div>',unsafe_allow_html=True)
@@ -2322,6 +2688,7 @@ def render_auto_trading_page():
     new_cfg={"enabled":bool(enabled),"mode":mode,"capital":capital,"min_price":int(min_price),"max_price":int(max_price),"min_conf":int(min_conf),"profit_on":bool(profit_on),"profit_pct":int(profit_pct),"stop_on":bool(stop_on),"stop_pct":int(stop_pct),"martingale_on":bool(martingale_on),"levels":int(levels),"multiplier":float(multiplier),"one_per_round":bool(one_per_round),"max_trades_day":int(max_trades_day),"reserve":reserve,"level_directions":directions[:12]}
 
     st.markdown('<div class="auto-section">GUARDAR</div>',unsafe_allow_html=True)
+    new_cfg["entry_source"] = entry_source
     c1,c2,c3=st.columns([1.2,1,1.25])
     if c1.button("RESTAURAR",use_container_width=True):
         save_auto_config(_auto_default_config()); st.rerun()
@@ -2339,7 +2706,8 @@ def render_auto_trading_page():
     if saved["enabled"]: st.success(f'Auto Trading ENCENDIDO · {saved["mode"]}')
     else: st.info("Auto Trading apagado.")
     st.markdown('<div class="auto-section">COMPRAS / ÓRDENES</div>',unsafe_allow_html=True)
-    orders=load_auto_orders(100)
+    render_execution_status()
+    orders=load_execution_orders(100)
     if orders.empty: st.caption("Todavía no hay operaciones registradas.")
     else:
         cols=["created_at","ticker","mode","side","level","entry_cents","contracts","amount","take_profit_pct","take_profit_cents","status","pnl"]
@@ -2745,6 +3113,16 @@ def live_dashboard():
     )
 
 
+# Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
+worker = execution_worker()
+try:
+    secret_id = st.secrets.get("KALSHI_KEY_ID", "")
+    secret_pem = st.secrets.get("KALSHI_PRIVATE_KEY", "")
+    if secret_id and secret_pem and not worker.key_id:
+        worker.connect(str(secret_id), str(secret_pem))
+except FileNotFoundError:
+    pass
+
 # Inicia una sola vez el registrador autónomo de 12 horas.
 start_12h_history_worker()
 
@@ -2754,4 +3132,5 @@ if page == "settings":
 elif page == "auto":
     render_auto_trading_page()
 else:
+    render_execution_status()
     live_dashboard()
