@@ -2611,8 +2611,21 @@ def execution_worker():
     return ExecutionWorker()
 
 
-def load_execution_orders(limit=100):
+def current_execution_worker():
+    # Streamlit may retain an instance of the previous class after a source edit.
+    # Upgrade that same instance under its existing lock. Do not create a second
+    # trading thread, clear credentials, or discard the ledger.
     worker = execution_worker()
+    with worker.lock:
+        if worker.__class__ is not ExecutionWorker:
+            worker.__class__ = ExecutionWorker
+        if not hasattr(worker, "status_by_mode"):
+            worker.status_by_mode = {}
+    return worker
+
+
+def load_execution_orders(limit=100):
+    worker = current_execution_worker()
     mode = load_auto_config()["mode"]
     ledger = worker.read_ledger(worker.scope(mode))
     rows = []
@@ -2628,7 +2641,7 @@ def load_execution_orders(limit=100):
 
 @st.fragment(run_every="2s")
 def render_execution_status():
-    status = execution_worker().snapshot()
+    status = current_execution_worker().snapshot()
     cfg = load_auto_config()
     st.info(f'Auto Trading · {cfg["mode"]} · {"ENCENDIDO" if cfg["enabled"] else "APAGADO"}\n\n{status["message"]}')
     st.caption("Entrada directa por preseñal. Los porcentajes son puntuaciones heurísticas, sin calibración estadística.")
@@ -2661,6 +2674,8 @@ def render_auto_trading_page():
     div[data-testid="stNumberInput"] input{background:#080c0c!important;color:#eef2f3!important;min-height:54px}
     div[data-testid="stToggle"] label{font-weight:800!important}
     .stButton>button{min-height:52px;border-radius:26px;font-weight:900}
+    .st-key-reset_martingale_cycle button{background:#087f4f!important;color:#ffffff!important;border:2px solid #31d184!important}
+    .st-key-reset_martingale_cycle button p{color:#ffffff!important;font-weight:900!important}
     </style>
     <div class="auto-head"><h2>Ajustes del bot</h2><a class="auto-x" href="?page=signal" target="_self">×</a></div>
     """, unsafe_allow_html=True)
@@ -2680,12 +2695,12 @@ def render_auto_trading_page():
             else:
                 try:
                     balance,_=kalshi_get_balance(kid,pk)
-                    execution_worker().connect(kid, pk)
+                    current_execution_worker().connect(kid, pk)
                     st.session_state.kalshi_key_id=kid; st.session_state.kalshi_private_key=pk; st.session_state.kalshi_balance=balance
                     st.success(f"Conectado · ${balance:,.2f} disponibles")
                 except Exception as e: st.error("No se pudo conectar: "+str(e))
         if b.button("DESCONECTAR", use_container_width=True):
-            execution_worker().disconnect()
+            current_execution_worker().disconnect()
             st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None; st.rerun()
 
     st.markdown('<div class="auto-section">OPERACIÓN</div>', unsafe_allow_html=True)
@@ -2716,7 +2731,7 @@ def render_auto_trading_page():
     st.caption("Reinicia el contador del modo guardado al nivel 1. Conserva operaciones, pérdidas, capital y límites.")
     if st.button("REINICIAR CICLO", key="reset_martingale_cycle", use_container_width=True):
         try:
-            execution_worker().reset_cycle(cfg["mode"])
+            current_execution_worker().reset_cycle(cfg["mode"])
             st.success("Ciclo reiniciado al nivel 1. Las compras siguen sujetas a tus filtros y al capital restante.")
         except ValueError as error:
             st.error(str(error))
@@ -3172,7 +3187,7 @@ def live_dashboard():
 
 
 # Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
-worker = execution_worker()
+worker = current_execution_worker()
 if (not worker.key_id and st.session_state.get("kalshi_key_id")
         and st.session_state.get("kalshi_private_key")):
     worker.connect(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
