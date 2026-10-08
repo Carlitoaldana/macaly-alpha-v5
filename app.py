@@ -2483,6 +2483,21 @@ class ExecutionWorker:
                 if ledger["pending"]: return
 
     def tick(self, mode, cfg):
+        # A running thread keeps its original run() code after an in-place
+        # class upgrade. Publish here as well so even that legacy loop supplies
+        # a fresh, mode-specific status on every completed evaluation.
+        try:
+            return self._tick(mode, cfg)
+        except Exception as error:
+            self.message = "No se ejecutó otra orden: " + str(error)[:240]
+            raise
+        finally:
+            self.status_by_mode[mode] = {
+                "message": self.message,
+                "heartbeat": datetime.now(timezone.utc).isoformat(),
+            }
+
+    def _tick(self, mode, cfg):
         scope = self.scope(mode); ledger = self.read_ledger(scope)
         if ledger["pending"]:
             if mode == "REAL":
