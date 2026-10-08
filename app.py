@@ -2270,6 +2270,7 @@ class ExecutionWorker:
         self.lock = threading.RLock()
         self.key_id = ""; self.pem = ""
         self.message = "Conecta Kalshi para operar en REAL"
+        self.status_by_mode = {}
         self.heartbeat = None
         self.balance = None
         self.thread = threading.Thread(target=self.run, name="alpha-execution", daemon=True)
@@ -2280,11 +2281,14 @@ class ExecutionWorker:
             if self.key_id and self.key_id != key_id:
                 raise ValueError("Desconecta la cuenta actual antes de cambiarla")
             self.key_id, self.pem = key_id, pem
+            self.status_by_mode["REAL"] = {"message": "Kalshi conectado; preparando próximo ciclo",
+                                          "heartbeat": None}
 
     def disconnect(self):
         with self.lock:
             self.key_id = ""; self.pem = ""
             self.message = "Desconectado: compras y ventas automáticas detenidas"
+            self.status_by_mode["REAL"] = {"message": self.message, "heartbeat": None}
 
     def scope(self, mode):
         account = hashlib.sha256(self.key_id.encode()).hexdigest()[:20] if mode == "REAL" else "paper"
@@ -2311,6 +2315,34 @@ class ExecutionWorker:
             c.commit()
         finally:
             c.close()
+
+    def loss_streak(self, ledger):
+        start = max(0, int(ledger.get("cycle_start", 0)))
+        losses = 0
+        for p in reversed(ledger["positions"][start:]):
+            if p["pnl"] is not None and p["pnl"] < 0:
+                losses += 1
+            else:
+                break
+        return losses
+
+    def reset_cycle(self, mode):
+        with self.lock:
+            if mode == "REAL" and not (self.key_id and self.pem):
+                raise ValueError("Conecta la misma cuenta Kalshi antes de reiniciar su ciclo.")
+            scope = self.scope(mode)
+            ledger = self.read_ledger(scope)
+            if ledger.get("pending"):
+                raise ValueError("Hay una orden pendiente de reconciliar; el ciclo todavía no se puede reiniciar.")
+            if any(p["remaining"] > .0001 for p in ledger["positions"]):
+                raise ValueError("Hay una posición abierta; espera su cierre antes de reiniciar el ciclo.")
+            ledger["cycle_start"] = len(ledger["positions"])
+            ledger.setdefault("cycle_resets", []).append(datetime.now(timezone.utc).isoformat())
+            self.write_ledger(scope, ledger)
+            self.status_by_mode[mode] = {
+                "message": "Ciclo reiniciado al nivel 1; conserva pérdidas y límites",
+                "heartbeat": datetime.now(timezone.utc).isoformat(),
+            }
 
     def api(self, method, path, payload=None, params=None):
         headers = kalshi_auth_headers(method, path, self.key_id, self.pem)
@@ -2469,6 +2501,11 @@ class ExecutionWorker:
         if any(p["remaining"] > .0001 for p in ledger["positions"]):
             self.message = "Gestionando compra abierta: profit / stop / liquidación"
             return
+        losses = self.loss_streak(ledger)
+        levels = cfg["levels"] if cfg["martingale_on"] else 1
+        if cfg["martingale_on"] and losses >= levels:
+            self.message = "Ciclo de martingala agotado; usa REINICIAR CICLO en Auto Trading"
+            return
         m = _background_get_market()
         if not m or m.get("status") != "active": self.message = "Sin mercado activo"; return
         secs = get_seconds_remaining(m); target = get_target_from_market(m)
@@ -2492,13 +2529,6 @@ class ExecutionWorker:
         count = sum(datetime.fromisoformat(p["created_at"]).astimezone(ZoneInfo("America/New_York")).date() == today
                     for p in positions)
         if count >= cfg["max_trades_day"]: self.message = "Límite diario alcanzado"; return
-        losses = 0
-        for p in reversed(positions):
-            if p["pnl"] is not None and p["pnl"] < 0: losses += 1
-            else: break
-        levels = cfg["levels"] if cfg["martingale_on"] else 1
-        if cfg["martingale_on"] and losses >= levels:
-            self.message = "Ciclo de martingala agotado; revisar ajustes"; return
         level = losses if cfg["martingale_on"] else 0
         rule = cfg["level_directions"][level]
         if rule == "No operar": self.message = "Nivel configurado: No operar"; return
@@ -2534,7 +2564,10 @@ class ExecutionWorker:
         with open(AUTO_DB + ".worker.lock", "a") as handle:
             try: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
-                self.message = "Otro proceso está gestionando este bot"; return
+                self.message = "Otro proceso está gestionando este bot"
+                self.status_by_mode = {m: {"message": self.message, "heartbeat": None}
+                                       for m in ("REAL", "SIMULACIÓN")}
+                return
             while True:
                 with self.lock:
                     try:
@@ -2542,17 +2575,35 @@ class ExecutionWorker:
                         modes = ["SIMULACIÓN"]
                         if self.key_id and self.pem: modes.append("REAL")
                         for mode in modes:
-                            self.tick(mode, cfg)
+                            self.message = "Procesando ciclo"
+                            try:
+                                self.tick(mode, cfg)
+                            except Exception as e:
+                                self.message = "No se ejecutó otra orden: " + str(e)[:240]
+                            # Publica solo ciclos terminados; SIMULACIÓN no altera el estado de REAL.
+                            self.status_by_mode[mode] = {
+                                "message": self.message,
+                                "heartbeat": datetime.now(timezone.utc).isoformat(),
+                            }
                         if cfg["mode"] == "REAL" and cfg["enabled"] and not self.key_id:
                             self.message = "REAL activado: falta conectar Kalshi"
+                            self.status_by_mode["REAL"] = {"message": self.message,
+                                "heartbeat": datetime.now(timezone.utc).isoformat()}
                     except Exception as e:
                         self.message = "No se ejecutó otra orden: " + str(e)[:240]
+                        self.status_by_mode = {m: {
+                            "message": self.message, "heartbeat": datetime.now(timezone.utc).isoformat()}
+                            for m in ("REAL", "SIMULACIÓN")}
                     self.heartbeat = datetime.now(timezone.utc).isoformat()
                 time.sleep(2)
 
     def snapshot(self):
         # Lectura sin bloquear la UI durante solicitudes de red.
-        return {"message": self.message, "heartbeat": self.heartbeat, "connected": bool(self.key_id),
+        mode = load_auto_config()["mode"]
+        status = self.status_by_mode.get(mode, {
+            "message": "Conecta Kalshi para operar en REAL" if mode == "REAL" and not self.key_id
+                       else "Preparando primer ciclo", "heartbeat": None})
+        return {"message": status["message"], "heartbeat": status["heartbeat"], "connected": bool(self.key_id),
                 "balance": self.balance}
 
 @st.cache_resource
@@ -2662,6 +2713,13 @@ def render_auto_trading_page():
     martingale_on=st.toggle("Martingala",value=bool(cfg["martingale_on"]),key="a_marton")
     levels=_select_value("Máximo de niveles",list(range(1,13)),int(cfg["levels"]),"a_levels",disabled=not martingale_on)
     multiplier=_select_value("Multiplicador",[1.25,1.5,1.75,2.0,2.25,2.5,3.0],float(cfg["multiplier"]) if float(cfg["multiplier"]) in [1.25,1.5,1.75,2.0,2.25,2.5,3.0] else 2.0,"a_mult",disabled=not martingale_on)
+    st.caption("Reinicia el contador del modo guardado al nivel 1. Conserva operaciones, pérdidas, capital y límites.")
+    if st.button("REINICIAR CICLO", key="reset_martingale_cycle", use_container_width=True):
+        try:
+            execution_worker().reset_cycle(cfg["mode"])
+            st.success("Ciclo reiniciado al nivel 1. Las compras siguen sujetas a tus filtros y al capital restante.")
+        except ValueError as error:
+            st.error(str(error))
     plan=martingale_plan(max(0,capital-float(cfg["reserve"])),int(levels) if martingale_on else 1,float(multiplier) if martingale_on else 1.0)
     bal=st.session_state.kalshi_balance
     bal_text=f"${bal:,.2f}" if bal is not None else "sin conectar"
@@ -3115,6 +3173,9 @@ def live_dashboard():
 
 # Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
 worker = execution_worker()
+if (not worker.key_id and st.session_state.get("kalshi_key_id")
+        and st.session_state.get("kalshi_private_key")):
+    worker.connect(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
 try:
     secret_id = st.secrets.get("KALSHI_KEY_ID", "")
     secret_pem = st.secrets.get("KALSHI_PRIVATE_KEY", "")
