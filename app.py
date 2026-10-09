@@ -1151,7 +1151,9 @@ def _indicator_frame(df):
     delta = close.diff(); gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
     ag = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     al = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    x["rsi"] = (100-(100/(1+(ag/al.replace(0,np.nan))))).fillna(50)
+    rsi = 100-(100/(1+(ag/al.replace(0,np.nan))))
+    rsi = rsi.mask((al == 0) & (ag > 0), 100).mask((ag == 0) & (al > 0), 0)
+    x["rsi"] = rsi.fillna(50)
     e12=close.ewm(span=12,adjust=False).mean(); e26=close.ewm(span=26,adjust=False).mean()
     x["macd"]=e12-e26; x["macd_signal"]=x["macd"].ewm(span=9,adjust=False).mean(); x["macd_hist"]=x["macd"]-x["macd_signal"]
     prev=close.shift(1); tr=pd.concat([(high-low),(high-prev).abs(),(low-prev).abs()],axis=1).max(axis=1)
@@ -1424,6 +1426,16 @@ def build_presignal(sig, seconds_left):
         return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear}
 
     direction = "UP" if edge > 0 else "DOWN"
+    # La inercia de indicadores no basta para emitir una preseñal operable.
+    # La misma regla se aplica en la pantalla y en el ejecutor autónomo.
+    recent = sig.get("recent_moves")
+    if not recent or not recent.get("ready"):
+        return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear,
+                "reason": (recent or {}).get("reason", "Reuniendo precios de esta ronda")}
+    sign = 1 if direction == "UP" else -1
+    if any(sign * delta < recent["minimum"] for delta in recent["deltas"]):
+        return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear,
+                "reason":"Indicadores e impulso de 5/10/30 s no coinciden; sin entrada"}
     dominant = max(bull, bear)
     share = dominant / total if total else 0.5
 
@@ -1610,7 +1622,7 @@ def _background_get_market():
     markets.sort(key=lambda m: str(m.get("close_time") or "9999"))
     return markets[0]
 
-def _background_get_live_price(market):
+def _background_get_live_price(market, with_source=False):
     try:
         event_ticker = get_event_ticker_from_market(market)
         if event_ticker:
@@ -1623,7 +1635,7 @@ def _background_get_live_price(market):
             response.raise_for_status()
             price = extract_kalshi_btc_price(response.json())
             if price is not None:
-                return float(price)
+                return (float(price), "KALSHI") if with_source else float(price)
     except Exception:
         pass
     response = requests.get(
@@ -1636,7 +1648,7 @@ def _background_get_live_price(market):
     price = response.json().get("price")
     if price in (None, ""):
         raise ValueError("Sin precio BTC live.")
-    return float(price)
+    return (float(price), "COINBASE") if with_source else float(price)
 
 def _background_update_state(state, sig, market, seconds_left):
     now = datetime.now(timezone.utc)
@@ -2197,7 +2209,7 @@ def _auto_default_config():
         "martingale_on": False, "levels": 4, "multiplier": 2.0,
         "one_per_round": True, "max_trades_day": 12, "reserve": 0.0,
         "level_directions": ["Seguir señal"] * 12,
-        "entry_source": "PRESEÑAL",
+        "entry_source": "SEÑAL PRINCIPAL",
     }
 
 
@@ -2221,6 +2233,7 @@ def load_auto_config():
             saved = json.loads(row[0]); cfg.update(saved)
         except Exception:
             pass
+    cfg["entry_source"] = "SEÑAL PRINCIPAL"
     dirs = cfg.get("level_directions") or []
     cfg["level_directions"] = (dirs + ["Seguir señal"] * 12)[:12]
     return cfg
@@ -2244,11 +2257,42 @@ def save_auto_config(cfg):
 # =========================================================
 
 def execution_choice(sig, cfg, secs):
-    pre = build_presignal(sig, secs)
-    if cfg.get("entry_source", "PRESEÑAL") == "PRESEÑAL":
-        return pre["direction"], pre["percent"]
+    # La decisión automática pertenece únicamente al motor principal.
     side = sig.get("candidate")
     return side, sig.get("up_probability" if side == "UP" else "down_probability", 50)
+
+
+def refine_main_signal(sig):
+    """Integra impulso actual sin espera fija ni disparador en dólares.
+
+    Los porcentajes son puntuaciones heurísticas, no probabilidades calibradas.
+    Sin cinta suficiente se conserva la lectura técnica de las velas.
+    """
+    recent = sig.get("recent_moves") or {}
+    if not recent.get("ready"):
+        return sig
+    deltas = recent["deltas"]
+    threshold = recent["minimum"]
+    side = "UP" if all(d > threshold for d in deltas) else "DOWN" if all(d < -threshold for d in deltas) else None
+    if side is None:
+        sig["candidate"] = None
+        sig["quality"] = "IMPULSO MIXTO O PLANO"
+        return sig
+    sign = 1 if side == "UP" else -1
+    # El impulso por sí solo no basta: exige apoyo del momentum de velas.
+    momentum = sig.get("mom3", 0)
+    if sign * momentum <= 0:
+        sig["candidate"] = None
+        sig["quality"] = "CAMBIO DE IMPULSO SIN APOYO DE VELAS"
+        return sig
+    sig["candidate"] = side
+    sig["quality"] = "TEMPRANA · IMPULSO ACTUAL"
+    # Limita la contribución lenta para que no decida contra el impulso actual.
+    evidence = float(np.clip(sig.get("technical_score", 0), -2, 2)) + sign * 3
+    sig["technical_score"] = sig["final_score"] = evidence
+    sig["up_probability"] = round(float(np.clip(50 + evidence * 7, 5, 95)))
+    sig["down_probability"] = 100 - sig["up_probability"]
+    return sig
 
 
 def v2_order_payload(ticker, direction, action, quantity, price, client_id):
@@ -2265,6 +2309,85 @@ def v2_order_payload(ticker, direction, action, quantity, price, client_id):
             "reduce_only": action == "sell", "cancel_order_on_pause": True}
 
 
+class RecentEntryConfirmation:
+    """Filtro de entrada, no estimador de probabilidad ni señal de salida.
+
+    Exige cinta continua de 30s, movimiento coincidente en 5/10/30s y
+    coincidencia sostenida 10s. Umbrales iniciales sin calibración histórica.
+    """
+    def __init__(self):
+        self.key = None
+        self.samples = []
+        self.candidate = None
+        self.since = None
+
+    def reset_candidate(self):
+        self.candidate = None
+        self.since = None
+
+    def observe(self, ticker, source, price, now):
+        key = (ticker, source)
+        if not math.isfinite(price) or price <= 0:
+            self.samples = []
+            self.reset_candidate()
+            return
+        if key != self.key or (self.samples and
+                (now <= self.samples[-1][0] or now - self.samples[-1][0] > 12)):
+            self.key = key
+            self.samples = []
+            self.reset_candidate()
+        self.samples.append((now, price))
+        self.samples = [(t, p) for t, p in self.samples if now - t <= 50]
+
+    def check(self, side, atr, now):
+        if side not in ("UP", "DOWN"):
+            self.reset_candidate()
+            return False, "Preseñal sin dirección suficiente"
+        if not self.samples or now - self.samples[-1][0] > 6:
+            self.reset_candidate()
+            return False, "Esperando precios recientes"
+        deltas = []
+        for seconds in (5, 10, 30):
+            ref = next(((t, p) for t, p in reversed(self.samples)
+                        if t <= now - seconds), None)
+            if ref is None or now - seconds - ref[0] > 6:
+                self.reset_candidate()
+                return False, "Reuniendo 30 s de precios para confirmar entrada temprana"
+            deltas.append(self.samples[-1][1] - ref[1])
+        # Descarta movimiento plano; no exige estar ya del lado del target.
+        atr = float(atr)
+        if not math.isfinite(atr) or atr <= 0:
+            self.reset_candidate()
+            return False, "Volatilidad inválida; esperando datos"
+        minimum = max(0.50, atr * 0.01)
+        sign = 1 if side == "UP" else -1
+        detail = "/".join(f"{d:+.2f}" for d in deltas)
+        if any(sign * d < minimum for d in deltas):
+            self.reset_candidate()
+            return False, f"Esperando impulso {side}: 5/10/30 s {detail} USD"
+        if self.candidate != side:
+            self.candidate, self.since = side, now
+        elapsed = now - self.since
+        if elapsed < 10:
+            return False, f"Confirmando impulso {side}: {elapsed:.0f}/10 s"
+        return True, f"Impulso {side} confirmado · 5/10/30 s {detail} USD"
+
+    def movement(self, atr, now):
+        # Lectura pura: no avanza ni autoriza el temporizador de compras.
+        if not self.samples or now - self.samples[-1][0] > 6:
+            return {"ready":False, "reason":"Esperando precios recientes"}
+        deltas = []
+        for seconds in (5, 10, 30):
+            ref = next(((t, p) for t, p in reversed(self.samples)
+                        if t <= now - seconds), None)
+            if ref is None or now - seconds - ref[0] > 6:
+                return {"ready":False, "reason":"Reuniendo 30 s de precios de esta ronda"}
+            deltas.append(self.samples[-1][1] - ref[1])
+        if not math.isfinite(float(atr)) or float(atr) <= 0:
+            return {"ready":False, "reason":"Esperando volatilidad válida"}
+        return {"ready":True, "deltas":deltas, "minimum":max(0.50, float(atr)*0.01)}
+
+
 class ExecutionWorker:
     def __init__(self):
         self.lock = threading.RLock()
@@ -2273,6 +2396,7 @@ class ExecutionWorker:
         self.status_by_mode = {}
         self.heartbeat = None
         self.balance = None
+        self.entry_gates = {}
         self.thread = threading.Thread(target=self.run, name="alpha-execution", daemon=True)
         self.thread.start()
 
@@ -2519,6 +2643,8 @@ class ExecutionWorker:
         try:
             return self._tick(mode, cfg)
         except Exception as error:
+            if mode in self.entry_gates:
+                self.entry_gates[mode].reset_candidate()
             self.message = "No se ejecutó otra orden: " + str(error)[:240]
             raise
         finally:
@@ -2564,15 +2690,22 @@ class ExecutionWorker:
             self.message = "Sin reloj o target válidos"; return
         with ThreadPoolExecutor(max_workers=2) as pool:
             candles_job = pool.submit(_background_get_btc_data)
-            price_job = pool.submit(_background_get_live_price, m)
+            price_job = pool.submit(_background_get_live_price, m, True)
             df = candles_job.result()
-            live_price = price_job.result()
+            live_price, live_source = price_job.result()
+        gate = self.entry_gates.setdefault(mode, RecentEntryConfirmation())
+        gate.observe(m["ticker"], live_source, float(live_price), time.monotonic())
         if (datetime.now(timezone.utc) - df.iloc[-1]["time"].to_pydatetime()).total_seconds() > 120:
+            gate.reset_candidate()
             self.message = "Velas desactualizadas"; return
         sig = build_signal(df, target, secs, live_price)
+        sig["recent_moves"] = gate.movement(sig.get("atr", 0), time.monotonic())
+        sig = refine_main_signal(sig)
         side, confidence = execution_choice(sig, cfg, secs)
         if side not in ("UP", "DOWN") or confidence < cfg["min_conf"]:
-            self.message = f'Preseñal {side or "NEUTRAL"} {confidence}%: mínimo {cfg["min_conf"]}%'; return
+            gate.reset_candidate()
+            pre_reason = sig.get("quality") if side not in ("UP", "DOWN") else None
+            self.message = pre_reason or f'Lectura {side or "NEUTRAL"} · puntuación {confidence}: mínimo {cfg["min_conf"]}'; return
         positions = ledger["positions"]
         if cfg["one_per_round"] and any(p["ticker"] == m["ticker"] for p in positions):
             self.message = "Esta ronda ya tuvo una compra"; return
@@ -2586,6 +2719,7 @@ class ExecutionWorker:
         if rule == "Solo UP": side = "UP"
         elif rule == "Solo DOWN": side = "DOWN"
         elif rule == "Contraria a la señal": side = "DOWN" if side == "UP" else "UP"
+        confirmation_note = sig.get("quality", "Entrada por motor principal")
         price = get_yes_ask(m) if side == "UP" else get_no_ask(m)
         if price is None or not cfg["min_price"] <= price * 100 <= cfg["max_price"]:
             self.message = f'{side}: precio fuera de {cfg["min_price"]}–{cfg["max_price"]}¢'; return
@@ -2607,7 +2741,7 @@ class ExecutionWorker:
         intent = {"client_id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
                   "ticker": m["ticker"], "direction": side, "action": "buy", "quantity": qty,
                   "price": price, "level": level + 1, "mode": mode, "cfg": cfg,
-                  "note": f'{cfg.get("entry_source","PRESEÑAL")} {confidence}% · sin esperar confirmación principal'}
+                  "note": f'{cfg.get("entry_source","PRESEÑAL")} puntuación {confidence} · {confirmation_note}'}
         self.submit(scope, ledger, intent)
 
     def run(self):
@@ -2672,6 +2806,8 @@ def current_execution_worker():
             worker.__class__ = ExecutionWorker
         if not hasattr(worker, "status_by_mode"):
             worker.status_by_mode = {}
+        if not hasattr(worker, "entry_gates"):
+            worker.entry_gates = {}
     return worker
 
 
@@ -2767,8 +2903,9 @@ def render_auto_trading_page():
 
     st.markdown('<div class="auto-section">OPERACIÓN</div>', unsafe_allow_html=True)
     mode=_select_value("Modo",["SIMULACIÓN","REAL"],cfg["mode"],"a_mode")
-    entry_source=_select_value("Entrar usando",["PRESEÑAL","SEÑAL PRINCIPAL"],cfg.get("entry_source","PRESEÑAL"),"a_source")
-    st.caption("PRESEÑAL compra sin esperar confirmación principal. Se mantienen precio, presupuesto y límite diario.")
+    entry_source = "SEÑAL PRINCIPAL"
+    st.caption("Entradas conectadas al motor principal · lectura temprana del impulso actual.")
+    st.caption("La preseñal es informativa. Las puntuaciones no son probabilidades comprobadas.")
     enabled=st.toggle("Auto Trading", value=bool(cfg["enabled"]), key="a_enabled")
     capital_opts=[5,10,15,20,25,30,40,50,75,100,150,200,300,500,1000]
     cap_current=min(capital_opts,key=lambda x:abs(x-float(cfg["capital"])))
@@ -2970,13 +3107,15 @@ def live_dashboard():
             "down_probability": 50,
         }
 
-    round_signal = process_round_signal(
-        ticker, sig, market, seconds_left
-    )
-
     # Cinta live de segundos para el Lector de Cierre.
     update_micro_tape(ticker, live_btc_price)
     micro = micro_reading()
+    ui_gate = st.session_state.setdefault("recent_presignal_gate_v10", RecentEntryConfirmation())
+    if live_btc_price is not None:
+        ui_gate.observe(ticker, source, float(live_btc_price), time.monotonic())
+    sig["recent_moves"] = ui_gate.movement(sig.get("atr", 0), time.monotonic())
+    sig = refine_main_signal(sig)
+    round_signal = process_round_signal(ticker, sig, market, seconds_left)
     reader = closing_reader(sig, round_signal, seconds_left, micro)
 
     # Ballenas: capa visual independiente; NO modifica señales ni probabilidades v4.6.1.
@@ -3059,10 +3198,11 @@ def live_dashboard():
         pre_label = "POSIBLE DOWN"
     else:
         pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
-        pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
+        pre_note = pre.get("reason", "Sin inclinación temprana suficiente. La preseñal sigue observando.")
         pre_label = "NEUTRAL"
 
-    pre_badge = "CONFIRMADA" if active in ("UP", "DOWN") and pre_direction == active else "NO CONFIRMADA"
+    pre_badge = "INFORMATIVA · NO EJECUTA COMPRAS"
+    pre_note += " La compra exige impulso coincidente en 5/10/30 s sostenido 10 s; este porcentaje es una puntuación, no una probabilidad comprobada."
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
       <div class="prehead"><span class="pretitle">PRESEÑAL · TENDENCIA EN FORMACIÓN</span><span class="prebadge">{pre_badge}</span></div>
