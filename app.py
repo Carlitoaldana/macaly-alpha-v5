@@ -1,9 +1,8 @@
+import io
+import os
+import tempfile
+import zipfile
 import streamlit as st
-# requirements.txt: streamlit>=1.40, requests>=2.31, pandas>=2.0,
-# numpy>=1.26, cryptography>=42
-# Secrets opcionales para reconectar tras reiniciar:
-# KALSHI_KEY_ID = "tu API Key ID"
-# KALSHI_PRIVATE_KEY = PEM multilinea de tu cuenta (nunca subirlo al repositorio).
 import requests
 import pandas as pd
 import numpy as np
@@ -24,10 +23,6 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-# =========================================================
-# MACALY + ALPHA BOT v4.6.1 • MOBILE PRO UI
-# BTC 15 MIN • SAME v4.6.1 SIGNAL ENGINE
-# =========================================================
 
 st.set_page_config(
     page_title="BTC Signal v4.6.1",
@@ -36,643 +31,149 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# =========================================================
-# CONFIGURACIÓN ORIGINAL
-# =========================================================
-
-NEW_ROUND_WAIT = 8
-NEW_ENTRY_LOCK = 75
-
-UP_THRESHOLD = 4.0
-DOWN_THRESHOLD = -4.0
-
-FLIP_UP_THRESHOLD = 4.75
-FLIP_DOWN_THRESHOLD = -4.75
-FLIP_CONFIRMATIONS = 2
-
-# =========================================================
-# DISEÑO MOBILE — BASADO EN LA REFERENCIA APROBADA
-# =========================================================
 
 st.markdown(
     """
 <style>
-#MainMenu, footer, header {visibility:hidden;}
+footer {visibility:hidden;}
+header {visibility:hidden;}
 [data-testid="stToolbar"] {display:none;}
 [data-testid="stDecoration"] {display:none;}
 [data-testid="stStatusWidget"] {display:none;}
-
-html, body, [class*="css"] {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-}
-
-.stApp {
-    background:
-      radial-gradient(circle at 50% -12%, rgba(31,65,104,.24), transparent 30%),
-      #070b11;
-    color:#f4f7fb;
-}
-
-.block-container {
-    max-width:410px !important;
-    padding:8px 10px 24px !important;
-}
-
+html {font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;}
+body {font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;}
+[class*="css"] {font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;}
+.stApp {background:radial-gradient(circle at 50% -12%, rgba(31,65,104,.24), transparent 30%),
+.block-container {max-width:365px!important;padding:3px 7px 14px!important;padding-top:3px!important;}
 div[data-testid="stVerticalBlock"] {gap:.55rem;}
-
-.topbar {
-    position:relative;
-    min-height:45px;
-    padding:3px 2px 4px;
-    text-align:center;
-}
-.brand {
-    color:#f8fafc;
-    font-size:13px;
-    line-height:1.05;
-    font-weight:950;
-    letter-spacing:.15px;
-}
-.version {
-    color:#647184;
-    font-size:7px;
-    font-weight:800;
-    margin-top:2px;
-}
-.live {
-    position:absolute;
-    right:3px;
-    top:27px;
-    display:flex;
-    align-items:center;
-    gap:5px;
-    color:#91a0b3;
-    font-size:7.5px;
-    font-weight:800;
-}
-.live-dot {
-    width:7px;
-    height:7px;
-    border-radius:50%;
-    background:#2ee67b;
-    box-shadow:0 0 10px rgba(46,230,123,.8);
-}
-
-.hero {
-    text-align:center;
-    padding:0 4px 8px;
-}
-.hero-signal {
-    font-size:58px;
-    line-height:.96;
-    font-weight:1000;
-    letter-spacing:-3px;
-    text-shadow:0 0 28px var(--glow);
-}
-.hero-wait {
-    font-size:31px;
-    line-height:1.03;
-    font-weight:1000;
-    letter-spacing:-1.2px;
-    color:#51bff3;
-    text-shadow:0 0 22px rgba(56,189,248,.20);
-}
-.confidence {
-    display:inline-block;
-    margin-top:10px;
-    padding:5px 12px;
-    border-radius:7px;
-    font-size:10px;
-    font-weight:1000;
-    letter-spacing:.4px;
-    border:1px solid var(--accent);
-    color:var(--accent);
-    background:var(--soft);
-}
-
-.two {
-    display:grid;
-    grid-template-columns:1fr 1fr;
-    gap:8px;
-    margin-top:7px;
-}
-.mini {
-    min-height:61px;
-    background:linear-gradient(180deg,#101722,#0c121b);
-    border:1px solid #1b2735;
-    border-radius:10px;
-    padding:8px 9px;
-}
-.mini-label {
-    color:#69778a;
-    font-size:8px;
-    font-weight:900;
-    letter-spacing:.8px;
-    text-transform:uppercase;
-    margin-bottom:5px;
-}
-.mini-value {
-    color:#f4f7fb;
-    font-size:18px;
-    font-weight:950;
-    letter-spacing:-.4px;
-}
-.mini-sub {
-    color:#7e8b9e;
-    font-size:9px;
-    font-weight:800;
-    margin-top:3px;
-}
-.green {color:#36e985;}
-.red {color:#ff5363;}
+.green {color:#32e981!important;}
+.red {color:#ff4c5d!important;}
 .blue {color:#54c6f5;}
 .amber {color:#f7bd4d;}
-
-.section {
-    background:linear-gradient(180deg,#0f1620,#0b1119);
-    border:1px solid #1b2735;
-    border-radius:11px;
-    padding:11px;
-    margin-top:8px;
-}
-.section-title {
-    color:#8b98aa;
-    font-size:9px;
-    font-weight:1000;
-    letter-spacing:.8px;
-    text-transform:uppercase;
-    margin-bottom:8px;
-}
-.prob-row {
-    display:flex;
-    align-items:center;
-    gap:7px;
-}
-.prob-up, .prob-down {
-    height:12px;
-    border-radius:4px;
-    min-width:2px;
-}
-.prob-up {
-    background:linear-gradient(90deg,#1bcf6a,#53ef8d);
-    box-shadow:0 0 10px rgba(46,230,123,.18);
-}
-.prob-down {
-    background:linear-gradient(90deg,#ff3d50,#ff6876);
-    box-shadow:0 0 10px rgba(255,76,91,.18);
-}
-.prob-labels {
-    display:flex;
-    justify-content:space-between;
-    margin-top:7px;
-    font-size:10px;
-    font-weight:900;
-}
-
-.close-reader {
-    border-radius:11px;
-    padding:12px;
-    margin-top:8px;
-    border:1px solid var(--reader-border);
-    background:var(--reader-bg);
-    box-shadow:inset 0 0 25px rgba(0,0,0,.10);
-}
-.reader-top {
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    color:#e9eef5;
-    font-size:9px;
-    font-weight:1000;
-    letter-spacing:.7px;
-}
-.reader-active {
-    padding:3px 7px;
-    border-radius:8px;
-    color:#57ee91;
-    border:1px solid rgba(69,231,129,.55);
-    background:rgba(28,153,78,.15);
-    font-size:8px;
-}
-.reader-main {
-    display:grid;
-    grid-template-columns:1fr 70px;
-    align-items:center;
-    gap:8px;
-    margin-top:12px;
-}
-.reader-text {
-    color:#f6f8fb;
-    font-size:15px;
-    line-height:1.15;
-    font-weight:1000;
-}
-.reader-note {
-    color:#8390a2;
-    font-size:8px;
-    line-height:1.35;
-    margin-top:6px;
-}
-.ring {
-    --p:50;
-    --ring:#36e985;
-    width:66px;
-    height:66px;
-    border-radius:50%;
-    display:grid;
-    place-items:center;
-    background:conic-gradient(var(--ring) calc(var(--p)*1%), #27313e 0);
-    position:relative;
-}
-.ring:after {
-    content:"";
-    position:absolute;
-    width:51px;
-    height:51px;
-    border-radius:50%;
-    background:#0b1119;
-}
-.ring span {
-    position:relative;
-    z-index:1;
-    color:#f7fafc;
-    font-size:15px;
-    font-weight:1000;
-}
-
-.tech-grid {
-    display:grid;
-    grid-template-columns:repeat(5,1fr);
-    gap:3px;
-    text-align:center;
-}
-.tech-label {
-    color:#637084;
-    font-size:6.5px;
-    font-weight:900;
-    letter-spacing:.25px;
-    text-transform:uppercase;
-}
-.tech-value {
-    color:#eef3f9;
-    font-size:10px;
-    font-weight:1000;
-    margin-top:5px;
-    overflow:hidden;
-    white-space:nowrap;
-}
-
-.ticker {
-    text-align:center;
-    color:#4f5c6f;
-    font-size:7.5px;
-    font-weight:800;
-    margin-top:8px;
-    overflow:hidden;
-    text-overflow:ellipsis;
-    white-space:nowrap;
-}
-
-.footer-nav {
-    display:grid;
-    grid-template-columns:repeat(4,1fr);
-    text-align:center;
-    padding:10px 2px 1px;
-    margin-top:7px;
-    border-top:1px solid #182331;
-}
-.nav-item {
-    color:#5f6c7e;
-    font-size:8px;
-    font-weight:800;
-}
-.nav-active {color:var(--accent);}
-
-.alert {
-    border-radius:10px;
-    padding:10px;
-    margin-top:8px;
-    text-align:center;
-    color:#ffd260;
-    background:rgba(116,78,7,.18);
-    border:1px solid rgba(247,189,77,.42);
-    font-size:10px;
-    font-weight:900;
-}
-
-/* ===== REFERENCE UI OVERRIDES ===== */
-.block-container{
-    max-width:390px !important;
-    padding:5px 9px 20px !important;
-}
-.topbar{
-    min-height:39px !important;
-    padding:2px 1px 3px !important;
-}
-.brand{font-size:12px !important;}
-.version{font-size:6.5px !important;color:#536174 !important;}
-.live{top:23px !important;font-size:6.8px !important;}
-
-.hero{padding:0 2px 5px !important;}
-.hero-signal{
-    font-size:55px !important;
-    line-height:.90 !important;
-    letter-spacing:-4px !important;
-}
-.confidence{
-    margin-top:8px !important;
-    padding:4px 9px !important;
-    border-radius:6px !important;
-    font-size:8px !important;
-}
-
-.two{
-    gap:6px !important;
-    margin-top:6px !important;
-}
-.mini{
-    min-height:57px !important;
-    padding:7px 8px !important;
-    border-radius:8px !important;
-    background:#0d141d !important;
-    border-color:#172230 !important;
-}
-.mini-label{font-size:6.8px !important;margin-bottom:3px !important;}
-.mini-value{font-size:15px !important;line-height:1.05 !important;}
-.mini-sub{font-size:6.8px !important;margin-top:2px !important;}
-
-.section{
-    padding:8px !important;
-    margin-top:6px !important;
-    border-radius:8px !important;
-    background:#0c131c !important;
-    border-color:#172230 !important;
-}
-.section-title{
-    font-size:7px !important;
-    margin-bottom:6px !important;
-}
-.prob-row{gap:5px !important;}
-.prob-up,.prob-down{height:15px !important;border-radius:3px !important;}
-.prob-labels{margin-top:5px !important;font-size:7.5px !important;}
-
-.close-reader{
-    padding:9px !important;
-    margin-top:6px !important;
-    border-radius:8px !important;
-}
-.reader-top{font-size:7px !important;}
-.reader-active{font-size:6px !important;padding:2px 5px !important;}
-.reader-main{
-    grid-template-columns:1fr 58px !important;
-    margin-top:7px !important;
-}
-.reader-text{font-size:11px !important;line-height:1.08 !important;}
-.reader-note{font-size:6.5px !important;margin-top:4px !important;}
-.ring{width:54px !important;height:54px !important;}
-.ring:after{width:42px !important;height:42px !important;}
-.ring span{font-size:12px !important;}
-
-.tech-grid{gap:0 !important;}
-.tech-grid > div{
-    padding:0 4px !important;
-    border-right:1px solid #1c2734;
-}
-.tech-grid > div:last-child{border-right:none;}
-.tech-label{font-size:5.8px !important;}
-.tech-value{font-size:8.5px !important;margin-top:3px !important;}
-
-.ref-features{
-    display:grid;
-    grid-template-columns:repeat(3,1fr);
-    gap:4px;
-    padding:8px 2px 6px;
-    margin-top:6px;
-    border-top:1px solid #182331;
-}
-.ref-feature{
-    display:grid;
-    grid-template-columns:22px 1fr;
-    gap:5px;
-    align-items:center;
-    color:#66758a;
-    font-size:5.6px;
-    line-height:1.22;
-}
-.ref-feature-icon{
-    width:20px;height:20px;border-radius:50%;
-    display:grid;place-items:center;
-    border:1px solid #28dd79;
-    color:#34e982;
-    font-size:10px;font-weight:1000;
-}
-.ref-feature strong{
-    display:block;color:#cfd7e1;
-    font-size:5.8px;margin-bottom:1px;
-}
-.ref-footer{
-    display:flex;
-    justify-content:space-between;
-    gap:8px;
-    padding:5px 1px 1px;
-    border-top:1px solid #131d29;
-    color:#435064;
-    font-size:5.2px;
-    font-weight:800;
-}
-.footer-nav{
-    padding:7px 2px 1px !important;
-    margin-top:4px !important;
-}
-.nav-item{font-size:6.8px !important;}
-
-
-/* FINAL REFERENCE MATCH */
-.block-container{max-width:430px!important;padding:7px 10px 22px!important}
-.topbar{min-height:48px!important;padding:4px 2px 5px!important;text-align:center!important}
-.brand{font-size:15px!important}.version{font-size:8px!important}
-.live{top:29px!important;right:4px!important;font-size:8px!important}
-.hero{padding:2px 2px 7px!important}
-.hero-signal{font-size:72px!important;line-height:.86!important;letter-spacing:-5px!important;text-shadow:0 0 12px currentColor,0 0 28px currentColor!important}
-.confidence{font-size:10px!important;padding:5px 16px!important;border-radius:18px!important;margin-top:9px!important}
-.two{gap:7px!important;margin-top:7px!important}
-.mini{min-height:72px!important;padding:9px 10px!important;border-radius:9px!important}
-.mini-label{font-size:8px!important}.mini-value{font-size:19px!important}.mini-sub{font-size:8px!important}
-.section{padding:9px!important;margin-top:7px!important;border-radius:9px!important}
-.section-title{font-size:8px!important;margin-bottom:6px!important}
-.prob-up,.prob-down{height:20px!important}.prob-labels{font-size:9px!important}
-.close-reader{padding:10px 11px!important;margin-top:7px!important;border-radius:10px!important}
-.reader-top{font-size:9px!important}.reader-active{font-size:7px!important}
-.reader-main{grid-template-columns:1fr 68px!important;margin-top:8px!important}
-.reader-text{font-size:15px!important;line-height:1.08!important}.reader-note{font-size:7.5px!important}
-.ring{width:64px!important;height:64px!important}.ring:after{width:50px!important;height:50px!important}.ring span{font-size:15px!important}
-.tech-label{font-size:6.5px!important}.tech-value{font-size:10px!important}
-.footer-nav{padding:9px 2px 7px!important}.nav-item{font-size:8px!important}
-.ref-features{padding:9px 3px 7px!important}.ref-feature{font-size:6px!important}
-.ref-feature strong{font-size:6.2px!important}.ref-footer{font-size:5.6px!important}
-.ref-icon{font-size:23px;line-height:1;margin-right:8px;display:inline-block;vertical-align:middle}
-.ref-btc{color:#ff9f0a}.ref-target{color:#a9c9f3}
-.ref-bars{display:inline-flex;gap:2px;align-items:flex-end;height:19px;margin-right:8px;vertical-align:middle}
-.ref-bars i{display:block;width:5px;background:var(--accent);border-radius:1px}
-.ref-bars i:nth-child(1){height:7px}.ref-bars i:nth-child(2){height:12px}.ref-bars i:nth-child(3){height:18px}
-.ref-clock{font-size:23px;color:#b9d5f5;margin-right:8px;vertical-align:middle}
-.ref-timebar{height:5px;background:#16324a;border-radius:5px;margin-top:5px;overflow:hidden}
-.ref-timebar b{display:block;height:100%;width:58%;background:var(--accent);border-radius:5px}
-.tech-head{display:flex;justify-content:space-between;align-items:center}
-.tech-chevron{font-size:13px;color:#b6c6da}
-
-
-/* ===== REBUILT REFERENCE FRONTEND ===== */
-.block-container{max-width:430px!important;padding:4px 9px 18px!important}
-.refapp{font-family:Arial,sans-serif;color:#eaf2fb}
-.rhead{height:54px;position:relative;text-align:center;padding-top:7px}
-.rtitle{font-size:15px;font-weight:900}.rver{font-size:9px;color:#9badc3;margin-top:2px}
-.gear{position:absolute;right:9px;top:7px;font-size:19px;color:#a9c9ec;text-decoration:none!important;cursor:pointer;z-index:50}
-.rlive{position:absolute;right:8px;bottom:1px;font-size:9px;color:#b9c9db}
-.rlive i{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--accent);margin-right:5px;box-shadow:0 0 12px var(--accent)}
-.rhero{text-align:center;padding:4px 0 8px}
-.rsignal{display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:72px;font-weight:1000;line-height:.82;letter-spacing:-5px;text-shadow:0 0 12px var(--glow),0 0 25px var(--glow)}
-.rarrow{font-size:79px;margin-right:5px;line-height:.7}.rhero.waiting .rsignal{font-size:39px;letter-spacing:-2px}.rhero.waiting .rarrow{display:none}
-.rconf{display:inline-block;margin-top:11px;border:1.5px solid var(--accent);border-radius:18px;padding:5px 17px;color:#fff;font-size:10px;font-weight:900;box-shadow:0 0 10px var(--soft)}
-.rgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:2px}
-.rcard{background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px}
-.keycard{height:68px;padding:8px 9px;display:flex;align-items:center;gap:8px}
-.bigicon{font-size:31px;font-weight:900;line-height:1}.btcicon{color:#ff9d00}.targeticon{color:#a9cff5}
-.rlabel{font-size:8px;color:#b9c9dc;letter-spacing:.4px}.rvalue{font-size:19px;font-weight:900;line-height:1.05;margin-top:2px}.rdelta{font-size:9px;font-weight:900;margin-top:2px}
-.green{color:#32e981!important}.red{color:#ff4c5d!important}
-.bars{display:flex;align-items:flex-end;gap:3px;width:31px;height:30px}.bars b{width:7px;background:var(--accent);border-radius:2px}.bars b:nth-child(1){height:11px}.bars b:nth-child(2){height:20px}.bars b:nth-child(3){height:28px}
-.clock{font-size:30px;color:#b9d8f7}.timecontent{flex:1}.timebar{height:6px;background:#16324a;border-radius:5px;margin-top:5px;overflow:hidden}.timebar b{display:block;height:100%;background:var(--accent);border-radius:5px}
-.probs{margin-top:6px;padding:8px}.pbar{display:flex;gap:4px;margin-top:5px}.pup,.pdown{height:21px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;border-radius:4px}.pup{background:linear-gradient(90deg,#10d76d,#54ed91);color:#06331d}.pdown{background:linear-gradient(90deg,#ff3548,#ff6472);color:#3d0710}.pleg{display:flex;justify-content:space-between;font-size:10px;font-weight:900;margin-top:6px}
-.reader{margin-top:6px;border:1.5px solid var(--rb);background:var(--rbg);border-radius:9px;padding:9px 10px}
-.readerhead{display:flex;align-items:center;gap:7px;font-size:9px;color:var(--rr)}.readerhead .pulse{font-size:18px}.readerhead em{margin-left:auto;border:1px solid #24d873;border-radius:12px;padding:3px 8px;font-style:normal;font-size:8px;color:#45ec8e}
-.readerbody{display:grid;grid-template-columns:1fr 65px;align-items:center;margin-top:7px}.readerbody strong{display:block;font-size:15px;line-height:1.12}.readerbody small{display:block;color:#aab8c9;font-size:7px;margin-top:5px}
-.rring{width:62px;height:62px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--rr) calc(var(--p)*1%),#263342 0);position:relative}.rring:after{content:"";position:absolute;width:48px;height:48px;background:#08121b;border-radius:50%}.rring span{z-index:1;font-size:15px;font-weight:900}
-.tech{margin-top:6px;padding:7px 8px}.techhead{display:flex;justify-content:space-between;font-size:9px;color:#c2d0df;padding-bottom:6px}.techrow{display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid #172737}.techrow>div{text-align:center;padding:7px 2px 2px;border-right:1px solid #172737}.techrow>div:last-child{border:0}.techrow small,.techrow i{display:block;font-size:6px;color:#8d9db0;font-style:normal}.techrow b{display:block;font-size:10px;margin:4px 0}
-.rnav{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid #203448;border-bottom:1px solid #203448;margin-top:7px;padding:7px 0}.rnav div{text-align:center;color:#9db0c5;font-size:8px}.rnav b{display:block;font-size:17px;margin-bottom:2px}.rnav .active{color:var(--accent)}
-.features{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:8px 1px}.features>div{display:flex;gap:5px;align-items:center}.features>div>b{width:25px;height:25px;border:1px solid #28e57f;border-radius:50%;display:grid;place-items:center;color:#35e986;font-size:13px}.features p{margin:0}.features strong{display:block;font-size:5.7px;color:#e1e8f0}.features span{display:block;font-size:5.4px;color:#8c9db0;margin-top:2px}
-.refapp footer{border-top:1px solid #182a3a;padding:5px 1px;display:flex;justify-content:space-between;color:#708197;font-size:5.2px}
-.ticker{text-align:center;color:#53667d;font-size:6px;margin-top:5px}
-
-
-/* ===== FINAL PHONE REFERENCE PROPORTIONS ===== */
-.block-container{max-width:365px!important;padding:3px 7px 14px!important}
-.rhead{height:49px!important;padding-top:4px!important}
-.rtitle{font-size:14px!important}.rver{font-size:8px!important}
-.gear{right:7px!important;top:4px!important;font-size:18px!important}
-.rlive{right:7px!important;bottom:0!important;font-size:8px!important}
-.rhero{padding:1px 0 7px!important}
-.rsignal{font-size:61px!important;line-height:.80!important;letter-spacing:-4px!important}
-.rarrow{font-size:66px!important;margin-right:4px!important}
-.rhero.waiting .rsignal{font-size:29px!important;letter-spacing:-1px!important}
-.rconf{margin-top:9px!important;padding:4px 14px!important;font-size:9px!important}
-.rgrid{gap:5px!important}
-.keycard{height:57px!important;padding:6px 8px!important;gap:7px!important}
-.bigicon{font-size:27px!important}.bars{width:27px!important;height:26px!important}.clock{font-size:27px!important}
-.rlabel{font-size:7px!important}.rvalue{font-size:16px!important}.rdelta{font-size:8px!important}
-.timebar{height:5px!important;margin-top:4px!important}
-.probs{margin-top:5px!important;padding:7px!important}.pup,.pdown{height:18px!important;font-size:9px!important}
-.pleg{font-size:9px!important;margin-top:5px!important}
-.reader{margin-top:5px!important;padding:7px 8px!important}
-.readerhead{font-size:8px!important}.readerhead .pulse{font-size:15px!important}
-.readerbody{grid-template-columns:1fr 58px!important;margin-top:5px!important}
-.readerbody strong{font-size:13px!important}.readerbody small{font-size:6.3px!important;margin-top:3px!important}
-.rring{width:55px!important;height:55px!important}.rring:after{width:43px!important;height:43px!important}.rring span{font-size:13px!important}
-.tech{margin-top:5px!important;padding:6px 7px!important}.techhead{font-size:8px!important;padding-bottom:5px!important}
-.techrow>div{padding:5px 1px 1px!important}.techrow small,.techrow i{font-size:5.3px!important}.techrow b{font-size:9px!important;margin:3px 0!important}
-.rnav{margin-top:6px!important;padding:6px 0!important}.rnav div{font-size:7px!important}.rnav b{font-size:15px!important}
-.features{padding:7px 1px 5px!important;gap:3px!important}.features>div{gap:4px!important}
-.features>div>b{width:22px!important;height:22px!important;font-size:11px!important}
-.features strong{font-size:5px!important}.features span{font-size:4.8px!important}
-.refapp footer{padding:4px 1px!important;font-size:4.7px!important}
-.ticker{font-size:5.3px!important;margin-top:4px!important}
-
-/* Make arrows chunky like the reference rather than thin text arrows */
-.rarrow{font-family:Arial Black,Arial,sans-serif!important;font-weight:1000!important}
-
-
-/* ===== TRUE FINAL: CSS ARROW + VISIBLE HEADER ===== */
-.rhead{
-    display:block!important;
-    visibility:visible!important;
-    height:58px!important;
-    min-height:58px!important;
-    padding-top:7px!important;
-    overflow:visible!important;
-    position:relative!important;
-    z-index:20!important;
-}
-.rtitle,.rver,.gear,.rlive{display:block!important;visibility:visible!important}
-.rtitle{font-size:14px!important;line-height:17px!important}
-.rver{font-size:8px!important;line-height:11px!important}
-.gear{top:7px!important;right:8px!important}
-.rlive{bottom:3px!important;right:8px!important}
-
-.rhero{padding-top:4px!important}
-.rsignal{gap:9px!important}
-.rarrow{display:none!important}
-
-/* Solid arrow matching signal color; no iOS emoji rendering */
-.cssarrow{
-    position:relative;
-    display:inline-block;
-    width:42px;
-    height:46px;
-    background:var(--accent);
-    border-radius:3px;
-    box-shadow:0 0 12px var(--glow),0 0 24px var(--glow);
-    flex:0 0 auto;
-}
-.cssarrow:before{
-    content:"";
-    position:absolute;
-    left:-17px;
-    top:-27px;
-    width:0;height:0;
-    border-left:38px solid transparent;
-    border-right:38px solid transparent;
-    border-bottom:34px solid var(--accent);
-    filter:drop-shadow(0 0 7px var(--glow));
-}
-/* DOWN: arrow head below shaft */
-.refapp.dir-down .cssarrow{transform:rotate(180deg);}
-/* Waiting state: no arrow */
-.rhero.waiting .cssarrow{display:none!important}
-
-/* Keep final phone proportions compact */
-.block-container{max-width:365px!important;padding-top:3px!important}
-.rgrid{margin-top:1px!important}
-.reader{min-height:0!important}
-
-
-/* ===== PRESEÑAL — CAPA VISUAL, NO TOCA EL MOTOR ===== */
-.presignal{margin:0 0 6px;padding:9px 10px;border:1px solid var(--precolor);border-radius:10px;background:linear-gradient(135deg,var(--prebg),rgba(8,18,27,.88));box-shadow:0 0 18px var(--preglow)}
-.prehead{display:flex;justify-content:space-between;align-items:center;gap:8px}
-.pretitle{font-size:8px;font-weight:950;letter-spacing:.55px;color:#b9c9db}
-.prebadge{font-size:6.5px;font-weight:900;color:var(--precolor);border:1px solid var(--precolor);border-radius:10px;padding:3px 7px}
-.premain{display:flex;justify-content:space-between;align-items:flex-end;margin-top:7px;gap:8px}
-.predirection{font-size:17px;font-weight:1000;color:var(--precolor);letter-spacing:-.3px}
-.prepercent{font-size:18px;font-weight:1000;color:var(--precolor)}
-.prebar{height:5px;background:#1b2938;border-radius:6px;overflow:hidden;margin-top:7px}
-.prebar b{display:block;height:100%;background:var(--precolor);border-radius:6px;box-shadow:0 0 9px var(--preglow)}
-.prenote{font-size:6.7px;color:#91a2b5;margin-top:5px;line-height:1.25}
-
-/* ===== PANEL FINAL DE CIERRE — EXACTO A LA REFERENCIA ===== */
-.finalclose{margin-top:7px;border:1px solid var(--rr);border-radius:9px;padding:7px;background:rgba(5,15,22,.45)}
-.finalgrid{display:grid;grid-template-columns:1.65fr .85fr .85fr;gap:4px}
-.finalcard{min-height:67px;border:1px solid #29445a;border-radius:8px;background:linear-gradient(180deg,#0b1822,#08121a);padding:6px;text-align:center}
-.finalcard.motion{border-color:#25bff2}.finalcard.distance{border-color:#8c4cff}.finalcard.speed{border-color:#ff3f86}
-.finaltitle{font-size:6.5px;font-weight:950;color:#e6edf6}.motionrow{display:grid;grid-template-columns:repeat(3,1fr);margin-top:5px}.motionrow>div{border-right:1px solid #203344}.motionrow>div:last-child{border:0}.motionrow small{display:block;font-size:6px;color:#b7c6d7}.motionrow b{display:block;font-size:11px;margin-top:2px}.finalbig{font-size:14px;font-weight:1000;margin-top:8px}.finalsub{font-size:8px;font-weight:900;margin-top:2px}.finalnote{font-size:5.8px;color:#91a3b6;margin-top:4px}
-.finalanalysis{display:grid;grid-template-columns:1fr 80px;gap:5px;margin-top:4px}.analysisbox,.probbox{border:1px solid #1fae7a;border-radius:8px;background:#07151a;padding:7px}.analysisbox{display:flex;align-items:center;gap:7px}.analysisicon{font-size:23px;color:#2ee98a}.analysistext small{display:block;font-size:6.3px;color:#d4deea}.analysistext b{display:block;font-size:10px;color:var(--rr);margin-top:2px}.analysistext span{display:block;font-size:6.3px;color:#a3b2c3;margin-top:3px}.probbox{border-color:#ff3f86;text-align:center}.probbox small{display:block;font-size:6.5px;color:#e4ebf3}.probbox b{display:block;font-size:15px;color:var(--rr);margin-top:8px}
-.chartbox{margin-top:10px;background:linear-gradient(180deg,#08121d,#060c14);border:1px solid #203a51;border-radius:12px;padding:10px 8px 8px;box-shadow:inset 0 0 28px rgba(20,80,110,.08)}
-.charttop{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#eef6ff}.charttop b{font-size:13px}.chartlive{font-size:7px;color:#28e69a;margin-left:8px}.charttf{border:1px solid #26384b;border-radius:7px;padding:5px 8px;color:#dce8f5;font-size:9px}.ohlc{font-size:7px;color:#8ea0b5;margin-top:5px;white-space:nowrap}.indicators{font-size:7px;color:#aab8ca;margin:7px 0 1px;white-space:nowrap}.ema9dot{color:#df42e7}.ema21dot{color:#32d7ef}.targetdot{color:#23e7c1}.candlesvg{display:block;width:100%;height:265px}.chartfoot{display:flex;align-items:center;gap:10px;border-top:1px solid #18283a;padding:7px 2px 1px;color:#71839a;font-size:6px}.chartfoot .selected{border:1px solid #2a7189;border-radius:7px;padding:4px 8px;color:#e7f5ff;background:#0d2632}.chartempty{height:160px;display:grid;place-items:center;color:#708197;font-size:10px}
+.ticker {text-align:center;color:#53667d;font-size:5.3px!important;font-weight:800;margin-top:4px!important;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.alert {border-radius:10px;padding:10px;margin-top:8px;text-align:center;color:#ffd260;background:rgba(116,78,7,.18);border:1px solid rgba(247,189,77,.42);font-size:10px;font-weight:900;}
+.refapp {font-family:Arial,sans-serif;color:#eaf2fb;}
+.rhead {height:58px!important;position:relative!important;text-align:center;padding-top:7px!important;display:block!important;visibility:visible!important;min-height:58px!important;overflow:visible!important;z-index:20!important;}
+.rtitle {font-size:14px!important;font-weight:900;display:block!important;visibility:visible!important;line-height:17px!important;}
+.rver {font-size:8px!important;color:#9badc3;margin-top:2px;display:block!important;visibility:visible!important;line-height:11px!important;}
+.gear {position:absolute;right:8px!important;top:7px!important;font-size:18px!important;color:#a9c9ec;text-decoration:none!important;cursor:pointer;z-index:50;display:block!important;visibility:visible!important;}
+.rlive {position:absolute;right:8px!important;bottom:3px!important;font-size:8px!important;color:#b9c9db;display:block!important;visibility:visible!important;}
+.rlive i {display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--accent);margin-right:5px;box-shadow:0 0 12px var(--accent);}
+.rhero {text-align:center;padding:1px 0 7px!important;padding-top:4px!important;}
+.rsignal {display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:61px!important;font-weight:1000;line-height:.80!important;letter-spacing:-4px!important;text-shadow:0 0 12px var(--glow),0 0 25px var(--glow);gap:9px!important;}
+.rarrow {font-size:66px!important;margin-right:4px!important;line-height:.7;font-family:Arial Black,Arial,sans-serif!important;font-weight:1000!important;display:none!important;}
+.rhero.waiting .rsignal {font-size:29px!important;letter-spacing:-1px!important;}
+.rhero.waiting .rarrow {display:none;}
+.rconf {display:inline-block;margin-top:9px!important;border:1.5px solid var(--accent);border-radius:18px;padding:4px 14px!important;color:#fff;font-size:9px!important;font-weight:900;box-shadow:0 0 10px var(--soft);}
+.rgrid {display:grid;grid-template-columns:1fr 1fr;gap:5px!important;margin-top:1px!important;}
+.rcard {background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px;}
+.keycard {height:57px!important;padding:6px 8px!important;display:flex;align-items:center;gap:7px!important;}
+.bigicon {font-size:27px!important;font-weight:900;line-height:1;}
+.btcicon {color:#ff9d00;}
+.targeticon {color:#a9cff5;}
+.rlabel {font-size:7px!important;color:#b9c9dc;letter-spacing:.4px;}
+.rvalue {font-size:16px!important;font-weight:900;line-height:1.05;margin-top:2px;}
+.rdelta {font-size:8px!important;font-weight:900;margin-top:2px;}
+.bars {display:flex;align-items:flex-end;gap:3px;width:27px!important;height:26px!important;}
+.bars b {width:7px;background:var(--accent);border-radius:2px;}
+.bars b:nth-child(1) {height:11px;}
+.bars b:nth-child(2) {height:20px;}
+.bars b:nth-child(3) {height:28px;}
+.clock {font-size:27px!important;color:#b9d8f7;}
+.timecontent {flex:1;}
+.timebar {height:5px!important;background:#16324a;border-radius:5px;margin-top:4px!important;overflow:hidden;}
+.timebar b {display:block;height:100%;background:var(--accent);border-radius:5px;}
+.probs {margin-top:5px!important;padding:7px!important;}
+.pbar {display:flex;gap:4px;margin-top:5px;}
+.pup {height:18px!important;display:flex;align-items:center;justify-content:center;font-size:9px!important;font-weight:900;border-radius:4px;background:linear-gradient(90deg,#10d76d,#54ed91);color:#06331d;}
+.pdown {height:18px!important;display:flex;align-items:center;justify-content:center;font-size:9px!important;font-weight:900;border-radius:4px;background:linear-gradient(90deg,#ff3548,#ff6472);color:#3d0710;}
+.pleg {display:flex;justify-content:space-between;font-size:9px!important;font-weight:900;margin-top:5px!important;}
+.reader {margin-top:5px!important;border:1.5px solid var(--rb);background:var(--rbg);border-radius:9px;padding:7px 8px!important;min-height:0!important;}
+.readerhead {display:flex;align-items:center;gap:7px;font-size:8px!important;color:var(--rr);}
+.readerhead .pulse {font-size:15px!important;}
+.readerhead em {margin-left:auto;border:1px solid #24d873;border-radius:12px;padding:3px 8px;font-style:normal;font-size:8px;color:#45ec8e;}
+.readerbody {display:grid;grid-template-columns:1fr 58px!important;align-items:center;margin-top:5px!important;}
+.readerbody strong {display:block;font-size:13px!important;line-height:1.12;}
+.readerbody small {display:block;color:#aab8c9;font-size:6.3px!important;margin-top:3px!important;}
+.rring {width:55px!important;height:55px!important;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--rr) calc(var(--p)*1%),#263342 0);position:relative;}
+.rring:after {content:"";position:absolute;width:43px!important;height:43px!important;background:#08121b;border-radius:50%;}
+.rring span {z-index:1;font-size:13px!important;font-weight:900;}
+.tech {margin-top:5px!important;padding:6px 7px!important;}
+.techhead {display:flex;justify-content:space-between;font-size:8px!important;color:#c2d0df;padding-bottom:5px!important;}
+.techrow {display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid #172737;}
+.techrow>div {text-align:center;padding:5px 1px 1px!important;border-right:1px solid #172737;}
+.techrow>div:last-child {border:0;}
+.techrow small {display:block;font-size:5.3px!important;color:#8d9db0;font-style:normal;}
+.techrow i {display:block;font-size:5.3px!important;color:#8d9db0;font-style:normal;}
+.techrow b {display:block;font-size:9px!important;margin:3px 0!important;}
+.rnav {display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid #203448;border-bottom:1px solid #203448;margin-top:6px!important;padding:6px 0!important;}
+.rnav div {text-align:center;color:#9db0c5;font-size:7px!important;}
+.rnav b {display:block;font-size:15px!important;margin-bottom:2px;}
+.rnav .active {color:var(--accent);}
+.features {display:grid;grid-template-columns:repeat(3,1fr);gap:3px!important;padding:7px 1px 5px!important;}
+.features>div {display:flex;gap:4px!important;align-items:center;}
+.features>div>b {width:22px!important;height:22px!important;border:1px solid #28e57f;border-radius:50%;display:grid;place-items:center;color:#35e986;font-size:11px!important;}
+.features p {margin:0;}
+.features strong {display:block;font-size:5px!important;color:#e1e8f0;}
+.features span {display:block;font-size:4.8px!important;color:#8c9db0;margin-top:2px;}
+.refapp footer {border-top:1px solid #182a3a;padding:4px 1px!important;display:flex;justify-content:space-between;color:#708197;font-size:4.7px!important;}
+.cssarrow {position:relative;display:inline-block;width:42px;height:46px;background:var(--accent);border-radius:3px;box-shadow:0 0 12px var(--glow),0 0 24px var(--glow);flex:0 0 auto;}
+.cssarrow:before {content:"";position:absolute;left:-17px;top:-27px;width:0;height:0;border-left:38px solid transparent;border-right:38px solid transparent;border-bottom:34px solid var(--accent);filter:drop-shadow(0 0 7px var(--glow));}
+.refapp.dir-down .cssarrow {transform:rotate(180deg);}
+.rhero.waiting .cssarrow {display:none!important;}
+.presignal {margin:0 0 6px;padding:9px 10px;border:1px solid var(--precolor);border-radius:10px;background:linear-gradient(135deg,var(--prebg),rgba(8,18,27,.88));box-shadow:0 0 18px var(--preglow);}
+.prehead {display:flex;justify-content:space-between;align-items:center;gap:8px;}
+.pretitle {font-size:8px;font-weight:950;letter-spacing:.55px;color:#b9c9db;}
+.prebadge {font-size:6.5px;font-weight:900;color:var(--precolor);border:1px solid var(--precolor);border-radius:10px;padding:3px 7px;}
+.premain {display:flex;justify-content:space-between;align-items:flex-end;margin-top:7px;gap:8px;}
+.predirection {font-size:17px;font-weight:1000;color:var(--precolor);letter-spacing:-.3px;}
+.prepercent {font-size:18px;font-weight:1000;color:var(--precolor);}
+.prebar {height:5px;background:#1b2938;border-radius:6px;overflow:hidden;margin-top:7px;}
+.prebar b {display:block;height:100%;background:var(--precolor);border-radius:6px;box-shadow:0 0 9px var(--preglow);}
+.prenote {font-size:6.7px;color:#91a2b5;margin-top:5px;line-height:1.25;}
+.finalclose {margin-top:7px;border:1px solid var(--rr);border-radius:9px;padding:7px;background:rgba(5,15,22,.45);}
+.finalgrid {display:grid;grid-template-columns:1.65fr .85fr .85fr;gap:4px;}
+.finalcard {min-height:67px;border:1px solid #29445a;border-radius:8px;background:linear-gradient(180deg,#0b1822,#08121a);padding:6px;text-align:center;}
+.finalcard.motion {border-color:#25bff2;}
+.finalcard.distance {border-color:#8c4cff;}
+.finalcard.speed {border-color:#ff3f86;}
+.finaltitle {font-size:6.5px;font-weight:950;color:#e6edf6;}
+.motionrow {display:grid;grid-template-columns:repeat(3,1fr);margin-top:5px;}
+.motionrow>div {border-right:1px solid #203344;}
+.motionrow>div:last-child {border:0;}
+.motionrow small {display:block;font-size:6px;color:#b7c6d7;}
+.motionrow b {display:block;font-size:11px;margin-top:2px;}
+.finalbig {font-size:14px;font-weight:1000;margin-top:8px;}
+.finalsub {font-size:8px;font-weight:900;margin-top:2px;}
+.finalnote {font-size:5.8px;color:#91a3b6;margin-top:4px;}
+.finalanalysis {display:grid;grid-template-columns:1fr 80px;gap:5px;margin-top:4px;}
+.analysisbox {border:1px solid #1fae7a;border-radius:8px;background:#07151a;padding:7px;display:flex;align-items:center;gap:7px;}
+.probbox {border:1px solid #1fae7a;border-radius:8px;background:#07151a;padding:7px;border-color:#ff3f86;text-align:center;}
+.analysisicon {font-size:23px;color:#2ee98a;}
+.analysistext small {display:block;font-size:6.3px;color:#d4deea;}
+.analysistext b {display:block;font-size:10px;color:var(--rr);margin-top:2px;}
+.analysistext span {display:block;font-size:6.3px;color:#a3b2c3;margin-top:3px;}
+.probbox small {display:block;font-size:6.5px;color:#e4ebf3;}
+.probbox b {display:block;font-size:15px;color:var(--rr);margin-top:8px;}
+.chartbox {margin-top:10px;background:linear-gradient(180deg,#08121d,#060c14);border:1px solid #203a51;border-radius:12px;padding:10px 8px 8px;box-shadow:inset 0 0 28px rgba(20,80,110,.08);}
+.charttop {display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#eef6ff;}
+.charttop b {font-size:13px;}
+.chartlive {font-size:7px;color:#28e69a;margin-left:8px;}
+.charttf {border:1px solid #26384b;border-radius:7px;padding:5px 8px;color:#dce8f5;font-size:9px;}
+.ohlc {font-size:7px;color:#8ea0b5;margin-top:5px;white-space:nowrap;}
+.indicators {font-size:7px;color:#aab8ca;margin:7px 0 1px;white-space:nowrap;}
+.ema9dot {color:#df42e7;}
+.ema21dot {color:#32d7ef;}
+.targetdot {color:#23e7c1;}
+.candlesvg {display:block;width:100%;height:265px;}
+.chartfoot {display:flex;align-items:center;gap:10px;border-top:1px solid #18283a;padding:7px 2px 1px;color:#71839a;font-size:6px;}
+.chartfoot .selected {border:1px solid #2a7189;border-radius:7px;padding:4px 8px;color:#e7f5ff;background:#0d2632;}
+.chartempty {height:160px;display:grid;place-items:center;color:#708197;font-size:10px;}
 </style>
 """,
     unsafe_allow_html=True,
 )
 
-# =========================================================
-# SESSION STATE ORIGINAL
-# =========================================================
 
 if "rounds" not in st.session_state:
     st.session_state.rounds = {}
@@ -710,10 +211,6 @@ def new_round_state(ticker, seconds_left):
         "candidate_history": [],
     }
 
-# =========================================================
-# PERSISTENCIA DE RONDA — SOBREVIVE SALIR/ENTRAR A LA APP
-# Solo guarda el estado de la ronda; NO cambia el cerebro.
-# =========================================================
 
 ROUND_STATE_DB = "btc_signal_round_state.db"
 
@@ -761,12 +258,6 @@ def load_round_state(ticker):
     except Exception:
         return None
 
-
-
-# =========================================================
-# HISTORIAL Y RENDIMIENTO — CAPA INDEPENDIENTE
-# No modifica build_signal(), preseñal, lector, ballenas ni gráfico.
-# =========================================================
 
 HISTORY_DB = "btc_signal_history.db"
 
@@ -857,34 +348,6 @@ def history_stats(df):
     rate = (wins / decided * 100.0) if decided else 0.0
     return {"total":len(df),"wins":wins,"losses":losses,"no_trade":no_trade,"win_rate":rate}
 
-# =========================================================
-# COINBASE — VELAS ORIGINALES DE 1 MINUTO
-# =========================================================
-
-@st.cache_data(ttl=5)
-def get_btc_data():
-    response = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-USD/candles",
-        params={"granularity": 60},
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    data = response.json()
-
-    if not isinstance(data, list) or len(data) < 30:
-        raise ValueError("Coinbase no devolvió suficientes datos.")
-
-    df = pd.DataFrame(
-        data, columns=["time", "low", "high", "open", "close", "volume"]
-    )
-
-    for column in ["low", "high", "open", "close", "volume"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    return df.dropna().sort_values("time").reset_index(drop=True)
-
 
 def get_coinbase_whale_flow():
     """Lee presión agresiva de Coinbase en ventanas 10s/30s/60s y conserva alertas breves."""
@@ -938,7 +401,6 @@ def get_coinbase_whale_flow():
     b30,s30,t30,i30,d30 = window(30)
     b60,s60,t60,i60,d60 = window(60)
 
-    # Alert only when flow is materially one-sided AND supported beyond a tiny 4s snapshot.
     burst = t10 >= 750_000 and i10 >= 0.28
     sustained = t30 >= 1_750_000 and i30 >= 0.18
     same_side = d10 is not None and d10 == d30
@@ -997,8 +459,7 @@ def render_whale_panel(whale, active):
     if active in ("UP", "DOWN"):
         relation = " · CONFIRMA SEÑAL" if active == a["direction"] else " · CONTRADICE SEÑAL"
     return f'''<section style="{base};border-color:{color};box-shadow:0 0 20px {color}33">
-      <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:10px;color:#e4edf7">🐋 FLUJO BALLENA · EN VIVO</b><span style="font-size:8px;color:{color}">● ALERTA</span></div>
-      <div style="margin-top:8px;font-size:15px;font-weight:950;color:{color}">⚡ {arrow} FLUJO EXTREMO {label}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:10px;color:#e4edf7">🐋 FLUJO BALLENA · EN VIVO</b><span style="font-size:8px;color:{color}">● ALERTA</span></div>      <div style="margin-top:8px;font-size:15px;font-weight:950;color:{color}">⚡ {arrow} FLUJO EXTREMO {label}</div>
       <div style="margin-top:6px;font-size:12px;font-weight:900;color:#f3f7fb">{compact_usd(dominant)} dominantes en ~30 s</div>
       <div style="margin-top:5px;font-size:9px;color:#aab8c7">COMPRAS {compact_usd(a['buy'])} · VENTAS {compact_usd(a['sell'])} · DOMINIO {a['imbalance']*100:.0f}%{relation}</div>
       <div style="margin-top:4px;font-size:8px;color:#7f91a5">Alerta temprana de presión extraordinaria en el flujo real de BTC/USD.</div>
@@ -1020,30 +481,6 @@ def get_btc_live_price():
     if price in [None, ""]:
         raise ValueError("Coinbase ticker no devolvió precio.")
     return float(price)
-
-
-# =========================================================
-# KALSHI BTC 15 MIN
-# =========================================================
-
-@st.cache_data(ttl=2)
-def get_kalshi_btc_market():
-    response = requests.get(
-        "https://external-api.kalshi.com/trade-api/v2/markets",
-        params={
-            "limit": 100,
-            "status": "open",
-            "series_ticker": "KXBTC15M",
-        },
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    markets = response.json().get("markets", [])
-    if not markets:
-        return None
-    markets.sort(key=lambda m: str(m.get("close_time") or "9999"))
-    return markets[0]
 
 
 def get_event_ticker_from_market(market):
@@ -1138,10 +575,6 @@ def get_kalshi_live_btc(market):
         raise ValueError("Kalshi live respondió sin precio BTC válido.")
     return float(price)
 
-
-# =========================================================
-# INDICADORES ORIGINALES
-# =========================================================
 
 def _indicator_frame(df):
     x = df.copy().sort_values("time").reset_index(drop=True)
@@ -1253,44 +686,6 @@ def get_no_ask(market):
     return None
 
 
-# =========================================================
-# PROBABILIDAD ORIGINAL
-# =========================================================
-
-def estimated_probabilities(
-    final_score, distance, seconds_left, mom3, mom5
-):
-    score = float(np.clip(final_score, -10, 10))
-    up_prob = 50 + score * 4.2
-
-    if mom3 > 0.04:
-        up_prob += 3
-    elif mom3 < -0.04:
-        up_prob -= 3
-
-    if mom5 > 0.06:
-        up_prob += 2
-    elif mom5 < -0.06:
-        up_prob -= 2
-
-    if (
-        distance is not None
-        and seconds_left is not None
-        and seconds_left <= 180
-    ):
-        if distance > 0:
-            up_prob += 3
-        elif distance < 0:
-            up_prob -= 3
-
-    up_prob = float(np.clip(up_prob, 5, 95))
-    return round(up_prob), round(100 - up_prob)
-
-
-# =========================================================
-# MOTOR ORIGINAL v4.6.1
-# =========================================================
-
 def build_signal(df, target, seconds_left, live_price=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -1313,15 +708,12 @@ def build_signal(df, target, seconds_left, live_price=None):
         candidate="UP"
     elif aligned=="DOWN" and (trend_strong or (rsi3<=48 and rsi5<=50)) and vwap_atr<0.15:
         candidate="DOWN"
-    # Señal temprana: no espera alineación perfecta de 3M/5M cuando 5M no se opone
-    # y el impulso de 1M/3M + VWAP/participación ya apuntan a la misma dirección.
     elif d5 != "DOWN" and l3["macd_hist"] > 0 and rsi1 >= 53 and rsi3 >= 50 and vwap_atr >= 0.05 and (rvol >= 0.90 or mom3 > 0.025):
         candidate="UP"
         quality="TEMPRANA"
     elif d5 != "UP" and l3["macd_hist"] < 0 and rsi1 <= 47 and rsi3 <= 50 and vwap_atr <= -0.05 and (rvol >= 0.90 or mom3 < -0.025):
         candidate="DOWN"
         quality="TEMPRANA"
-    # Near expiry, the contract target can dominate only when BTC has a meaningful ATR cushion.
     if seconds_left is not None and seconds_left<=180 and distance is not None:
         if target_atr>=0.35 and d5!="DOWN": candidate="UP"
         elif target_atr<=-0.35 and d5!="UP": candidate="DOWN"
@@ -1330,7 +722,6 @@ def build_signal(df, target, seconds_left, live_price=None):
         confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
         if quality != "TEMPRANA":
             quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
-    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
     evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
@@ -1364,7 +755,6 @@ def build_presignal(sig, seconds_left):
     target_atr = float(sig.get("target_atr", 0) or 0)
 
     secs = 900 if seconds_left is None else max(0, int(seconds_left))
-    # Los marcos lentos importan al principio; cerca del cierre mandan menos.
     slow = 1.0 if secs > 300 else 0.70 if secs > 180 else 0.45 if secs > 90 else 0.25
 
     if ema == "BULL": bull += 0.85
@@ -1399,8 +789,6 @@ def build_presignal(sig, seconds_left):
     if vwap_atr >= 0.03: bull += 0.70
     elif vwap_atr <= -0.03: bear += 0.70
 
-    # El target gana importancia progresivamente. No inventa dirección:
-    # usa únicamente dónde está BTC respecto al target en este instante.
     if secs > 300:
         tw = 0.65
     elif secs > 180:
@@ -1412,8 +800,6 @@ def build_presignal(sig, seconds_left):
     else:
         tw = 5.00
 
-    # Magnitud: una separación mayor en ATR da más convicción, sin bloquear
-    # cambios cuando BTC cruza el target.
     target_strength = min(1.75, 0.55 + abs(target_atr) * 2.25)
     if target_atr > 0:
         bull += tw * target_strength
@@ -1426,8 +812,6 @@ def build_presignal(sig, seconds_left):
         return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear}
 
     direction = "UP" if edge > 0 else "DOWN"
-    # La inercia de indicadores no basta para emitir una preseñal operable.
-    # La misma regla se aplica en la pantalla y en el ejecutor autónomo.
     recent = sig.get("recent_moves")
     if not recent or not recent.get("ready"):
         return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear,
@@ -1439,8 +823,6 @@ def build_presignal(sig, seconds_left):
     dominant = max(bull, bear)
     share = dominant / total if total else 0.5
 
-    # Porcentaje propio de la preseñal. Puede llegar a 100 solo cuando la
-    # lectura actual es realmente dominante; no copia la probabilidad oficial.
     percent = int(round(np.clip(50 + (share - 0.5) * 92 + min(abs(edge), 6.0) * 1.8, 52, 100)))
 
     return {"direction":direction, "percent":percent, "bull":bull, "bear":bear}
@@ -1454,10 +836,6 @@ def entry_quality(price, seconds_left):
         return "PRECAUCIÓN", "#fbbf24"
     return "CARA", "#fb7185"
 
-
-# =========================================================
-# CONTROL DE RONDA — EL CEREBRO MANDA
-# =========================================================
 
 def process_round_signal(ticker, sig, market, seconds_left):
     now = datetime.now(timezone.utc)
@@ -1504,8 +882,6 @@ def process_round_signal(ticker, sig, market, seconds_left):
     state["last_score"] = score
     score_change = score - previous_score
 
-    # build_signal() es el cerebro. No hay espera fija, bloqueo final,
-    # votos externos, fresh_support ni distancia mínima externa.
     candidate = sig.get("candidate")
 
     if candidate in ("UP", "DOWN"):
@@ -1515,7 +891,6 @@ def process_round_signal(ticker, sig, market, seconds_left):
         if previous_active != candidate:
             state["active_since"] = now
 
-        # La primera señal se guarda SOLO como historial; no congela la señal actual.
         if state.get("first_direction") is None:
             direction_price = get_yes_ask(market) if candidate == "UP" else get_no_ask(market)
             state["first_direction"] = candidate
@@ -1523,8 +898,6 @@ def process_round_signal(ticker, sig, market, seconds_left):
             state["first_signal_seconds"] = seconds_left
             state["first_signal_price"] = direction_price
     else:
-        # Al volver a abrir la app, conserva la señal que ya tenía ESA ronda.
-        # En los siguientes ciclos el cerebro vuelve a mandar normalmente.
         if not restored_from_disk:
             state["active_direction"] = None
             state["active_since"] = None
@@ -1533,7 +906,6 @@ def process_round_signal(ticker, sig, market, seconds_left):
     reversal = False
     reversal_text = ""
 
-    # Aviso informativo solamente; nunca bloquea ni congela la señal.
     if active == "UP":
         weakness_points = 0
         if score < 0: weakness_points += 1
@@ -1581,32 +953,36 @@ def process_round_signal(ticker, sig, market, seconds_left):
     }
 
 
-# =========================================================
-# REGISTRADOR AUTÓNOMO 12 HORAS — SOLO HISTORIAL
-# Sigue leyendo las rondas aunque no haya una sesión de Streamlit abierta,
-# siempre que el proceso del servidor siga encendido.
-# NO modifica el motor, la preseñal, el lector, ballenas ni la interfaz.
-# =========================================================
-
-BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
 
+def candle_age_seconds(df, now=None):
+    now = now or datetime.now(timezone.utc)
+    return (now - df.iloc[-1]["time"].to_pydatetime()).total_seconds()
+
 def _background_get_btc_data():
+    now = datetime.now(timezone.utc)
+    end = now.isoformat()
+    start = datetime.fromtimestamp(now.timestamp()-299*60, timezone.utc).isoformat()
     response = requests.get(
         "https://api.exchange.coinbase.com/products/BTC-USD/candles",
-        params={"granularity": 60},
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
+        params={"granularity":60, "start":start, "end":end},
+        headers={"User-Agent":"MacalyAlphaBot/12", "Cache-Control":"no-cache"},
         timeout=10,
     )
     response.raise_for_status()
-    data = response.json()
-    if not isinstance(data, list) or len(data) < 30:
-        raise ValueError("Coinbase no devolvió suficientes datos.")
-    df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
-    for column in ["low", "high", "open", "close", "volume"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    return df.dropna().sort_values("time").reset_index(drop=True)
+    rows = response.json()
+    if not isinstance(rows,list) or len(rows)<30:
+        raise ValueError("Coinbase no devolvió suficientes velas")
+    df = pd.DataFrame(rows,columns=["time","low","high","open","close","volume"])
+    for key in df.columns:
+        df[key] = pd.to_numeric(df[key],errors="coerce")
+    df["time"] = pd.to_datetime(df["time"],unit="s",utc=True,errors="coerce")
+    df = df.dropna().drop_duplicates("time").sort_values("time").reset_index(drop=True)
+    if len(df)<30 or not np.isfinite(df[["low","high","open","close","volume"]].to_numpy()).all():
+        raise ValueError("Velas inválidas o insuficientes")
+    if candle_age_seconds(df)<-5:
+        raise ValueError("Timestamp de vela futuro; revisar reloj del servidor")
+    return df
 
 def _background_get_market():
     response = requests.get(
@@ -1624,31 +1000,12 @@ def _background_get_market():
 
 def _background_get_live_price(market, with_source=False):
     try:
-        event_ticker = get_event_ticker_from_market(market)
-        if event_ticker:
-            response = requests.get(
-                "https://external-api.kalshi.com/trade-api/v2/live_data/events/" + str(event_ticker),
-                params={"range": "15min", "_": int(datetime.now(timezone.utc).timestamp())},
-                headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
-                timeout=6,
-            )
-            response.raise_for_status()
-            price = extract_kalshi_btc_price(response.json())
-            if price is not None:
-                return (float(price), "KALSHI") if with_source else float(price)
+        price = get_kalshi_live_btc(market)
+        source = "KALSHI"
     except Exception:
-        pass
-    response = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
-        params={"_": int(datetime.now(timezone.utc).timestamp())},
-        timeout=6,
-    )
-    response.raise_for_status()
-    price = response.json().get("price")
-    if price in (None, ""):
-        raise ValueError("Sin precio BTC live.")
-    return (float(price), "COINBASE") if with_source else float(price)
+        price = get_btc_live_price()
+        source = "COINBASE"
+    return (price,source) if with_source else price
 
 def _background_update_state(state, sig, market, seconds_left):
     now = datetime.now(timezone.utc)
@@ -1678,12 +1035,12 @@ def _background_update_state(state, sig, market, seconds_left):
     return state
 
 def _background_history_loop():
-    started = time.monotonic()
     active_ticker = None
     active_state = None
-    while time.monotonic() - started < BACKGROUND_RUN_SECONDS:
+    while True:
         try:
-            market = _background_get_market()
+            snapshot = shared_market_data_v12().snapshot()
+            market = snapshot["market"]
             if not market:
                 time.sleep(BACKGROUND_POLL_SECONDS); continue
             ticker = str(market.get("ticker") or "--")
@@ -1700,9 +1057,7 @@ def _background_history_loop():
                 active_state = restored or new_round_state(ticker, get_seconds_remaining(market))
             seconds_left = get_seconds_remaining(market)
             target = get_target_from_market(market)
-            live_price = _background_get_live_price(market)
-            btc_df = _background_get_btc_data()
-            sig = build_signal(btc_df, target, seconds_left, live_price)
+            sig = dict(snapshot["sig"])
             active_state = _background_update_state(active_state, sig, market, seconds_left)
             if seconds_left is not None and seconds_left <= 0:
                 save_round_history(active_state)
@@ -1711,39 +1066,10 @@ def _background_history_loop():
         time.sleep(BACKGROUND_POLL_SECONDS)
 
 @st.cache_resource
-def start_12h_history_worker():
-    worker = threading.Thread(target=_background_history_loop, name="btc-history-12h", daemon=True)
+def start_history_worker():
+    worker = threading.Thread(target=_background_history_loop, name="btc-history", daemon=True)
     worker.start()
     return worker
-
-# =========================================================
-# LECTOR DE CIERRE PRO — MICRO LECTURA ~2 SEGUNDOS
-# Mantiene intacto el motor v4.6.1 y sus señales.
-# No inventa velas REST de 1 segundo: construye una cinta
-# de muestras del BTC live que ya recibe el dashboard.
-# =========================================================
-
-def update_micro_tape(ticker, live_price):
-    if not ticker or ticker == "--" or live_price is None:
-        return
-
-    # Cada ronda empieza con su propia cinta.
-    if st.session_state.micro_ticker != ticker:
-        st.session_state.micro_ticker = ticker
-        st.session_state.micro_prices = []
-
-    now_ts = datetime.now(timezone.utc).timestamp()
-    tape = st.session_state.micro_prices
-
-    # Evita duplicar muestras dentro del mismo refresco.
-    if not tape or now_ts - tape[-1]["t"] >= 1.0:
-        tape.append({"t": now_ts, "p": float(live_price)})
-
-    # Conserva aproximadamente los últimos 90 segundos.
-    cutoff = now_ts - 90
-    st.session_state.micro_prices = [
-        x for x in tape if x["t"] >= cutoff
-    ]
 
 
 def micro_reading():
@@ -1784,7 +1110,6 @@ def micro_reading():
         if nonzero else 0.5
     )
 
-    # Regresión simple precio/tiempo para medir dirección micro.
     xs = np.array([x["t"] - tape[0]["t"] for x in tape], dtype=float)
     ys = np.array([x["p"] for x in tape], dtype=float)
     slope = float(np.polyfit(xs, ys, 1)[0]) if len(xs) >= 3 and xs[-1] > 0 else 0.0
@@ -1855,8 +1180,6 @@ def closing_reader(sig, round_signal, seconds_left, micro):
     if direction not in ("UP", "DOWN"):
         direction = "UP" if float(sig.get("mom3", 0) or 0) >= 0 else "DOWN"
 
-    # Movimiento restante esperado: ATR de 1 minuto escalado por sqrt(tiempo).
-    # Se adapta solo a la volatilidad actual de BTC y se afina con la cinta live.
     atr1 = max(float(sig.get("atr", 0) or 0), 1.0)
     remaining_sigma = atr1 * np.sqrt(max(secs, 1) / 60.0)
 
@@ -1870,39 +1193,29 @@ def closing_reader(sig, round_signal, seconds_left, micro):
         slope = float(micro.get("slope", 0) or 0)
         ratio = float(micro.get("up_ratio", .5) or .5)
 
-        # Drift reciente amortiguado: cuanto menos tiempo queda, más relevante.
         observed_drift = (0.45*c5/5.0 + 0.35*c10/10.0 + 0.20*c30/30.0)
         time_focus = 1.0 - min(1.0, secs / 180.0)
         micro_drift = observed_drift * secs * (0.20 + 0.80*time_focus)
 
-        # Ruido observado por segundo, convertido al horizonte restante.
         local_scale = max(abs(c5)/np.sqrt(5), abs(c10)/np.sqrt(10), abs(c30)/np.sqrt(30), abs(slope)*1.5, 1.0)
         micro_noise = local_scale * np.sqrt(max(secs, 1))
-        # Cerca del cierre la cinta manda más; lejos, ATR manda más.
         blend = 1.0 - min(1.0, secs / 180.0)
         remaining_sigma = (1.0-blend)*remaining_sigma + blend*micro_noise
 
         micro_text = f"MICRO {micro.get('pressure','NEUTRAL')} • 10s {c10:+.1f} • 30s {c30:+.1f}"
 
-    # Distancia proyectada al cierre. Positiva = UP, negativa = DOWN.
     projected_distance = float(distance) + micro_drift
 
-    # Convierte colchón/volatilidad restante a probabilidad sin umbrales de dólares.
-    # logistic evita reglas rígidas y permite que una ronda prácticamente definida
-    # llegue naturalmente a 100% al redondear.
     risk_scale = max(remaining_sigma * 0.72, 0.75)
     z = projected_distance / risk_scale
     up_close_prob = 100.0 / (1.0 + np.exp(-np.clip(z, -12, 12)))
     side_prob = up_close_prob if direction == "UP" else 100.0 - up_close_prob
 
-    # Si la dirección estimada por la proyección cruzó el target, el lector gira.
     projected_side = "UP" if projected_distance > 0 else "DOWN" if projected_distance < 0 else market_side
     if projected_side in ("UP", "DOWN") and projected_side != direction:
         direction = projected_side
         side_prob = up_close_prob if direction == "UP" else 100.0 - up_close_prob
 
-    # Antes de los últimos 3 minutos conserva algo del contexto técnico;
-    # al acercarse el cierre, tiempo+target dominan progresivamente.
     if secs > 180 and active_direction in ("UP", "DOWN"):
         tech_prob = float(sig.get("up_probability", 50) if direction == "UP" else sig.get("down_probability", 50))
         clock_weight = max(0.15, min(0.55, (900-secs)/720.0))
@@ -1910,7 +1223,6 @@ def closing_reader(sig, round_signal, seconds_left, micro):
 
     confidence = int(round(np.clip(side_prob, 0, 100)))
 
-    # Texto coherente con reloj + colchón dinámico, no con una distancia fija.
     cushion = abs(projected_distance) / max(remaining_sigma, 1.0)
     if confidence >= 99:
         confidence = 100
@@ -1946,11 +1258,7 @@ def closing_reader(sig, round_signal, seconds_left, micro):
             "color":color,"border":border,"bg":bg,"direction":direction}
 
 
-
-
 def render_live_candles(df, live_price, target, active, timeframe="1m"):
-    # Renderiza velas BTC/USD para visualización sin cambiar el motor v4.6.1.
-    # 3m y 5m se construyen agrupando las velas reales de Coinbase de 1 minuto.
     if df is None or len(df) < 5:
         return f'<div class="chartbox"><div class="charttitle">BTC/USD · {timeframe}</div><div class="chartempty">Esperando velas…</div></div>'
 
@@ -1974,7 +1282,6 @@ def render_live_candles(df, live_price, target, active, timeframe="1m"):
         d = source_df[["time", "open", "high", "low", "close", "volume"]].copy()
 
     d = d.tail(42).reset_index(drop=True)
-    # La última vela se mantiene visualmente al precio live recibido por el dashboard.
     if live_price is not None and len(d):
         i = d.index[-1]
         d.loc[i, "close"] = float(live_price)
@@ -1997,18 +1304,15 @@ def render_live_candles(df, live_price, target, active, timeframe="1m"):
     def y(v): return top + (hi-float(v))/(hi-lo)*ph
     n=len(d); step=pw/max(n,1); body=max(3.2, min(8, step*.58))
 
-    svg=[]
-    # horizontal grid + prices
+    svg=[]    # horizontal grid + prices
     for k in range(5):
         yy=top+ph*k/4; price=hi-(hi-lo)*k/4
         svg.append(f'<line x1="{left}" y1="{yy:.1f}" x2="{W-right}" y2="{yy:.1f}" stroke="#182536" stroke-width="1"/>')
         svg.append(f'<text x="{W-right+8}" y="{yy+4:.1f}" fill="#8392a7" font-size="12">{price:,.0f}</text>')
-    # vertical grid
     for k in range(5):
         xx=left+pw*k/4
         svg.append(f'<line x1="{xx:.1f}" y1="{top}" x2="{xx:.1f}" y2="{top+ph}" stroke="#121e2d" stroke-width="1"/>')
 
-    # volume scaled into bottom 52 px of plot
     vmax=max(float(d["volume"].max()),1)
     vbase=top+ph
     for i,row in d.iterrows():
@@ -2016,7 +1320,6 @@ def render_live_candles(df, live_price, target, active, timeframe="1m"):
         col='#16b97a' if float(row['close'])>=float(row['open']) else '#c43d59'
         svg.append(f'<rect x="{x-body/2:.1f}" y="{vbase-vh:.1f}" width="{body:.1f}" height="{vh:.1f}" fill="{col}" opacity=".55"/>')
 
-    # candles
     for i,row in d.iterrows():
         x=left+(i+.5)*step
         o,c,h,l=map(float,[row['open'],row['close'],row['high'],row['low']])
@@ -2025,28 +1328,23 @@ def render_live_candles(df, live_price, target, active, timeframe="1m"):
         yy=min(y(o),y(c)); hh=max(2.0,abs(y(o)-y(c)))
         svg.append(f'<rect x="{x-body/2:.1f}" y="{yy:.1f}" width="{body:.1f}" height="{hh:.1f}" rx=".7" fill="{col}"/>')
 
-    # EMA paths
     def path(series,color):
         pts=' '.join(f'{left+(i+.5)*step:.1f},{y(v):.1f}' for i,v in enumerate(series))
         return f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
     svg.append(path(ema9,'#df42e7'))
     svg.append(path(ema21,'#32d7ef'))
 
-    # target line
     if target is not None and lo <= float(target) <= hi:
         ty=y(target)
         svg.append(f'<line x1="{left}" y1="{ty:.1f}" x2="{W-right}" y2="{ty:.1f}" stroke="#23e7c1" stroke-width="1.8" stroke-dasharray="7 6"/>')
-        # La etiqueta queda en el margen derecho, fuera del área de velas.
         svg.append(f'<rect x="{W-right+18}" y="{ty-12:.1f}" width="96" height="23" rx="3" fill="#20e7bd"/>')
         svg.append(f'<text x="{W-right+25}" y="{ty+4:.1f}" fill="#061510" font-size="10" font-weight="800">TARGET</text>')
-    # live price line + label
     if live_price is not None and lo <= float(live_price) <= hi:
         ly=y(live_price); lc='#31e889' if active=='UP' else '#ff5367' if active=='DOWN' else '#38bdf8'
         svg.append(f'<line x1="{left}" y1="{ly:.1f}" x2="{W-right}" y2="{ly:.1f}" stroke="{lc}" stroke-width="1.3" stroke-dasharray="3 4"/>')
         svg.append(f'<rect x="{W-right+18}" y="{ly-12:.1f}" width="96" height="23" rx="3" fill="{lc}"/>')
         svg.append(f'<text x="{W-right+25}" y="{ly+4:.1f}" fill="#061510" font-size="11" font-weight="900">{float(live_price):,.0f}</text>')
 
-    # time labels
     picks=[0, max(0,n//3), max(0,2*n//3), n-1]
     for idx in picks:
         tm=d.iloc[idx]['time'].to_pydatetime().astimezone(ZoneInfo("America/New_York")).strftime('%-I:%M %p')
@@ -2066,19 +1364,6 @@ def render_live_candles(df, live_price, target, active, timeframe="1m"):
       <div class="chartfoot"><span class="selected">{timeframe}</span><span>VELAS REALES COINBASE</span><span>ACTUALIZACIÓN LIVE</span></div>
     </section>'''
 
-
-# =========================================================
-# NAVEGACIÓN REAL — EL ENGRANAJE ABRE AJUSTES
-# No muestra botones extra en la pantalla principal.
-# =========================================================
-
-
-
-# =========================================================
-# AUTO TRADING — PANEL SEPARADO (NO MODIFICA build_signal)
-# Configuración, conexión, simulación y ejecución REAL mediante el worker.
-# Las credenciales viven en memoria del servidor; nunca se escriben en SQLite.
-# =========================================================
 
 KALSHI_API_BASE = "https://external-api.kalshi.com"
 AUTO_DB = "btc_auto_trading.db"
@@ -2107,17 +1392,6 @@ def _auto_db():
     """)
     con.commit()
     return con
-
-
-def load_auto_orders(limit=100):
-    con = _auto_db()
-    try:
-        return pd.read_sql_query(
-            "SELECT * FROM auto_orders ORDER BY id DESC LIMIT ?", con,
-            params=(int(limit),)
-        )
-    finally:
-        con.close()
 
 
 def _normalize_private_key(pem_text):
@@ -2167,7 +1441,6 @@ def kalshi_get_balance(key_id, private_key_text):
             detail = r.text[:300]
         raise RuntimeError(f"Kalshi {r.status_code}: {detail}")
     data = r.json()
-    # Prefer fixed-point dollars; legacy integer balance is cents.
     if data.get("balance_dollars") is not None:
         balance = float(data["balance_dollars"])
     else:
@@ -2185,7 +1458,6 @@ def martingale_plan(capital, levels, multiplier):
         weights = [multiplier ** i for i in range(levels)]
     total_w = sum(weights) or 1.0
     raw = [capital * w / total_w for w in weights]
-    # cents-safe display; last level absorbs rounding without exceeding capital.
     amounts = [math.floor(x * 100) / 100 for x in raw]
     if amounts:
         remainder = round(capital - sum(amounts), 2)
@@ -2249,15 +1521,7 @@ def save_auto_config(cfg):
     con.commit(); con.close()
 
 
-# =========================================================
-# EJECUCIÓN AUTÓNOMA: PRESEÑAL DIRECTA + ÓRDENES KALSHI V2
-# Uso individual: proteger el acceso al despliegue y sus ajustes.
-# Credenciales solo en memoria; al reiniciar se necesita reconectar
-# o configurar KALSHI_KEY_ID / KALSHI_PRIVATE_KEY en st.secrets.
-# =========================================================
-
 def execution_choice(sig, cfg, secs):
-    # La decisión automática pertenece únicamente al motor principal.
     side = sig.get("candidate")
     return side, sig.get("up_probability" if side == "UP" else "down_probability", 50)
 
@@ -2279,7 +1543,6 @@ def refine_main_signal(sig):
         sig["quality"] = "IMPULSO MIXTO O PLANO"
         return sig
     sign = 1 if side == "UP" else -1
-    # El impulso por sí solo no basta: exige apoyo del momentum de velas.
     momentum = sig.get("mom3", 0)
     if sign * momentum <= 0:
         sig["candidate"] = None
@@ -2287,7 +1550,6 @@ def refine_main_signal(sig):
         return sig
     sig["candidate"] = side
     sig["quality"] = "TEMPRANA · IMPULSO ACTUAL"
-    # Limita la contribución lenta para que no decida contra el impulso actual.
     evidence = float(np.clip(sig.get("technical_score", 0), -2, 2)) + sign * 3
     sig["technical_score"] = sig["final_score"] = evidence
     sig["up_probability"] = round(float(np.clip(50 + evidence * 7, 5, 95)))
@@ -2296,7 +1558,6 @@ def refine_main_signal(sig):
 
 
 def v2_order_payload(ticker, direction, action, quantity, price, client_id):
-    # V2 cotiza siempre el lado YES. Compra NO = ask YES.
     yes_price = price if direction == "UP" else 1.0 - price
     bid = (direction == "UP") == (action == "buy")
     if not (0 < yes_price < 1) or quantity <= 0:
@@ -2309,71 +1570,25 @@ def v2_order_payload(ticker, direction, action, quantity, price, client_id):
             "reduce_only": action == "sell", "cancel_order_on_pause": True}
 
 
-class RecentEntryConfirmation:
-    """Filtro de entrada, no estimador de probabilidad ni señal de salida.
-
-    Exige cinta continua de 30s, movimiento coincidente en 5/10/30s y
-    coincidencia sostenida 10s. Umbrales iniciales sin calibración histórica.
-    """
+class RecentPriceHistory:
+    """Muestras para el motor actual. No autoriza órdenes ni agrega esperas."""
     def __init__(self):
         self.key = None
         self.samples = []
-        self.candidate = None
-        self.since = None
-
-    def reset_candidate(self):
-        self.candidate = None
-        self.since = None
 
     def observe(self, ticker, source, price, now):
         key = (ticker, source)
         if not math.isfinite(price) or price <= 0:
             self.samples = []
-            self.reset_candidate()
             return
         if key != self.key or (self.samples and
                 (now <= self.samples[-1][0] or now - self.samples[-1][0] > 12)):
             self.key = key
             self.samples = []
-            self.reset_candidate()
         self.samples.append((now, price))
         self.samples = [(t, p) for t, p in self.samples if now - t <= 50]
 
-    def check(self, side, atr, now):
-        if side not in ("UP", "DOWN"):
-            self.reset_candidate()
-            return False, "Preseñal sin dirección suficiente"
-        if not self.samples or now - self.samples[-1][0] > 6:
-            self.reset_candidate()
-            return False, "Esperando precios recientes"
-        deltas = []
-        for seconds in (5, 10, 30):
-            ref = next(((t, p) for t, p in reversed(self.samples)
-                        if t <= now - seconds), None)
-            if ref is None or now - seconds - ref[0] > 6:
-                self.reset_candidate()
-                return False, "Reuniendo 30 s de precios para confirmar entrada temprana"
-            deltas.append(self.samples[-1][1] - ref[1])
-        # Descarta movimiento plano; no exige estar ya del lado del target.
-        atr = float(atr)
-        if not math.isfinite(atr) or atr <= 0:
-            self.reset_candidate()
-            return False, "Volatilidad inválida; esperando datos"
-        minimum = max(0.50, atr * 0.01)
-        sign = 1 if side == "UP" else -1
-        detail = "/".join(f"{d:+.2f}" for d in deltas)
-        if any(sign * d < minimum for d in deltas):
-            self.reset_candidate()
-            return False, f"Esperando impulso {side}: 5/10/30 s {detail} USD"
-        if self.candidate != side:
-            self.candidate, self.since = side, now
-        elapsed = now - self.since
-        if elapsed < 10:
-            return False, f"Confirmando impulso {side}: {elapsed:.0f}/10 s"
-        return True, f"Impulso {side} confirmado · 5/10/30 s {detail} USD"
-
     def movement(self, atr, now):
-        # Lectura pura: no avanza ni autoriza el temporizador de compras.
         if not self.samples or now - self.samples[-1][0] > 6:
             return {"ready":False, "reason":"Esperando precios recientes"}
         deltas = []
@@ -2387,6 +1602,87 @@ class RecentEntryConfirmation:
             return {"ready":False, "reason":"Esperando volatilidad válida"}
         return {"ready":True, "deltas":deltas, "minimum":max(0.50, float(atr)*0.01)}
 
+class SharedMarketData:
+    """UI, history and executor consume one immutable evaluation per cycle."""
+    def __init__(self):
+        self.lock=threading.RLock()
+        self.tape=RecentPriceHistory()
+        self.latest=None
+        self.last_candles=None
+        self.candles_at=0
+        self.sequence=0
+    def snapshot(self):
+        with self.lock:
+            mono=time.monotonic()
+            if self.latest is not None and mono-self.latest["mono"]<2:
+                return self.latest
+            market=_background_get_market()
+            if not market:
+                raise ValueError("Sin mercado activo")
+            secs=get_seconds_remaining(market)
+            target=get_target_from_market(market)
+            if secs is None or secs<=0 or target is None:
+                raise ValueError("Sin ronda, reloj o target válidos")
+            need_candles=(self.last_candles is None or mono-self.candles_at>=15
+                          or candle_age_seconds(self.last_candles)>120)
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                price_job=pool.submit(_background_get_live_price,market,True)
+                candles_job=pool.submit(_background_get_btc_data) if need_candles else None
+                if candles_job:
+                    self.last_candles=candles_job.result()
+                    self.candles_at=time.monotonic()
+                price,source=price_job.result()
+            completed=time.monotonic()
+            age=candle_age_seconds(self.last_candles)
+            self.tape.observe(market["ticker"],source,float(price),completed)
+            sig=build_signal(self.last_candles,target,secs,price)
+            sig["recent_moves"]=self.tape.movement(sig.get("atr",0),completed)
+            sig=refine_main_signal(sig)
+            valid=-5<=age<=120
+            if not valid:
+                sig=dict(sig,candidate=None,quality="DATOS ANTIGUOS · SIN ENTRADA")
+            self.sequence+=1
+            self.latest={"market":market,"df":self.last_candles.copy(),"sig":sig,
+                         "price":price,"source":source,"mono":completed,"valid":valid,
+                         "candle_age":age,"sequence":self.sequence,
+                         "tape":list(self.tape.samples)}
+            return self.latest
+
+@st.cache_resource
+def shared_market_data_v12():
+    return SharedMarketData()
+
+
+def record_execution_event(scope, message, context):
+    with sqlite3.connect(AUTO_DB,timeout=15) as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS execution_events(id INTEGER PRIMARY KEY,scope TEXT,created_at TEXT,context_json TEXT,message TEXT)")
+        conn.execute("INSERT INTO execution_events(scope,created_at,context_json,message) VALUES(?,?,?,?)",
+                     (scope,datetime.now(timezone.utc).isoformat(),json.dumps(context),message))
+        conn.execute("DELETE FROM execution_events WHERE id NOT IN (SELECT id FROM execution_events ORDER BY id DESC LIMIT 5000)")
+
+def load_execution_events(scope,limit=30):
+    with sqlite3.connect(AUTO_DB,timeout=15) as conn:
+        exists=conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='execution_events'").fetchone()
+        if not exists:
+            return pd.DataFrame()
+        return pd.read_sql_query("SELECT created_at AS Hora, message AS Motivo, context_json AS Datos FROM execution_events WHERE scope=? ORDER BY id DESC LIMIT ?",conn,params=(scope,int(limit)))
+
+def export_bot_backup():
+    """Consistent SQLite backups. API credentials are excluded."""
+    worker=current_execution_worker()
+    out=io.BytesIO()
+    with worker.lock, tempfile.TemporaryDirectory() as folder:
+        with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as archive:
+            for name in (AUTO_DB,ROUND_STATE_DB,HISTORY_DB):
+                if not os.path.isfile(name):
+                    continue
+                dest=os.path.join(folder,os.path.basename(name))
+                with sqlite3.connect(name,timeout=15) as original:
+                    with sqlite3.connect(dest) as backup:
+                        original.backup(backup)
+                archive.write(dest,os.path.basename(name))
+            archive.writestr("LEEME.txt","Copia de configuración, operaciones y rondas. No contiene claves privadas. Mantener en un lugar seguro. El almacenamiento local de Streamlit Cloud no es permanente.")
+    return out.getvalue()
 
 class ExecutionWorker:
     def __init__(self):
@@ -2394,9 +1690,9 @@ class ExecutionWorker:
         self.key_id = ""; self.pem = ""
         self.message = "Conecta Kalshi para operar en REAL"
         self.status_by_mode = {}
+        self.context_by_mode = {}
         self.heartbeat = None
         self.balance = None
-        self.entry_gates = {}
         self.thread = threading.Thread(target=self.run, name="alpha-execution", daemon=True)
         self.thread.start()
 
@@ -2475,8 +1771,6 @@ class ExecutionWorker:
         try:
             r.raise_for_status()
         except requests.HTTPError as error:
-            # Preserve HTTPError/response so submit() still handles rejected
-            # versus ambiguous orders without duplicating an unknown POST.
             try:
                 detail = r.json()
                 if isinstance(detail, dict):
@@ -2503,7 +1797,6 @@ class ExecutionWorker:
                    if p.get("ticker") == ticker)
 
     def reconcile(self, intent):
-        # Nunca repetir un POST cuyo resultado sea desconocido.
         cursor = ""
         for _ in range(20):
             data = self.api("GET", "/trade-api/v2/portfolio/orders",
@@ -2574,7 +1867,6 @@ class ExecutionWorker:
             try:
                 d = self.api("POST", "/trade-api/v2/portfolio/events/orders", body)
             except requests.HTTPError as e:
-                # 409/5xx son ambiguos: conservar el intento para reconciliar.
                 if e.response is not None and e.response.status_code in (400, 401, 403, 404, 422, 429):
                     ledger["pending"] = None; self.write_ledger(scope, ledger)
                 raise
@@ -2594,9 +1886,6 @@ class ExecutionWorker:
         for p in ledger["positions"]:
             if p["remaining"] <= .0001: continue
             m = self.market(p["ticker"])
-            # Kalshi reports completed settlements as 'finalized'. Accept the
-            # older 'settled' spelling too, but never infer a result from time,
-            # a zero quote, or a merely closed/determined market.
             market_status = str(m.get("status") or "").lower()
             result = str(m.get("result") or "").lower()
             if market_status in ("finalized", "settled") and result in ("yes", "no"):
@@ -2637,17 +1926,19 @@ class ExecutionWorker:
                 if ledger["pending"]: return
 
     def tick(self, mode, cfg):
-        # A running thread keeps its original run() code after an in-place
-        # class upgrade. Publish here as well so even that legacy loop supplies
-        # a fresh, mode-specific status on every completed evaluation.
+        self.context_by_mode[mode] = {}
+        previous_message = self.status_by_mode.get(mode,{}).get("message")
         try:
             return self._tick(mode, cfg)
         except Exception as error:
-            if mode in self.entry_gates:
-                self.entry_gates[mode].reset_candidate()
             self.message = "No se ejecutó otra orden: " + str(error)[:240]
             raise
         finally:
+            if self.message != previous_message:
+                try:
+                    record_execution_event(self.scope(mode),self.message,self.context_by_mode[mode])
+                except Exception:
+                    pass
             self.status_by_mode[mode] = {
                 "message": self.message,
                 "heartbeat": datetime.now(timezone.utc).isoformat(),
@@ -2683,27 +1974,25 @@ class ExecutionWorker:
         if cfg["martingale_on"] and losses >= levels:
             self.message = "Ciclo de martingala agotado; usa REINICIAR CICLO en Auto Trading"
             return
-        m = _background_get_market()
-        if not m or m.get("status") != "active": self.message = "Sin mercado activo"; return
-        secs = get_seconds_remaining(m); target = get_target_from_market(m)
-        if secs is None or secs <= 0 or target is None:
-            self.message = "Sin reloj o target válidos"; return
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            candles_job = pool.submit(_background_get_btc_data)
-            price_job = pool.submit(_background_get_live_price, m, True)
-            df = candles_job.result()
-            live_price, live_source = price_job.result()
-        gate = self.entry_gates.setdefault(mode, RecentEntryConfirmation())
-        gate.observe(m["ticker"], live_source, float(live_price), time.monotonic())
-        if (datetime.now(timezone.utc) - df.iloc[-1]["time"].to_pydatetime()).total_seconds() > 120:
-            gate.reset_candidate()
-            self.message = "Velas desactualizadas"; return
-        sig = build_signal(df, target, secs, live_price)
-        sig["recent_moves"] = gate.movement(sig.get("atr", 0), time.monotonic())
-        sig = refine_main_signal(sig)
+        snapshot = shared_market_data_v12().snapshot()
+        m = snapshot["market"]
+        self.context_by_mode[mode] = {
+            "ticker":m.get("ticker"), "signal":snapshot["sig"].get("candidate"),
+            "candle_age_seconds":round(snapshot["candle_age"],1),
+            "yes_ask":get_yes_ask(m), "no_ask":get_no_ask(m),
+            "evaluation":snapshot["sequence"], "source":snapshot["source"],
+        }
+        if m.get("status") != "active":
+            self.message = "Sin mercado activo"; return
+        secs = get_seconds_remaining(m)
+        if secs is None or secs <= 0:
+            self.message = "Ronda cerrada; esperando siguiente"; return
+        age = candle_age_seconds(snapshot["df"])
+        if not snapshot["valid"] or age > 120:
+            self.message = f"Velas desactualizadas: {age:.0f} s · última {snapshot['df'].iloc[-1]['time'].isoformat()}"; return
+        sig = dict(snapshot["sig"])
         side, confidence = execution_choice(sig, cfg, secs)
         if side not in ("UP", "DOWN") or confidence < cfg["min_conf"]:
-            gate.reset_candidate()
             pre_reason = sig.get("quality") if side not in ("UP", "DOWN") else None
             self.message = pre_reason or f'Lectura {side or "NEUTRAL"} · puntuación {confidence}: mínimo {cfg["min_conf"]}'; return
         positions = ledger["positions"]
@@ -2722,8 +2011,7 @@ class ExecutionWorker:
         confirmation_note = sig.get("quality", "Entrada por motor principal")
         price = get_yes_ask(m) if side == "UP" else get_no_ask(m)
         if price is None or not cfg["min_price"] <= price * 100 <= cfg["max_price"]:
-            self.message = f'{side}: precio fuera de {cfg["min_price"]}–{cfg["max_price"]}¢'; return
-        # Capital = presupuesto global: descuenta pérdidas netas y costes abiertos.
+            self.message = f'{side}: precio {price*100:.1f}¢ fuera de {cfg["min_price"]}–{cfg["max_price"]}¢' if price is not None else f'{side}: sin precio de compra'; return
         realized = sum(p["pnl"] or 0 for p in positions)
         available = max(0, cfg["capital"] + min(0, realized))
         allocation = martingale_plan(max(0, cfg["capital"] - cfg["reserve"]), levels,
@@ -2734,7 +2022,6 @@ class ExecutionWorker:
             budget = min(budget, max(0, bal - cfg["reserve"]))
             if abs(self.position(m["ticker"])) > .0001:
                 self.message = "Ya hay posición externa en esta ronda; revisar Kalshi"; return
-        # Reserva conservadora para fees (hasta 7¢ por contrato); no promete costes.
         fee_buffer = .07 if mode == "REAL" else 0
         qty = math.floor((budget + 1e-9) / (price + fee_buffer))
         if qty < 1: self.message = "Presupuesto insuficiente para 1 contrato y comisiones"; return
@@ -2745,7 +2032,6 @@ class ExecutionWorker:
         self.submit(scope, ledger, intent)
 
     def run(self):
-        # Exclusión entre procesos sobre la misma carpeta / SQLite.
         with open(AUTO_DB + ".worker.lock", "a") as handle:
             try: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError:
@@ -2765,11 +2051,6 @@ class ExecutionWorker:
                                 self.tick(mode, cfg)
                             except Exception as e:
                                 self.message = "No se ejecutó otra orden: " + str(e)[:240]
-                            # Publica solo ciclos terminados; SIMULACIÓN no altera el estado de REAL.
-                            self.status_by_mode[mode] = {
-                                "message": self.message,
-                                "heartbeat": datetime.now(timezone.utc).isoformat(),
-                            }
                         if cfg["mode"] == "REAL" and cfg["enabled"] and not self.key_id:
                             self.message = "REAL activado: falta conectar Kalshi"
                             self.status_by_mode["REAL"] = {"message": self.message,
@@ -2783,7 +2064,6 @@ class ExecutionWorker:
                 time.sleep(2)
 
     def snapshot(self):
-        # Lectura sin bloquear la UI durante solicitudes de red.
         mode = load_auto_config()["mode"]
         status = self.status_by_mode.get(mode, {
             "message": "Conecta Kalshi para operar en REAL" if mode == "REAL" and not self.key_id
@@ -2797,18 +2077,7 @@ def execution_worker():
 
 
 def current_execution_worker():
-    # Streamlit may retain an instance of the previous class after a source edit.
-    # Upgrade that same instance under its existing lock. Do not create a second
-    # trading thread, clear credentials, or discard the ledger.
-    worker = execution_worker()
-    with worker.lock:
-        if worker.__class__ is not ExecutionWorker:
-            worker.__class__ = ExecutionWorker
-        if not hasattr(worker, "status_by_mode"):
-            worker.status_by_mode = {}
-        if not hasattr(worker, "entry_gates"):
-            worker.entry_gates = {}
-    return worker
+    return execution_worker()
 
 
 def load_execution_orders(limit=100):
@@ -2843,7 +2112,11 @@ def render_execution_status():
     if status["heartbeat"]:
         st.caption("Última revisión: " + status["heartbeat"])
     with st.expander("Ver operaciones y detalles", expanded=False):
-        st.caption("Entrada directa por preseñal. Los porcentajes son puntuaciones heurísticas, sin calibración estadística.")
+        st.caption("Entrada por señal principal compartida; respeta confianza, precio y capital. Las puntuaciones no son probabilidades calibradas.")
+        worker = current_execution_worker()
+        events = load_execution_events(worker.scope(cfg["mode"]))
+        if not events.empty:
+            st.dataframe(events,hide_index=True,use_container_width=True)
         if not orders.empty:
             cols = ["created_at", "ticker", "side", "level", "entry_cents", "contracts", "remaining", "status", "pnl", "order_id"]
             st.dataframe(orders[[c for c in cols if c in orders]], hide_index=True, use_container_width=True)
@@ -2878,7 +2151,6 @@ def render_auto_trading_page():
     <div class="auto-head"><h2>Ajustes del bot</h2><a class="auto-x" href="?page=signal" target="_self">×</a></div>
     """, unsafe_allow_html=True)
 
-    # Credentials remain session-only; never persist the private key.
     for k,v in [("kalshi_key_id",""),("kalshi_private_key",""),("kalshi_balance",None)]:
         if k not in st.session_state: st.session_state[k]=v
 
@@ -2973,6 +2245,14 @@ def render_auto_trading_page():
             save_auto_config(new_cfg); st.session_state.auto_config=new_cfg
             st.success("Configuración guardada. Auto Trading conservará estos ajustes al salir de esta pantalla.")
 
+    with st.expander("COPIA DE SEGURIDAD",expanded=False):
+        st.caption("Guarda configuración, operaciones y rondas. Las claves se conservan aparte en Secrets; no se incluyen aquí.")
+        if st.button("PREPARAR COPIA",key="prepare_backup"):
+            st.session_state.bot_backup = export_bot_backup()
+        if st.session_state.get("bot_backup"):
+            st.download_button("DESCARGAR COPIA",data=st.session_state.bot_backup,
+                               file_name="btc_bot_backup.zip",mime="application/zip")
+        st.caption("En Streamlit Cloud, la continuidad del servidor y los archivos locales no están garantizados.")
     st.markdown('<div class="auto-section">COMPRAS / ÓRDENES</div>',unsafe_allow_html=True)
     orders=load_execution_orders(100)
     if orders.empty: st.caption("Todavía no hay operaciones registradas.")
@@ -2981,7 +2261,6 @@ def render_auto_trading_page():
         st.dataframe(orders[[c for c in cols if c in orders.columns]],use_container_width=True,hide_index=True)
 
 def render_history_page():
-    # SOLO COLOR/CONTRASTE DEL HISTORIAL. No cambia datos ni lógica.
     st.markdown(
         """
         <style>
@@ -2997,8 +2276,7 @@ def render_history_page():
         div[data-testid="stHorizontalBlock"] > div:nth-child(3) div[data-testid="stMetricLabel"],
         div[data-testid="stHorizontalBlock"] > div:nth-child(3) div[data-testid="stMetricValue"] { color:#ff4e5f !important; }
         /* Acierto */
-        div[data-testid="stHorizontalBlock"] > div:nth-child(4) div[data-testid="stMetricLabel"],
-        div[data-testid="stHorizontalBlock"] > div:nth-child(4) div[data-testid="stMetricValue"] { color:#f7bd4d !important; }
+        div[data-testid="stHorizontalBlock"] > div:nth-child(4) div[data-testid="stMetricLabel"],        div[data-testid="stHorizontalBlock"] > div:nth-child(4) div[data-testid="stMetricValue"] { color:#f7bd4d !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -3022,103 +2300,30 @@ def render_history_page():
 
 @st.fragment(run_every="2s")
 def live_dashboard():
-    btc_error = ""
-    live_price_error = ""
-    kalshi_error = ""
-    kalshi_live_error = ""
-
+    btc_error = live_price_error = kalshi_error = kalshi_live_error = ""
     try:
-        btc_df = add_indicators(get_btc_data())
-        btc_ok = True
+        snapshot = shared_market_data_v12().snapshot()
     except Exception as error:
-        btc_ok = False
-        btc_error = str(error)
-        btc_df = None
-
-    try:
-        market = get_kalshi_btc_market()
-        kalshi_ok = market is not None
-    except Exception as error:
-        kalshi_ok = False
-        kalshi_error = str(error)
-        market = None
-
-    try:
-        coinbase_live_price = get_btc_live_price()
-        coinbase_live_ok = True
-    except Exception as error:
-        coinbase_live_ok = False
-        live_price_error = str(error)
-        coinbase_live_price = (
-            float(btc_df.iloc[-1]["close"]) if btc_ok else None
-        )
-
-    kalshi_live_price = None
-    kalshi_live_ok = False
-
-    if market:
-        try:
-            kalshi_live_price = get_kalshi_live_btc(market)
-            kalshi_live_ok = True
-        except Exception as error:
-            kalshi_live_error = str(error)
-
-    if kalshi_live_price is not None:
-        live_btc_price = kalshi_live_price
-        source = "KALSHI LIVE"
-    else:
-        live_btc_price = coinbase_live_price
-        source = (
-            "COINBASE"
-            if coinbase_live_ok or live_btc_price is not None
-            else "SIN DATOS"
-        )
-
-    if market:
-        ticker = market.get("ticker", "--")
-        target = get_target_from_market(market)
-        seconds_left = get_seconds_remaining(market)
-    else:
-        ticker = "--"
-        target = None
-        seconds_left = None
-
-    if btc_ok:
-        sig = build_signal(
-            btc_df, target, seconds_left, live_btc_price
-        )
-    else:
-        sig = {
-            "price": live_btc_price if live_btc_price is not None else 0,
-            "candle_price": 0,
-            "rsi": 50,
-            "mom3": 0,
-            "mom5": 0,
-            "mom15": 0,
-            "vol_ratio": 0,
-            "ema": "N/A",
-            "technical_score": 0,
-            "target_score": 0,
-            "final_score": 0,
-            "distance": None,
-            "distance_pct": None,
-            "momentum": "NEUTRAL",
-            "up_probability": 50,
-            "down_probability": 50,
-        }
-
-    # Cinta live de segundos para el Lector de Cierre.
-    update_micro_tape(ticker, live_btc_price)
+        st.error("Datos compartidos no disponibles: " + str(error))
+        return
+    market = snapshot["market"]
+    ticker = market.get("ticker", "--")
+    target = get_target_from_market(market)
+    seconds_left = get_seconds_remaining(market)
+    btc_df = snapshot["df"]
+    btc_ok = kalshi_ok = True
+    coinbase_live_price = snapshot["price"] if snapshot["source"] == "COINBASE" else None
+    live_btc_price = snapshot["price"]
+    source = snapshot["source"]
+    sig = dict(snapshot["sig"])
+    st.session_state.micro_ticker = ticker
+    st.session_state.micro_prices = [{"t":t,"p":p} for t,p in snapshot["tape"]]
     micro = micro_reading()
-    ui_gate = st.session_state.setdefault("recent_presignal_gate_v10", RecentEntryConfirmation())
-    if live_btc_price is not None:
-        ui_gate.observe(ticker, source, float(live_btc_price), time.monotonic())
-    sig["recent_moves"] = ui_gate.movement(sig.get("atr", 0), time.monotonic())
-    sig = refine_main_signal(sig)
+    if not snapshot["valid"]:
+        st.warning(f"Velas desactualizadas: {snapshot['candle_age']:.0f} s. Esperando datos reales recientes.")
     round_signal = process_round_signal(ticker, sig, market, seconds_left)
     reader = closing_reader(sig, round_signal, seconds_left, micro)
 
-    # Ballenas: capa visual independiente; NO modifica señales ni probabilidades v4.6.1.
     try:
         whale = get_coinbase_whale_flow()
     except Exception:
@@ -3131,7 +2336,6 @@ def live_dashboard():
         else None
     )
 
-    # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
     whale_html = render_whale_panel(whale, active)
 
     if active == "UP":
@@ -3179,11 +2383,8 @@ def live_dashboard():
             signal_dt = signal_dt.replace(tzinfo=timezone.utc)
         first_time = signal_dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p")
 
-    # Etiqueta visual en español; el motor conserva internamente BULL/BEAR.
     ema_display = "ALCISTA" if sig.get("ema") == "BULL" else "BAJISTA" if sig.get("ema") == "BEAR" else sig.get("ema", "N/A")
 
-    # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
-    # las probabilidades oficiales.
     pre = build_presignal(sig, seconds_left)
     pre_direction = pre["direction"]
     pre_percent = pre["percent"]
@@ -3202,7 +2403,7 @@ def live_dashboard():
         pre_label = "NEUTRAL"
 
     pre_badge = "INFORMATIVA · NO EJECUTA COMPRAS"
-    pre_note += " La compra exige impulso coincidente en 5/10/30 s sostenido 10 s; este porcentaje es una puntuación, no una probabilidad comprobada."
+    pre_note += " La compra sigue la señal principal y tus límites configurados; este porcentaje es una puntuación, no una probabilidad comprobada."
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
       <div class="prehead"><span class="pretitle">PRESEÑAL · TENDENCIA EN FORMACIÓN</span><span class="prebadge">{pre_badge}</span></div>
@@ -3226,7 +2427,6 @@ def live_dashboard():
     mom_class = "green" if sig["mom3"] > 0 else "red" if sig["mom3"] < 0 else ""
     time_pct = max(0, min(100, int((seconds_left or 0) / 900 * 100)))
 
-    # Panel de cierre de últimos segundos — solo lectura; NO cambia la señal principal.
     c30 = float(micro.get("change_30s", 0.0) or 0.0)
     c10 = float(micro.get("change_10s", 0.0) or 0.0)
     c5 = float(micro.get("change_5s", 0.0) or 0.0)
@@ -3237,7 +2437,6 @@ def live_dashboard():
     market_side = "UP" if (distance or 0) > 0 else "DOWN" if (distance or 0) < 0 else "NEUTRAL"
     abs_final_distance = abs(distance or 0)
 
-    # El cuadro inferior usa EXACTAMENTE la misma lectura adaptativa y el mismo reloj.
     final_status = reader["headline"]
     final_note = reader["note"]
     final_distance = abs(distance) if distance is not None else 0.0
@@ -3340,7 +2539,6 @@ def live_dashboard():
 <div class="ticker">{ticker} • SCORE {sig["final_score"]:+.2f}</div>
 """, unsafe_allow_html=True)
 
-    # Gráfico real BTC/USD de 1 minuto. No modifica ninguna señal del motor.
     if btc_ok:
         chart_timeframe = st.radio(
             "Temporalidad del gráfico",
@@ -3383,7 +2581,6 @@ def live_dashboard():
     )
 
 
-# Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
 worker = current_execution_worker()
 if (not worker.key_id and st.session_state.get("kalshi_key_id")
         and st.session_state.get("kalshi_private_key")):
@@ -3396,8 +2593,7 @@ try:
 except FileNotFoundError:
     pass
 
-# Inicia una sola vez el registrador autónomo de 12 horas.
-start_12h_history_worker()
+start_history_worker()
 
 page = str(st.query_params.get("page", "signal"))
 if page == "settings":
