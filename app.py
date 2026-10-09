@@ -1,4 +1,4 @@
-Import streamlit as st
+import streamlit as st
 # requirements.txt: streamlit>=1.40, requests>=2.31, pandas>=2.0,
 # numpy>=1.26, cryptography>=42
 # Secrets opcionales para reconectar tras reiniciar:
