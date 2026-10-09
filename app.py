@@ -2836,12 +2836,7 @@ def render_auto_trading_page():
             save_auto_config(new_cfg); st.session_state.auto_config=new_cfg
             st.success("Configuración guardada. Auto Trading conservará estos ajustes al salir de esta pantalla.")
 
-    st.markdown('<div class="auto-section">ESTADO</div>',unsafe_allow_html=True)
-    saved=load_auto_config()
-    if saved["enabled"]: st.success(f'Auto Trading ENCENDIDO · {saved["mode"]}')
-    else: st.info("Auto Trading apagado.")
     st.markdown('<div class="auto-section">COMPRAS / ÓRDENES</div>',unsafe_allow_html=True)
-    render_execution_status()
     orders=load_execution_orders(100)
     if orders.empty: st.caption("Todavía no hay operaciones registradas.")
     else:
@@ -3270,4 +3265,5 @@ if page == "settings":
 elif page == "auto":
     render_auto_trading_page()
 else:
+    render_execution_status()
     live_dashboard()
