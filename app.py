@@ -2348,7 +2348,24 @@ class ExecutionWorker:
         headers = kalshi_auth_headers(method, path, self.key_id, self.pem)
         r = requests.request(method, KALSHI_API_BASE + path, headers=headers,
                              json=payload, params=params, timeout=10)
-        r.raise_for_status()
+        try:
+            r.raise_for_status()
+        except requests.HTTPError as error:
+            # Preserve HTTPError/response so submit() still handles rejected
+            # versus ambiguous orders without duplicating an unknown POST.
+            try:
+                detail = r.json()
+                if isinstance(detail, dict):
+                    detail = detail.get("error", detail)
+                if isinstance(detail, dict):
+                    detail = " · ".join(str(detail.get(k, "")) for k in
+                                        ("code", "message", "details") if detail.get(k))
+            except ValueError:
+                detail = "Respuesta de error sin JSON"
+            raise requests.HTTPError(
+                f"Kalshi {r.status_code}: {str(detail)[:180]}",
+                response=r, request=getattr(error, "request", None),
+            ) from error
         return r.json()
 
     def market(self, ticker):
@@ -2453,15 +2470,28 @@ class ExecutionWorker:
         for p in ledger["positions"]:
             if p["remaining"] <= .0001: continue
             m = self.market(p["ticker"])
-            if m.get("status") == "settled" and m.get("result") in ("yes", "no"):
-                winner = "UP" if m["result"] == "yes" else "DOWN"
+            # Kalshi reports completed settlements as 'finalized'. Accept the
+            # older 'settled' spelling too, but never infer a result from time,
+            # a zero quote, or a merely closed/determined market.
+            market_status = str(m.get("status") or "").lower()
+            result = str(m.get("result") or "").lower()
+            if market_status in ("finalized", "settled") and result in ("yes", "no"):
+                winner = "UP" if result == "yes" else "DOWN"
                 p["proceeds"] += p["remaining"] if p["side"] == winner else 0
                 p["remaining"] = 0; p["status"] = "LIQUIDADA"
                 p["closed_at"] = datetime.now(timezone.utc).isoformat()
                 p["pnl"] = round(p["proceeds"] - p["amount"], 6)
+                p["settlement_result"] = result
+                p["settlement_ts"] = m.get("settlement_ts")
+                p["settlement_market_status"] = market_status
                 self.write_ledger(scope, ledger)
                 continue
-            if m.get("status") != "active": continue
+            if market_status != "active":
+                p["status"] = "ESPERANDO LIQUIDACIÓN"
+                p["market_status"] = market_status
+                self.write_ledger(scope, ledger)
+                continue
+            p["status"] = "ABIERTA"
             bid = numeric_kalshi_price(m.get("yes_bid_dollars" if p["side"] == "UP" else "no_bid_dollars"),
                                       m.get("yes_bid" if p["side"] == "UP" else "no_bid"))
             if bid is None or bid <= 0: continue
@@ -2514,7 +2544,13 @@ class ExecutionWorker:
             self.message = "Compras apagadas; continúa gestionando posiciones existentes"
             return
         if any(p["remaining"] > .0001 for p in ledger["positions"]):
-            self.message = "Gestionando compra abierta: profit / stop / liquidación"
+            awaiting = next((p for p in ledger["positions"]
+                             if p["remaining"] > .0001 and
+                             p.get("status") == "ESPERANDO LIQUIDACIÓN"), None)
+            self.message = (f'Esperando liquidación oficial: {awaiting["ticker"]} '
+                            f'· estado {awaiting.get("market_status", "desconocido")}'
+                            if awaiting else
+                            "Gestionando compra abierta: profit / stop / liquidación")
             return
         losses = self.loss_streak(ledger)
         levels = cfg["levels"] if cfg["martingale_on"] else 1
@@ -3234,5 +3270,4 @@ if page == "settings":
 elif page == "auto":
     render_auto_trading_page()
 else:
-    render_execution_status()
     live_dashboard()
