@@ -2693,14 +2693,19 @@ def render_auto_trading_page():
     <div class="auto-head"><h2>Ajustes del bot</h2><a class="auto-x" href="?page=signal" target="_self">×</a></div>
     """, unsafe_allow_html=True)
 
-    # Credentials remain session-only; never persist the private key.
+    # Credentials in session are temporary; Streamlit Secrets persist across restarts.
     for k,v in [("kalshi_key_id",""),("kalshi_private_key",""),("kalshi_balance",None)]:
         if k not in st.session_state: st.session_state[k]=v
 
     st.markdown('<div class="auto-section" style="border-top:0;padding-top:0">CONEXIÓN KALSHI</div>', unsafe_allow_html=True)
     with st.expander("Conectar / cambiar credenciales", expanded=False):
         key_id = st.text_input("API Key ID", value=st.session_state.kalshi_key_id)
-        private_key = st.text_area("Private Key (PEM)", value="", height=100, placeholder="No se guarda en la configuración")
+        private_key = st.text_area("Private Key (PEM)", value="", height=100, type="password", placeholder="Para guardar permanentemente usa Streamlit Cloud → Settings → Secrets")
+        stored_id, stored_pem = read_kalshi_secrets()
+        if stored_id and stored_pem:
+            st.success("Credenciales permanentes configuradas en Streamlit Secrets. Se reconectan al reiniciar.")
+        else:
+            st.info("Para que nunca tengas que introducir la clave tras un reinicio: entra a Streamlit Cloud → Manage app → Settings → Secrets y guarda KALSHI_KEY_ID y KALSHI_PRIVATE_KEY. La conexión manual solo dura mientras el servidor conserve la memoria.")
         a,b=st.columns(2)
         if a.button("CONECTAR", use_container_width=True):
             kid=key_id.strip(); pk=private_key.strip() or st.session_state.kalshi_private_key
@@ -2714,7 +2719,11 @@ def render_auto_trading_page():
                 except Exception as e: st.error("No se pudo conectar: "+str(e))
         if b.button("DESCONECTAR", use_container_width=True):
             current_execution_worker().disconnect()
-            st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None; st.rerun()
+            st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None
+            if stored_id and stored_pem:
+                st.warning("Las credenciales siguen guardadas en Secrets y se reconectarán automáticamente. Para revocar el acceso, elimina Secrets o revoca la API Key en Kalshi.")
+            else:
+                st.rerun()
 
     st.markdown('<div class="auto-section">OPERACIÓN</div>', unsafe_allow_html=True)
     mode=_select_value("Modo",["SIMULACIÓN","REAL"],cfg["mode"],"a_mode")
@@ -3199,7 +3208,7 @@ def live_dashboard():
     )
 
 
-ALLOW_REAL_TRADING = False  # Activación deliberada tras pruebas; no modifica señales.
+ALLOW_REAL_TRADING = True  # Permite modo REAL si el usuario lo activa en la configuración.
 LEGACY_ROUND_STATE_DB = "btc_signal_round_state.db"
 ROUND_STATE_DB = "btc_signal_round_state_v2.db"
 _ROUND_TRANSACTION = threading.local()
@@ -3826,18 +3835,23 @@ def render_signal_trace_page():
         st.info("Datos todavía no disponibles: " + str(error))
 
 
+def read_kalshi_secrets():
+    """Read persistent server-side secrets; never write private keys to code or SQLite."""
+    try:
+        key_id = str(st.secrets.get("KALSHI_KEY_ID", "") or "").strip()
+        pem = str(st.secrets.get("KALSHI_PRIVATE_KEY", "") or "")
+        return key_id, _normalize_private_key(pem)
+    except (FileNotFoundError, KeyError):
+        return "", ""
+
 # Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
 worker = current_execution_worker()
 if (not worker.key_id and st.session_state.get("kalshi_key_id")
         and st.session_state.get("kalshi_private_key")):
     worker.connect(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
-try:
-    secret_id = st.secrets.get("KALSHI_KEY_ID", "")
-    secret_pem = st.secrets.get("KALSHI_PRIVATE_KEY", "")
-    if secret_id and secret_pem and not worker.key_id:
-        worker.connect(str(secret_id), str(secret_pem))
-except FileNotFoundError:
-    pass
+secret_id, secret_pem = read_kalshi_secrets()
+if secret_id and secret_pem and not worker.key_id:
+    worker.connect(secret_id, secret_pem)
 
 # Inicia una sola vez el registrador autónomo de 12 horas.
 start_12h_history_worker()
