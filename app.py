@@ -2749,8 +2749,21 @@ def render_auto_trading_page():
         except ValueError as error:
             st.error(str(error))
     plan=martingale_plan(max(0,capital-float(cfg["reserve"])),int(levels) if martingale_on else 1,float(multiplier) if martingale_on else 1.0)
-    bal=st.session_state.kalshi_balance
-    bal_text=f"${bal:,.2f}" if bal is not None else "sin conectar"
+    # El trabajador de ejecución es la fuente de verdad de la conexión.
+    # La sesión de Streamlit puede reiniciarse aunque Kalshi siga autenticado.
+    active_worker = current_execution_worker()
+    if active_worker.key_id and active_worker.pem:
+        bal = active_worker.balance
+        if bal is None:
+            try:
+                bal, _ = kalshi_get_balance(active_worker.key_id, active_worker.pem)
+                active_worker.balance = bal
+            except Exception:
+                bal = None
+        st.session_state.kalshi_balance = bal
+        bal_text = f"${bal:,.2f}" if bal is not None else "saldo no disponible"
+    else:
+        bal_text = "sin conectar"
     st.markdown(f'<div class="balance-box">Saldo disponible: <b>{bal_text}</b> · Capital autorizado: <b>${capital:,.2f}</b></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="auto-section">ELIGE LA DIRECCIÓN</div><div class="auto-note">Configura cada nivel por separado.</div>',unsafe_allow_html=True)
