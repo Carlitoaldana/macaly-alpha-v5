@@ -43,6 +43,10 @@ st.set_page_config(
 NEW_ROUND_WAIT = 8
 NEW_ENTRY_LOCK = 75
 
+# Confirmación original v4.6.1: tres lecturas con separación mínima de 2 s.
+SIGNAL_CONFIRM_READINGS = 3
+SIGNAL_CONFIRM_INTERVAL = 2.0
+
 UP_THRESHOLD = 4.0
 DOWN_THRESHOLD = -4.0
 
