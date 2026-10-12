@@ -1468,21 +1468,7 @@ BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
 
 def _background_get_btc_data():
-    response = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-USD/candles",
-        params={"granularity": 60},
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    data = response.json()
-    if not isinstance(data, list) or len(data) < 30:
-        raise ValueError("Coinbase no devolvió suficientes datos.")
-    df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
-    for column in ["low", "high", "open", "close", "volume"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    return df.dropna().sort_values("time").reset_index(drop=True)
+    return _fetch_current_btc_candles()
 
 def _background_get_market():
     response = requests.get(
@@ -2508,9 +2494,6 @@ class ExecutionWorker:
             live_price, live_source = price_job.result()
         gate = self.entry_gates.setdefault(mode, RecentEntryConfirmation())
         gate.observe(m["ticker"], live_source, float(live_price), time.monotonic())
-        if (datetime.now(timezone.utc) - df.iloc[-1]["time"].to_pydatetime()).total_seconds() > 120:
-            gate.reset_candidate()
-            self.message = "Velas desactualizadas"; return
         sig = build_signal(df, target, secs, live_price)
         sig["recent_moves"] = gate.movement(sig.get("atr", 0), time.monotonic())
         # Cerebro original v4.6.1: señal y confirmación temporal intactas.
@@ -2701,7 +2684,7 @@ def render_auto_trading_page():
     with st.expander("Conectar / cambiar credenciales", expanded=False):
         stored_id, stored_pem = read_kalshi_secrets()
         key_id = st.text_input("API Key ID", value=stored_id or st.session_state.kalshi_key_id)
-        private_key = st.text_area("Private Key PEM", value="", type="password", help="Pega tu clave privada aquí. No se mostrará en pantalla.")
+        private_key = st.text_area("Private Key PEM", value="", help="Pega tu clave privada aquí. Este campo no oculta el texto; evita mostrar la pantalla a otras personas.")
         if stored_id and stored_pem:
             st.success("Credenciales guardadas disponibles. Se intentará reconectar automáticamente.")
         else:
@@ -2722,7 +2705,7 @@ def render_auto_trading_page():
             current_execution_worker().disconnect()
             st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None
             if stored_id and stored_pem:
-                st.warning("Las credenciales siguen guardadas en Secrets y se reconectarán automáticamente. Para revocar el acceso, elimina Secrets o revoca la API Key en Kalshi.")
+                st.warning("Las credenciales siguen guardadas localmente. Usa BORRAR CLAVE GUARDADA para eliminarlas.")
             else:
                 st.rerun()
 
@@ -2745,7 +2728,7 @@ def render_auto_trading_page():
     max_price=_select_value("Precio máximo de compra",list(range(5,100,5)),int(round(cfg["max_price"]/5)*5),"a_maxp")
     min_conf=_select_value("Confianza mínima de señal",list(range(50,96,5)),int(round(cfg["min_conf"]/5)*5),"a_conf")
     st.caption("Los precios están en centavos por contrato. El bot solo entra cuando cumple todos los filtros.")
-    st.caption("Sigue operando al cerrar esta pantalla mientras el servidor esté encendido. Si Streamlit suspende o reinicia el servidor, necesita reconectar; configura Secrets para reconectar automáticamente.")
+    st.caption("Sigue operando al cerrar esta pantalla mientras el servidor esté encendido. Si Streamlit suspende o reinicia el servidor, necesita reconectar; las credenciales locales pueden perderse.")
 
     st.markdown('<div class="auto-section">FINALIZACIÓN</div>', unsafe_allow_html=True)
     profit_on=st.toggle("Tomar profit automáticamente",value=bool(cfg["profit_on"]),key="a_profiton")
