@@ -2699,16 +2699,17 @@ def render_auto_trading_page():
 
     st.markdown('<div class="auto-section" style="border-top:0;padding-top:0">CONEXIÓN KALSHI</div>', unsafe_allow_html=True)
     with st.expander("Conectar / cambiar credenciales", expanded=False):
-        key_id = st.text_input("API Key ID", value=st.session_state.kalshi_key_id)
-        private_key = st.text_area("Private Key (PEM)", value="", height=100, type="password", placeholder="Para guardar permanentemente usa Streamlit Cloud → Settings → Secrets")
         stored_id, stored_pem = read_kalshi_secrets()
+        key_id = st.text_input("API Key ID", value=stored_id or st.session_state.kalshi_key_id)
+        # La clave privada se obtiene de Streamlit Secrets y nunca se muestra en pantalla.
+        private_key = ""
         if stored_id and stored_pem:
             st.success("Credenciales permanentes configuradas en Streamlit Secrets. Se reconectan al reiniciar.")
         else:
             st.info("Para que nunca tengas que introducir la clave tras un reinicio: entra a Streamlit Cloud → Manage app → Settings → Secrets y guarda KALSHI_KEY_ID y KALSHI_PRIVATE_KEY. La conexión manual solo dura mientras el servidor conserve la memoria.")
         a,b=st.columns(2)
         if a.button("CONECTAR", use_container_width=True):
-            kid=key_id.strip(); pk=private_key.strip() or st.session_state.kalshi_private_key
+            kid=key_id.strip(); pk=stored_pem if kid == stored_id else st.session_state.kalshi_private_key
             if not kid or not pk: st.error("Falta API Key ID o Private Key.")
             else:
                 try:
