@@ -21,6 +21,7 @@ import fcntl
 from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -2693,36 +2694,48 @@ def render_auto_trading_page():
     <div class="auto-head"><h2>Ajustes del bot</h2><a class="auto-x" href="?page=signal" target="_self">×</a></div>
     """, unsafe_allow_html=True)
 
-    # Credentials in session are temporary; Streamlit Secrets persist across restarts.
     for k,v in [("kalshi_key_id",""),("kalshi_private_key",""),("kalshi_balance",None)]:
         if k not in st.session_state: st.session_state[k]=v
 
     st.markdown('<div class="auto-section" style="border-top:0;padding-top:0">CONEXIÓN KALSHI</div>', unsafe_allow_html=True)
     with st.expander("Conectar / cambiar credenciales", expanded=False):
-        stored_id, stored_pem = read_kalshi_secrets()
-        key_id = st.text_input("API Key ID", value=stored_id or st.session_state.kalshi_key_id)
-        # La clave privada se obtiene de Streamlit Secrets y nunca se muestra en pantalla.
-        private_key = ""
-        if stored_id and stored_pem:
-            st.success("Credenciales permanentes configuradas en Streamlit Secrets. Se reconectan al reiniciar.")
+        persistent = _vault_settings() is not None
+        if persistent:
+            st.success("Almacenamiento cifrado permanente configurado. La clave se recupera tras reiniciar.")
         else:
-            st.info("Para que nunca tengas que introducir la clave tras un reinicio: entra a Streamlit Cloud → Manage app → Settings → Secrets y guarda KALSHI_KEY_ID y KALSHI_PRIVATE_KEY. La conexión manual solo dura mientras el servidor conserve la memoria.")
+            st.warning("El almacenamiento permanente todavía no está configurado. La conexión manual será temporal.")
+        key_id = st.text_input("API Key ID", value=st.session_state.kalshi_key_id)
+        private_key = st.text_area("Private Key (.pem o .key)", value="", height=130,
+            placeholder="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----")
         a,b=st.columns(2)
         if a.button("CONECTAR", use_container_width=True):
-            kid=key_id.strip(); pk=stored_pem if kid == stored_id else st.session_state.kalshi_private_key
-            if not kid or not pk: st.error("Falta API Key ID o Private Key.")
+            kid=key_id.strip()
+            pk=_normalize_private_key(private_key) or st.session_state.kalshi_private_key
+            if not kid or not pk:
+                st.error("Falta API Key ID o Private Key")
             else:
                 try:
                     balance,_=kalshi_get_balance(kid,pk)
-                    current_execution_worker().connect(kid, pk)
-                    st.session_state.kalshi_key_id=kid; st.session_state.kalshi_private_key=pk; st.session_state.kalshi_balance=balance
-                    st.success(f"Conectado · ${balance:,.2f} disponibles")
-                except Exception as e: st.error("No se pudo conectar: "+str(e))
+                    if persistent:
+                        vault_save_credentials(kid,pk)
+                    current_execution_worker().connect(kid,pk)
+                    st.session_state.kalshi_key_id=kid
+                    st.session_state.kalshi_private_key=pk
+                    st.session_state.kalshi_balance=balance
+                    st.success("Conectado y guardado permanentemente" if persistent else "Conectado temporalmente")
+                except Exception as e:
+                    st.error("No se pudo conectar o guardar: " + str(e))
         if b.button("DESCONECTAR", use_container_width=True):
             current_execution_worker().disconnect()
-            st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None
-            if stored_id and stored_pem:
-                st.warning("Las credenciales siguen guardadas en Secrets y se reconectarán automáticamente. Para revocar el acceso, elimina Secrets o revoca la API Key en Kalshi.")
+            st.session_state.kalshi_key_id=""
+            st.session_state.kalshi_private_key=""
+            st.session_state.kalshi_balance=None
+            if persistent:
+                try:
+                    vault_delete_credentials()
+                    st.success("Credenciales eliminadas del almacén permanente")
+                except Exception as e:
+                    st.error("No se pudieron eliminar las credenciales: " + str(e))
             else:
                 st.rerun()
 
@@ -2739,7 +2752,7 @@ def render_auto_trading_page():
     max_price=_select_value("Precio máximo de compra",list(range(5,100,5)),int(round(cfg["max_price"]/5)*5),"a_maxp")
     min_conf=_select_value("Confianza mínima de señal",list(range(50,96,5)),int(round(cfg["min_conf"]/5)*5),"a_conf")
     st.caption("Los precios están en centavos por contrato. El bot solo entra cuando cumple todos los filtros.")
-    st.caption("Sigue operando al cerrar esta pantalla mientras el servidor esté encendido. Si Streamlit suspende o reinicia el servidor, necesita reconectar; configura Secrets para reconectar automáticamente.")
+    st.caption("Solo opera mientras el servidor esté activo. El almacén cifrado, cuando está configurado, recupera las credenciales después de reiniciar.")
 
     st.markdown('<div class="auto-section">FINALIZACIÓN</div>', unsafe_allow_html=True)
     profit_on=st.toggle("Tomar profit automáticamente",value=bool(cfg["profit_on"]),key="a_profiton")
@@ -3836,6 +3849,84 @@ def render_signal_trace_page():
         st.info("Datos todavía no disponibles: " + str(error))
 
 
+# Persistent encrypted credential vault. Supabase is external durable storage.
+# Required Streamlit Secrets (infrastructure only, never Kalshi keys):
+# SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, KALSHI_VAULT_FERNET_KEY, BOT_ACCESS_PASSWORD.
+# Protect the entire deployed app with a password, not just this settings page.
+def _vault_settings():
+    try:
+        url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
+        token = str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")).strip()
+        cipher_key = str(st.secrets.get("KALSHI_VAULT_FERNET_KEY", "")).strip()
+        password = str(st.secrets.get("BOT_ACCESS_PASSWORD", ""))
+        if not (url.startswith("https://") and token and cipher_key and password):
+            return None
+        return url, token, Fernet(cipher_key.encode()), password
+    except (KeyError, FileNotFoundError, ValueError, TypeError):
+        return None
+
+
+def _vault_request(method, body=None):
+    cfg = _vault_settings()
+    if not cfg:
+        raise RuntimeError("Almacenamiento permanente sin configurar")
+    url, token, _, _ = cfg
+    headers = {"apikey": token, "Authorization": "Bearer " + token,
+               "Content-Type": "application/json", "Accept": "application/json"}
+    if method == "POST":
+        headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+    r = requests.request(method, url + "/rest/v1/kalshi_bot_vault",
+        params={"id": "eq.primary"} if method != "POST" else None,
+        json=body, headers=headers, timeout=12)
+    r.raise_for_status()
+    return r.json() if method == "GET" else None
+
+
+def vault_load_credentials():
+    cfg = _vault_settings()
+    if not cfg:
+        return "", ""
+    rows = _vault_request("GET")
+    if not rows:
+        return "", ""
+    payload = json.loads(cfg[2].decrypt(rows[0]["ciphertext"].encode()).decode())
+    return payload["key_id"], payload["private_key"]
+
+
+def vault_save_credentials(key_id, private_key):
+    cfg = _vault_settings()
+    if not cfg:
+        raise RuntimeError("Configura primero el almacén seguro de credenciales")
+    encrypted = cfg[2].encrypt(json.dumps({"key_id": key_id,
+                      "private_key": private_key}).encode()).decode()
+    _vault_request("POST", {"id": "primary", "ciphertext": encrypted})
+
+
+def vault_delete_credentials():
+    if _vault_settings():
+        _vault_request("DELETE")
+
+
+def require_bot_access():
+    cfg = _vault_settings()
+    if not cfg:
+        return  # Vault unavailable: legacy app remains usable without persistence.
+    import hmac
+    if st.session_state.get("bot_access_granted"):
+        return
+    st.title("Acceso privado al bot")
+    with st.form("bot_login"):
+        supplied = st.text_input("Contraseña del bot", type="password")
+        submitted = st.form_submit_button("Entrar")
+    if submitted:
+        if hmac.compare_digest(supplied, cfg[3]):
+            st.session_state.bot_access_granted = True
+            st.rerun()
+        else:
+            st.error("Contraseña incorrecta")
+    st.stop()
+
+
 def read_kalshi_secrets():
     """Read persistent server-side secrets; never write private keys to code or SQLite."""
     try:
@@ -3845,14 +3936,20 @@ def read_kalshi_secrets():
     except (FileNotFoundError, KeyError):
         return "", ""
 
-# Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
+# Gate the whole app if secure permanent vault is configured.
+require_bot_access()
 worker = current_execution_worker()
-if (not worker.key_id and st.session_state.get("kalshi_key_id")
-        and st.session_state.get("kalshi_private_key")):
+if not worker.key_id:
+    try:
+        kid, pem = vault_load_credentials()
+        if kid and pem:
+            worker.connect(kid, pem)
+            st.session_state.kalshi_key_id = kid
+            st.session_state.kalshi_private_key = pem
+    except Exception as exc:
+        st.warning("No se pudieron recuperar las credenciales guardadas: " + str(exc))
+if not worker.key_id and st.session_state.get("kalshi_key_id") and st.session_state.get("kalshi_private_key"):
     worker.connect(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
-secret_id, secret_pem = read_kalshi_secrets()
-if secret_id and secret_pem and not worker.key_id:
-    worker.connect(secret_id, secret_pem)
 
 # Inicia una sola vez el registrador autónomo de 12 horas.
 start_12h_history_worker()
