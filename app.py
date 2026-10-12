@@ -21,7 +21,6 @@ import fcntl
 from concurrent.futures import ThreadPoolExecutor
 
 from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
@@ -1469,20 +1468,21 @@ BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
 
 def _background_get_btc_data():
-    """Use the same freshness-validated Coinbase candles as the signal UI.
-
-    Background requests bypass Streamlit's UI cache. A stale response must
-    never be used to authorize a new trade.
-    """
-    last_error = None
-    for attempt in range(3):
-        try:
-            return _fetch_current_btc_candles()
-        except (requests.RequestException, ValueError) as exc:
-            last_error = exc
-            if attempt < 2:
-                time.sleep(1.5)
-    raise ValueError(f"Velas no disponibles o desactualizadas: {last_error}") from last_error
+    response = requests.get(
+        "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+        params={"granularity": 60},
+        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    data = response.json()
+    if not isinstance(data, list) or len(data) < 30:
+        raise ValueError("Coinbase no devolvió suficientes datos.")
+    df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
+    for column in ["low", "high", "open", "close", "volume"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    return df.dropna().sort_values("time").reset_index(drop=True)
 
 def _background_get_market():
     response = requests.get(
@@ -2504,12 +2504,8 @@ class ExecutionWorker:
         with ThreadPoolExecutor(max_workers=2) as pool:
             candles_job = pool.submit(_background_get_btc_data)
             price_job = pool.submit(_background_get_live_price, m, True)
-            try:
-                df = candles_job.result()
-                live_price, live_source = price_job.result()
-            except (requests.RequestException, ValueError, TypeError) as exc:
-                self.message = f"Datos de mercado no disponibles; compras nuevas en pausa: {exc}"
-                return
+            df = candles_job.result()
+            live_price, live_source = price_job.result()
         gate = self.entry_gates.setdefault(mode, RecentEntryConfirmation())
         gate.observe(m["ticker"], live_source, float(live_price), time.monotonic())
         if (datetime.now(timezone.utc) - df.iloc[-1]["time"].to_pydatetime()).total_seconds() > 120:
@@ -2538,15 +2534,11 @@ class ExecutionWorker:
                     for p in positions)
         if count >= cfg["max_trades_day"]: self.message = "Límite diario alcanzado"; return
         level = losses if cfg["martingale_on"] else 0
-        # La dirección de compra es EXCLUSIVAMENTE la señal principal
-        # confirmada del cerebro v4.6.1. Las preferencias de dirección
-        # por nivel no pueden invertirla ni forzar UP/DOWN.
         rule = cfg["level_directions"][level]
-        if rule == "No operar":
-            self.message = "Nivel configurado: No operar"
-            return
-        # 'Solo UP', 'Solo DOWN' y 'Contraria a la señal' se ignoran
-        # deliberadamente: la señal confirmada es la única autoridad.
+        if rule == "No operar": self.message = "Nivel configurado: No operar"; return
+        if rule == "Solo UP": side = "UP"
+        elif rule == "Solo DOWN": side = "DOWN"
+        elif rule == "Contraria a la señal": side = "DOWN" if side == "UP" else "UP"
         confirmation_note = sig.get("quality", "Entrada por motor principal")
         price = get_yes_ask(m) if side == "UP" else get_no_ask(m)
         if price is None or not cfg["min_price"] <= price * 100 <= cfg["max_price"]:
@@ -2569,7 +2561,7 @@ class ExecutionWorker:
         intent = {"client_id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
                   "ticker": m["ticker"], "direction": side, "action": "buy", "quantity": qty,
                   "price": price, "level": level + 1, "mode": mode, "cfg": cfg,
-                  "note": f'{cfg.get("entry_source","SEÑAL PRINCIPAL")} puntuación {confidence} · {confirmation_note}'}
+                  "note": f'{cfg.get("entry_source","PRESEÑAL")} puntuación {confidence} · {confirmation_note}'}
         self.submit(scope, ledger, intent)
 
     def run(self):
@@ -2701,51 +2693,45 @@ def render_auto_trading_page():
     <div class="auto-head"><h2>Ajustes del bot</h2><a class="auto-x" href="?page=signal" target="_self">×</a></div>
     """, unsafe_allow_html=True)
 
+    # Credentials in session are temporary; Streamlit Secrets persist across restarts.
     for k,v in [("kalshi_key_id",""),("kalshi_private_key",""),("kalshi_balance",None)]:
         if k not in st.session_state: st.session_state[k]=v
 
     st.markdown('<div class="auto-section" style="border-top:0;padding-top:0">CONEXIÓN KALSHI</div>', unsafe_allow_html=True)
     with st.expander("Conectar / cambiar credenciales", expanded=False):
-        persistent = _vault_settings() is not None
-        if persistent:
-            st.success("Almacenamiento cifrado permanente configurado. La clave se recupera tras reiniciar.")
+        stored_id, stored_pem = read_kalshi_secrets()
+        key_id = st.text_input("API Key ID", value=stored_id or st.session_state.kalshi_key_id)
+        private_key = st.text_area("Private Key PEM", value="", type="password", help="Pega tu clave privada aquí. No se mostrará en pantalla.")
+        if stored_id and stored_pem:
+            st.success("Credenciales guardadas disponibles. Se intentará reconectar automáticamente.")
         else:
-            st.warning("El almacenamiento permanente todavía no está configurado. La conexión manual será temporal.")
-        key_id = st.text_input("API Key ID", value=st.session_state.kalshi_key_id)
-        private_key = st.text_area("Private Key (.pem o .key)", value="", height=130,
-            placeholder="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----")
+            st.info("Al conectar, la clave se guarda cifrada en el servidor. Streamlit Cloud puede borrar el archivo al reiniciar o redesplegar.")
         a,b=st.columns(2)
         if a.button("CONECTAR", use_container_width=True):
-            kid=key_id.strip()
-            pk=_normalize_private_key(private_key) or st.session_state.kalshi_private_key
-            if not kid or not pk:
-                st.error("Falta API Key ID o Private Key")
+            kid=key_id.strip(); pk=_normalize_private_key(private_key) or (stored_pem if kid == stored_id else "")
+            if not kid or not pk: st.error("Falta API Key ID o Private Key.")
             else:
                 try:
                     balance,_=kalshi_get_balance(kid,pk)
-                    if persistent:
-                        vault_save_credentials(kid,pk)
-                    current_execution_worker().connect(kid,pk)
-                    st.session_state.kalshi_key_id=kid
-                    st.session_state.kalshi_private_key=pk
-                    st.session_state.kalshi_balance=balance
-                    st.success("Conectado y guardado permanentemente" if persistent else "Conectado temporalmente")
-                except Exception as e:
-                    st.error("No se pudo conectar o guardar: " + str(e))
+                    save_local_kalshi_credentials(kid, pk)
+                    current_execution_worker().connect(kid, pk)
+                    st.session_state.kalshi_key_id=kid; st.session_state.kalshi_private_key=pk; st.session_state.kalshi_balance=balance
+                    st.success(f"Conectado · ${balance:,.2f} disponibles")
+                except Exception as e: st.error("No se pudo conectar: "+str(e))
         if b.button("DESCONECTAR", use_container_width=True):
             current_execution_worker().disconnect()
-            st.session_state.kalshi_key_id=""
-            st.session_state.kalshi_private_key=""
-            st.session_state.kalshi_balance=None
-            if persistent:
-                try:
-                    vault_delete_credentials()
-                    st.success("Credenciales eliminadas del almacén permanente")
-                except Exception as e:
-                    st.error("No se pudieron eliminar las credenciales: " + str(e))
+            st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None
+            if stored_id and stored_pem:
+                st.warning("Las credenciales siguen guardadas en Secrets y se reconectarán automáticamente. Para revocar el acceso, elimina Secrets o revoca la API Key en Kalshi.")
             else:
                 st.rerun()
 
+    if st.button("BORRAR CLAVE GUARDADA"):
+        delete_local_kalshi_credentials()
+        current_execution_worker().disconnect()
+        st.session_state.kalshi_key_id = ""
+        st.session_state.kalshi_private_key = ""
+        st.success("Clave local eliminada.")
     st.markdown('<div class="auto-section">OPERACIÓN</div>', unsafe_allow_html=True)
     mode=_select_value("Modo",["SIMULACIÓN","REAL"],cfg["mode"],"a_mode")
     entry_source = "SEÑAL PRINCIPAL"
@@ -2759,7 +2745,7 @@ def render_auto_trading_page():
     max_price=_select_value("Precio máximo de compra",list(range(5,100,5)),int(round(cfg["max_price"]/5)*5),"a_maxp")
     min_conf=_select_value("Confianza mínima de señal",list(range(50,96,5)),int(round(cfg["min_conf"]/5)*5),"a_conf")
     st.caption("Los precios están en centavos por contrato. El bot solo entra cuando cumple todos los filtros.")
-    st.caption("Solo opera mientras el servidor esté activo. El almacén cifrado, cuando está configurado, recupera las credenciales después de reiniciar.")
+    st.caption("Sigue operando al cerrar esta pantalla mientras el servidor esté encendido. Si Streamlit suspende o reinicia el servidor, necesita reconectar; configura Secrets para reconectar automáticamente.")
 
     st.markdown('<div class="auto-section">FINALIZACIÓN</div>', unsafe_allow_html=True)
     profit_on=st.toggle("Tomar profit automáticamente",value=bool(cfg["profit_on"]),key="a_profiton")
@@ -3856,107 +3842,70 @@ def render_signal_trace_page():
         st.info("Datos todavía no disponibles: " + str(error))
 
 
-# Persistent encrypted credential vault. Supabase is external durable storage.
-# Required Streamlit Secrets (infrastructure only, never Kalshi keys):
-# SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, KALSHI_VAULT_FERNET_KEY, BOT_ACCESS_PASSWORD.
-# Protect the entire deployed app with a password, not just this settings page.
-def _vault_settings():
+
+from pathlib import Path
+
+def _local_vault_path():
+    return Path(__file__).resolve().parent / ".kalshi_credentials.enc"
+
+def _local_vault_key_path():
+    return Path(__file__).resolve().parent / ".kalshi_vault.key"
+
+def _local_fernet():
+    from cryptography.fernet import Fernet
+    keyfile = _local_vault_key_path()
+    if not keyfile.exists():
+        keyfile.write_bytes(Fernet.generate_key())
+        keyfile.chmod(0o600)
+    return Fernet(keyfile.read_bytes())
+
+def save_local_kalshi_credentials(kid, pem):
+    encrypted = _local_fernet().encrypt(json.dumps({"id":kid,"pem":pem}).encode())
+    path = _local_vault_path()
+    path.write_bytes(encrypted)
+    path.chmod(0o600)
+
+def read_local_kalshi_credentials():
+    path = _local_vault_path()
+    if not path.exists():
+        return "", ""
     try:
-        url = str(st.secrets.get("SUPABASE_URL", "")).strip().rstrip("/")
-        token = str(st.secrets.get("SUPABASE_SERVICE_ROLE_KEY", "")).strip()
-        cipher_key = str(st.secrets.get("KALSHI_VAULT_FERNET_KEY", "")).strip()
-        password = str(st.secrets.get("BOT_ACCESS_PASSWORD", ""))
-        if not (url.startswith("https://") and token and cipher_key and password):
-            return None
-        return url, token, Fernet(cipher_key.encode()), password
-    except (KeyError, FileNotFoundError, ValueError, TypeError):
-        return None
-
-
-def _vault_request(method, body=None):
-    cfg = _vault_settings()
-    if not cfg:
-        raise RuntimeError("Almacenamiento permanente sin configurar")
-    url, token, _, _ = cfg
-    headers = {"apikey": token, "Authorization": "Bearer " + token,
-               "Content-Type": "application/json", "Accept": "application/json"}
-    if method == "POST":
-        headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
-    r = requests.request(method, url + "/rest/v1/kalshi_bot_vault",
-        params={"id": "eq.primary"} if method != "POST" else None,
-        json=body, headers=headers, timeout=12)
-    r.raise_for_status()
-    return r.json() if method == "GET" else None
-
-
-def vault_load_credentials():
-    cfg = _vault_settings()
-    if not cfg:
+        obj = json.loads(_local_fernet().decrypt(path.read_bytes()))
+        return obj["id"], obj["pem"]
+    except Exception:
         return "", ""
-    rows = _vault_request("GET")
-    if not rows:
-        return "", ""
-    payload = json.loads(cfg[2].decrypt(rows[0]["ciphertext"].encode()).decode())
-    return payload["key_id"], payload["private_key"]
 
-
-def vault_save_credentials(key_id, private_key):
-    cfg = _vault_settings()
-    if not cfg:
-        raise RuntimeError("Configura primero el almacén seguro de credenciales")
-    encrypted = cfg[2].encrypt(json.dumps({"key_id": key_id,
-                      "private_key": private_key}).encode()).decode()
-    _vault_request("POST", {"id": "primary", "ciphertext": encrypted})
-
-
-def vault_delete_credentials():
-    if _vault_settings():
-        _vault_request("DELETE")
-
-
-def require_bot_access():
-    cfg = _vault_settings()
-    if not cfg:
-        return  # Vault unavailable: legacy app remains usable without persistence.
-    import hmac
-    if st.session_state.get("bot_access_granted"):
-        return
-    st.title("Acceso privado al bot")
-    with st.form("bot_login"):
-        supplied = st.text_input("Contraseña del bot", type="password")
-        submitted = st.form_submit_button("Entrar")
-    if submitted:
-        if hmac.compare_digest(supplied, cfg[3]):
-            st.session_state.bot_access_granted = True
-            st.rerun()
-        else:
-            st.error("Contraseña incorrecta")
-    st.stop()
-
+def delete_local_kalshi_credentials():
+    _local_vault_path().unlink(missing_ok=True)
+    _local_vault_key_path().unlink(missing_ok=True)
 
 def read_kalshi_secrets():
     """Read persistent server-side secrets; never write private keys to code or SQLite."""
     try:
         key_id = str(st.secrets.get("KALSHI_KEY_ID", "") or "").strip()
         pem = str(st.secrets.get("KALSHI_PRIVATE_KEY", "") or "")
-        return key_id, _normalize_private_key(pem)
+        return (key_id, _normalize_private_key(pem)) if key_id and pem else read_local_kalshi_credentials()
     except (FileNotFoundError, KeyError):
-        return "", ""
+        return read_local_kalshi_credentials()
 
-# Gate the whole app if secure permanent vault is configured.
-require_bot_access()
+# Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
 worker = current_execution_worker()
-if not worker.key_id:
+if (not worker.key_id and st.session_state.get("kalshi_key_id")
+        and st.session_state.get("kalshi_private_key")):
     try:
-        kid, pem = vault_load_credentials()
-        if kid and pem:
-            worker.connect(kid, pem)
-            st.session_state.kalshi_key_id = kid
-            st.session_state.kalshi_private_key = pem
+        verified_balance, _ = kalshi_get_balance(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
+        worker.connect(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
+        worker.balance = verified_balance
     except Exception as exc:
-        st.warning("No se pudieron recuperar las credenciales guardadas: " + str(exc))
-if not worker.key_id and st.session_state.get("kalshi_key_id") and st.session_state.get("kalshi_private_key"):
-    worker.connect(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
+        worker.message = "Kalshi no autenticado: " + str(exc)[:180]
+secret_id, secret_pem = read_kalshi_secrets()
+if secret_id and secret_pem and not worker.key_id:
+    try:
+        verified_balance, _ = kalshi_get_balance(secret_id, secret_pem)
+        worker.connect(secret_id, secret_pem)
+        worker.balance = verified_balance
+    except Exception as exc:
+        worker.message = "Kalshi no autenticado: " + str(exc)[:180]
 
 # Inicia una sola vez el registrador autónomo de 12 horas.
 start_12h_history_worker()
