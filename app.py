@@ -702,6 +702,10 @@ def new_round_state(ticker, seconds_left):
         "reversal_text": "",
         "fresh_samples": [],
         "candidate_history": [],
+        "pending_direction": None,
+        "pending_count": 0,
+        "pending_since": None,
+        "pending_last_at": None,
     }
 
 # =========================================================
@@ -713,47 +717,34 @@ ROUND_STATE_DB = "btc_signal_round_state.db"
 
 def _round_db():
     conn = sqlite3.connect(ROUND_STATE_DB, timeout=5)
-    conn.execute("CREATE TABLE IF NOT EXISTS round_state (ticker TEXT PRIMARY KEY, payload TEXT NOT NULL, updated_at TEXT NOT NULL)")
+    conn.execute('CREATE TABLE IF NOT EXISTS round_state (ticker TEXT PRIMARY KEY,payload TEXT NOT NULL,updated_at TEXT NOT NULL)')
     return conn
 
+
 def save_round_state(state):
-    if not state or not state.get("ticker"):
+    if not state or not state.get('ticker'):
         return
-    keep = dict(state)
-    for key in ("detected_at", "first_signal_time", "active_since"):
-        value = keep.get(key)
-        if isinstance(value, datetime):
-            keep[key] = value.isoformat()
-    try:
-        with _round_db() as conn:
-            conn.execute(
-                "INSERT INTO round_state(ticker,payload,updated_at) VALUES(?,?,?) "
-                "ON CONFLICT(ticker) DO UPDATE SET payload=excluded.payload, updated_at=excluded.updated_at",
-                (state["ticker"], json.dumps(keep), datetime.now(timezone.utc).isoformat()),
-            )
-    except Exception:
-        pass
+    conn = getattr(_ROUND_TRANSACTION,'conn',None)
+    if conn is not None:
+        _write_state_to_connection(conn,state)
+        return
+    with _round_db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _write_state_to_connection(conn,state)
+
 
 def load_round_state(ticker):
-    if not ticker or ticker == "--":
+    if not ticker or ticker == '--':
         return None
+    conn = getattr(_ROUND_TRANSACTION, 'conn', None)
+    if conn is not None:
+        return _load_state_from_connection(conn, ticker)
     try:
         with _round_db() as conn:
-            row = conn.execute("SELECT payload FROM round_state WHERE ticker=?", (ticker,)).fetchone()
-        if not row:
-            return None
-        state = json.loads(row[0])
-        for key in ("detected_at", "first_signal_time", "active_since"):
-            value = state.get(key)
-            if isinstance(value, str) and value:
-                try:
-                    state[key] = datetime.fromisoformat(value)
-                except Exception:
-                    state[key] = None
-        state["_restored_from_disk"] = True
-        return state
+            return _load_state_from_connection(conn, ticker)
     except Exception:
         return None
+
 
 # =========================================================
 # HISTORIAL Y RENDIMIENTO — CAPA INDEPENDIENTE
@@ -764,90 +755,142 @@ HISTORY_DB = "btc_signal_history.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS round_history (
-            ticker TEXT PRIMARY KEY,
-            target REAL,
-            final_btc REAL,
-            final_outcome TEXT,
-            bot_signal TEXT,
-            result TEXT,
-            first_signal TEXT,
-            first_signal_time TEXT,
-            closed_at TEXT NOT NULL
-        )
-    """)
-    return conn
+    conn.execute('''CREATE TABLE IF NOT EXISTS round_history (
+        ticker TEXT PRIMARY KEY, target REAL, final_btc REAL, final_outcome TEXT,
+        bot_signal TEXT, result TEXT, first_signal TEXT, first_signal_time TEXT,
+        closed_at TEXT NOT NULL)''')
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(round_history)")}
+        additions = {
+            "verification_status": "TEXT NOT NULL DEFAULT 'pending'",
+            "observed_outcome": "TEXT", "observed_result": "TEXT",
+            "official_result": "TEXT", "settlement_at": "TEXT", "verified_at": "TEXT",
+            "last_verification_attempt": "TEXT", "verified_expiration_value": "REAL",
+        }
+        migrated = False
+        for name, spec in additions.items():
+            if name not in columns:
+                conn.execute(f"ALTER TABLE round_history ADD COLUMN {name} {spec}")
+                migrated = True
+        if migrated:
+            conn.execute('''UPDATE round_history SET observed_outcome=final_outcome,
+                observed_result=result,
+                result=CASE WHEN first_signal IN ('UP','DOWN') THEN 'PENDIENTE' ELSE 'NO TRADE' END
+                WHERE verification_status != 'official' ''')
+        conn.execute("CREATE TABLE IF NOT EXISTS history_migrations (name TEXT PRIMARY KEY)")
+        migrated_legacy = conn.execute("SELECT 1 FROM history_migrations WHERE name='legacy_import_v1'").fetchone()
+        if not migrated_legacy:
+            from pathlib import Path
+            if Path(LEGACY_HISTORY_DB).exists():
+                legacy = sqlite3.connect('file:' + LEGACY_HISTORY_DB + '?mode=ro', uri=True, timeout=1)
+                try:
+                    legacy.row_factory = sqlite3.Row
+                    source_rows = legacy.execute('SELECT * FROM round_history').fetchall()
+                    allowed = {'ticker','target','final_btc','final_outcome','bot_signal','result',
+                               'first_signal','first_signal_time','closed_at'} | set(additions)
+                    for source_row in source_rows:
+                        values = dict(source_row)
+                        values['observed_outcome'] = values.get('observed_outcome') or values.get('final_outcome')
+                        values['observed_result'] = values.get('observed_result') or values.get('result')
+                        names = sorted(allowed.intersection(values))
+                        conn.execute('INSERT OR IGNORE INTO round_history (' + ','.join(names) +
+                                     ') VALUES (' + ','.join('?' for _ in names) + ')',
+                                     tuple(values[name] for name in names))
+                finally:
+                    legacy.close()
+            conn.execute("INSERT INTO history_migrations(name) VALUES('legacy_import_v1')")
+        conn.commit()
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
 
 def save_round_history(state):
-    """Cierra una ronda una sola vez usando el último BTC/target conocidos."""
+    """Guarda la observación; solamente Kalshi determina la evaluación final."""
     if not state or not state.get("ticker"):
         return
-    target = state.get("last_target")
-    final_btc = state.get("last_live_price")
-    if target is None or final_btc is None:
-        return
     try:
-        target = float(target); final_btc = float(final_btc)
-    except Exception:
-        return
-
-    if final_btc > target:
-        outcome = "UP"
-    elif final_btc < target:
-        outcome = "DOWN"
-    else:
-        outcome = "EMPATE"
-
-    bot_signal = state.get("active_direction")
-    if bot_signal not in ("UP", "DOWN"):
-        result = "NO TRADE"
-        bot_signal = None
-    elif outcome == "EMPATE":
-        result = "EMPATE"
-    else:
-        result = "GANADA" if bot_signal == outcome else "PERDIDA"
-
-    fst = state.get("first_signal_time")
-    if isinstance(fst, datetime):
-        fst = fst.isoformat()
-
-    try:
+        latest = load_round_state(state["ticker"])
+        canonical_first = bool(latest and latest.get("ticker") == state["ticker"]
+                               and latest.get("first_direction") in ("UP", "DOWN"))
+        if canonical_first:
+            state = dict(state)
+            for key in ("first_direction", "first_signal_time"):
+                state[key] = latest.get(key)
+        target = float(state["last_target"])
+        price = float(state["last_live_price"])
+        if not np.isfinite(target) or not np.isfinite(price):
+            return
+        observed = "UP" if price > target else "DOWN" if price < target else "EMPATE"
+        first = state.get("first_direction")
+        first = first if first in ("UP", "DOWN") else None
+        pending = "PENDIENTE" if first else "NO TRADE"
+        observed_result = ("EMPATE" if observed == "EMPATE" else "GANADA" if first == observed else "PERDIDA") if first else "NO TRADE"
+        fst = state.get("first_signal_time")
+        if isinstance(fst, datetime):
+            fst = fst.isoformat()
         with _history_db() as conn:
-            conn.execute(
-                """INSERT OR IGNORE INTO round_history
-                (ticker,target,final_btc,final_outcome,bot_signal,result,first_signal,first_signal_time,closed_at)
-                VALUES(?,?,?,?,?,?,?,?,?)""",
-                (state["ticker"], target, final_btc, outcome, bot_signal, result,
-                 state.get("first_direction"), fst, datetime.now(timezone.utc).isoformat())
-            )
+            if canonical_first:
+                conn.execute('''UPDATE round_history SET first_signal=?,
+                    first_signal_time=COALESCE(?,first_signal_time),bot_signal=?,
+                    result=CASE WHEN verification_status='official' AND official_result IN ('yes','no')
+                        THEN CASE WHEN official_result=? THEN 'GANADA' ELSE 'PERDIDA' END
+                        ELSE result END WHERE ticker=?''',
+                    (first,fst,first,'yes' if first == 'UP' else 'no',state['ticker']))
+            conn.execute('''INSERT INTO round_history
+                (ticker,target,final_btc,final_outcome,bot_signal,result,first_signal,
+                 first_signal_time,closed_at,verification_status,observed_outcome,observed_result)
+                VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    target=excluded.target,
+                    final_btc=CASE WHEN round_history.verification_status='official' THEN round_history.final_btc ELSE excluded.final_btc END,
+                    final_outcome=CASE WHEN round_history.verification_status='official' THEN round_history.final_outcome ELSE excluded.final_outcome END,
+                    bot_signal=COALESCE(round_history.first_signal,excluded.first_signal),
+                    result=CASE WHEN round_history.verification_status='official' THEN round_history.result ELSE excluded.result END,
+                    first_signal=COALESCE(round_history.first_signal,excluded.first_signal),
+                    first_signal_time=COALESCE(round_history.first_signal_time,excluded.first_signal_time),
+                    observed_outcome=excluded.observed_outcome,
+                    observed_result=excluded.observed_result''',
+                (state['ticker'], target, price, observed, first, pending, first, fst,
+                 datetime.now(timezone.utc).isoformat(), observed, observed_result))
     except Exception:
         pass
+
 
 def load_history(limit=100):
     try:
         with _history_db() as conn:
-            rows = conn.execute(
-                """SELECT ticker,target,final_btc,final_outcome,bot_signal,result,
-                          first_signal,first_signal_time,closed_at
-                   FROM round_history ORDER BY closed_at DESC LIMIT ?""",
-                (int(limit),)
-            ).fetchall()
-        cols = ["Ronda","Target","BTC final","Resultado real","Señal bot","Estado",
-                "1ª señal","Hora 1ª señal","Cierre"]
-        return pd.DataFrame(rows, columns=cols)
+            # Un registrador antiguo aún activo no puede convertir una observación en resultado oficial.
+            conn.execute('''UPDATE round_history SET
+                final_outcome=CASE official_result WHEN 'yes' THEN 'UP' WHEN 'no' THEN 'DOWN' ELSE final_outcome END,
+                final_btc=COALESCE(verified_expiration_value,final_btc)
+                WHERE verification_status='official' ''')
+            conn.execute('''UPDATE round_history SET bot_signal=first_signal,
+                result=CASE WHEN first_signal NOT IN ('UP','DOWN') OR first_signal IS NULL THEN 'NO TRADE'
+                            WHEN verification_status != 'official' THEN 'PENDIENTE'
+                            WHEN first_signal=final_outcome THEN 'GANADA' ELSE 'PERDIDA' END''')
+            rows = conn.execute('''SELECT ticker,target,final_btc,
+                CASE WHEN verification_status='official' THEN final_outcome ELSE 'PENDIENTE' END,
+                bot_signal,result,first_signal,first_signal_time,closed_at
+                FROM round_history ORDER BY closed_at DESC LIMIT ?''', (int(limit),)).fetchall()
+        return pd.DataFrame(rows, columns=['Ronda','Target','BTC final','Resultado oficial','Señal bot','Estado','1ª señal','Hora 1ª señal','Cierre'])
     except Exception:
         return pd.DataFrame()
 
+
 def history_stats(df):
     if df is None or df.empty:
-        return {"total":0,"wins":0,"losses":0,"no_trade":0,"win_rate":0.0}
-    wins = int((df["Estado"] == "GANADA").sum())
-    losses = int((df["Estado"] == "PERDIDA").sum())
-    no_trade = int((df["Estado"] == "NO TRADE").sum())
+        return dict(total=0,wins=0,losses=0,no_trade=0,pending=0,decided=0,win_rate=0.0)
+    wins = int((df['Estado']=='GANADA').sum())
+    losses = int((df['Estado']=='PERDIDA').sum())
     decided = wins + losses
-    rate = (wins / decided * 100.0) if decided else 0.0
-    return {"total":len(df),"wins":wins,"losses":losses,"no_trade":no_trade,"win_rate":rate}
+    return dict(total=len(df),wins=wins,losses=losses,
+                no_trade=int((df['Estado']=='NO TRADE').sum()),
+                pending=int((df['Estado']=='PENDIENTE').sum()),decided=decided,
+                win_rate=wins/decided*100 if decided else 0.0)
+
 
 # =========================================================
 # COINBASE — VELAS ORIGINALES DE 1 MINUTO
@@ -855,27 +898,8 @@ def history_stats(df):
 
 @st.cache_data(ttl=5)
 def get_btc_data():
-    response = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-USD/candles",
-        params={"granularity": 60},
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    data = response.json()
+    return _fetch_current_btc_candles()
 
-    if not isinstance(data, list) or len(data) < 30:
-        raise ValueError("Coinbase no devolvió suficientes datos.")
-
-    df = pd.DataFrame(
-        data, columns=["time", "low", "high", "open", "close", "volume"]
-    )
-
-    for column in ["low", "high", "open", "close", "volume"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    return df.dropna().sort_values("time").reset_index(drop=True)
 
 def get_coinbase_whale_flow():
     """Lee presión agresiva de Coinbase en ventanas 10s/30s/60s y conserva alertas breves."""
@@ -1134,9 +1158,11 @@ def _indicator_frame(df):
     delta = close.diff(); gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
     ag = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     al = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rsi = 100-(100/(1+(ag/al.replace(0,np.nan))))
-    rsi = rsi.mask((al == 0) & (ag > 0), 100).mask((ag == 0) & (al > 0), 0)
-    x["rsi"] = rsi.fillna(50)
+    rs = ag / al.replace(0, np.nan)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = rsi.mask((al == 0) & (ag > 0), 100.0)
+    rsi = rsi.mask((ag == 0) & (al > 0), 0.0)
+    x["rsi"] = rsi.fillna(50.0)
     e12=close.ewm(span=12,adjust=False).mean(); e26=close.ewm(span=26,adjust=False).mean()
     x["macd"]=e12-e26; x["macd_signal"]=x["macd"].ewm(span=9,adjust=False).mean(); x["macd_hist"]=x["macd"]-x["macd_signal"]
     prev=close.shift(1); tr=pd.concat([(high-low),(high-prev).abs(),(low-prev).abs()],axis=1).max(axis=1)
@@ -1149,15 +1175,18 @@ def _indicator_frame(df):
     x["vol_ratio"]=vol/vol.rolling(20).mean().replace(0,np.nan)
     return x
 
+
 def _resample_indicators(df, minutes):
     if minutes == 1: return _indicator_frame(df)
     x=df.set_index("time").resample(f"{minutes}min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna().reset_index()
     return _indicator_frame(x)
 
+
 def add_indicators(df):
     x=_indicator_frame(df)
     x["mom3"]=x["close"].pct_change(3)*100; x["mom5"]=x["close"].pct_change(5)*100; x["mom15"]=x["close"].pct_change(15)*100
     return x
+
 
 def get_target_from_market(market):
     if not market:
@@ -1268,49 +1297,18 @@ def estimated_probabilities(
 # =========================================================
 
 def build_signal(df, target, seconds_left, live_price=None):
-    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
-    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
-    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
-    def direction(row):
-        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
-        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
-    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
-    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
-    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
-    target_atr=(distance/atr) if distance is not None else 0.0
-    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
-    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
-    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
-    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
-    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
-    candidate=None; quality="SIN CONFIRMACIÓN"
-    if aligned=="UP" and (trend_strong or (rsi3>=52 and rsi5>=50)) and vwap_atr>-0.15:
-        candidate="UP"
-    elif aligned=="DOWN" and (trend_strong or (rsi3<=48 and rsi5<=50)) and vwap_atr<0.15:
-        candidate="DOWN"
-    # Señal temprana: no espera alineación perfecta de 3M/5M cuando 5M no se opone
-    # y el impulso de 1M/3M + VWAP/participación ya apuntan a la misma dirección.
-    elif d5 != "DOWN" and l3["macd_hist"] > 0 and rsi1 >= 53 and rsi3 >= 50 and vwap_atr >= 0.05 and (rvol >= 0.90 or mom3 > 0.025):
-        candidate="UP"
-        quality="TEMPRANA"
-    elif d5 != "UP" and l3["macd_hist"] < 0 and rsi1 <= 47 and rsi3 <= 50 and vwap_atr <= -0.05 and (rvol >= 0.90 or mom3 < -0.025):
-        candidate="DOWN"
-        quality="TEMPRANA"
-    # Near expiry, the contract target can dominate only when BTC has a meaningful ATR cushion.
-    if seconds_left is not None and seconds_left<=180 and distance is not None:
-        if target_atr>=0.35 and d5!="DOWN": candidate="UP"
-        elif target_atr<=-0.35 and d5!="UP": candidate="DOWN"
-    if near_noise and not trend_strong: candidate=None
-    if candidate:
-        confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
-        if quality != "TEMPRANA":
-            quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
-    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
-    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
-    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
-    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr}
+    _TRACE_CONTEXT.build_id = None
+    _TRACE_CONTEXT.build_payload = None
+    sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
+    try:
+        candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
+        payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
+        _TRACE_CONTEXT.build_payload = payload
+        _TRACE_CONTEXT.build_id = _trace_event("build", payload)
+    except Exception:
+        pass
+    return sig
+
 
 def build_presignal(sig, seconds_left):
     """PRESEÑAL INDEPENDIENTE Y REACTIVA.
@@ -1401,16 +1399,6 @@ def build_presignal(sig, seconds_left):
         return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear}
 
     direction = "UP" if edge > 0 else "DOWN"
-    # La inercia de indicadores no basta para emitir una preseñal operable.
-    # La misma regla se aplica en la pantalla y en el ejecutor autónomo.
-    recent = sig.get("recent_moves")
-    if not recent or not recent.get("ready"):
-        return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear,
-                "reason": (recent or {}).get("reason", "Reuniendo precios de esta ronda")}
-    sign = 1 if direction == "UP" else -1
-    if any(sign * delta < recent["minimum"] for delta in recent["deltas"]):
-        return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear,
-                "reason":"Indicadores e impulso de 5/10/30 s no coinciden; sin entrada"}
     dominant = max(bull, bear)
     share = dominant / total if total else 0.5
 
@@ -1419,6 +1407,7 @@ def build_presignal(sig, seconds_left):
     percent = int(round(np.clip(50 + (share - 0.5) * 92 + min(abs(edge), 6.0) * 1.8, 52, 100)))
 
     return {"direction":direction, "percent":percent, "bull":bull, "bear":bear}
+
 
 def entry_quality(price, seconds_left):
     if price is None:
@@ -1429,130 +1418,40 @@ def entry_quality(price, seconds_left):
         return "PRECAUCIÓN", "#fbbf24"
     return "CARA", "#fb7185"
 
+
 # =========================================================
 # CONTROL DE RONDA — EL CEREBRO MANDA
 # =========================================================
 
+def confirm_round_candidate(state, candidate, market, seconds_left, now):
+    before = dict(state)
+    result = _confirmation_without_trace(state, candidate, market, seconds_left, now)
+    try:
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        if getattr(_TRACE_CONTEXT, "build_id", None) is None:
+            fallback = getattr(_TRACE_CONTEXT, "build_payload", None)
+            if fallback is not None:
+                payload["input_fallback"] = fallback
+        _trace_event("confirmation", payload, state.get("ticker"))
+    except Exception:
+        pass
+    finally:
+        _TRACE_CONTEXT.build_id = None
+        _TRACE_CONTEXT.build_payload = None
+    return result
+
+
+
 def process_round_signal(ticker, sig, market, seconds_left):
-    now = datetime.now(timezone.utc)
+    if not ticker or ticker == '--':
+        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
+    def apply():
+        latest = load_round_state(ticker)
+        if latest is not None:
+            st.session_state.rounds[ticker] = latest
+        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
+    return _run_round_transaction(apply)
 
-    if ticker and ticker != "--" and st.session_state.active_ticker != ticker:
-        previous_ticker = st.session_state.active_ticker
-        if previous_ticker and previous_ticker in st.session_state.rounds:
-            save_round_history(st.session_state.rounds.get(previous_ticker))
-        st.session_state.active_ticker = ticker
-        restored = load_round_state(ticker)
-        st.session_state.rounds[ticker] = restored if restored is not None else new_round_state(ticker, seconds_left)
-        st.session_state.micro_ticker = ticker
-        st.session_state.micro_prices = []
-
-    if not ticker or ticker == "--":
-        return {
-            "decision":"NO TRADE","signal":"SIN RONDA","icon":"•","color":"#fbbf24",
-            "round_state":None,"reversal":False,"reversal_text":"","entry_price":None,
-            "entry_quality":"SIN DATOS","entry_quality_color":"#94a3b8",
-        }
-
-    if ticker not in st.session_state.rounds:
-        restored = load_round_state(ticker)
-        st.session_state.rounds[ticker] = restored if restored is not None else new_round_state(ticker, seconds_left)
-
-    state = st.session_state.rounds[ticker]
-    restored_from_disk = bool(state.pop("_restored_from_disk", False))
-    score = float(sig.get("final_score", 0.0))
-    price = float(sig.get("price", 0.0))
-    distance_now = sig.get("distance")
-    if distance_now is not None:
-        try:
-            state["last_target"] = price - float(distance_now)
-        except Exception:
-            pass
-
-    previous_live_price = state.get("last_live_price")
-    state["previous_live_price"] = previous_live_price
-    state["last_live_price"] = price
-    price_change = price - previous_live_price if previous_live_price is not None else 0.0
-
-    previous_score = float(state.get("last_score", 0.0))
-    state["previous_score"] = previous_score
-    state["last_score"] = score
-    score_change = score - previous_score
-
-    # build_signal() es el cerebro. No hay espera fija, bloqueo final,
-    # votos externos, fresh_support ni distancia mínima externa.
-    candidate = sig.get("candidate")
-
-    if candidate in ("UP", "DOWN"):
-        previous_active = state.get("active_direction")
-        state["active_direction"] = candidate
-
-        if previous_active != candidate:
-            state["active_since"] = now
-
-        # La primera señal se guarda SOLO como historial; no congela la señal actual.
-        if state.get("first_direction") is None:
-            direction_price = get_yes_ask(market) if candidate == "UP" else get_no_ask(market)
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = direction_price
-    else:
-        # Al volver a abrir la app, conserva la señal que ya tenía ESA ronda.
-        # En los siguientes ciclos el cerebro vuelve a mandar normalmente.
-        if not restored_from_disk:
-            state["active_direction"] = None
-            state["active_since"] = None
-
-    active = state.get("active_direction")
-    reversal = False
-    reversal_text = ""
-
-    # Aviso informativo solamente; nunca bloquea ni congela la señal.
-    if active == "UP":
-        weakness_points = 0
-        if score < 0: weakness_points += 1
-        if score_change <= -1.25: weakness_points += 1
-        if sig.get("mom3",0) < -0.02: weakness_points += 1
-        if sig.get("mom5",0) < 0: weakness_points += 1
-        if price_change < -8: weakness_points += 1
-        if weakness_points >= 2:
-            reversal = True
-            reversal_text = "UP PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
-
-    elif active == "DOWN":
-        weakness_points = 0
-        if score > 0: weakness_points += 1
-        if score_change >= 1.25: weakness_points += 1
-        if sig.get("mom3",0) > 0.02: weakness_points += 1
-        if sig.get("mom5",0) > 0: weakness_points += 1
-        if price_change > 8: weakness_points += 1
-        if weakness_points >= 2:
-            reversal = True
-            reversal_text = "DOWN PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
-
-    state["reversal_warning"] = reversal
-    state["reversal_text"] = reversal_text
-
-    if active == "UP":
-        decision, signal, icon, color = "UP","SEÑAL UP","⬆","#34e982"
-        current_entry_price = get_yes_ask(market)
-    elif active == "DOWN":
-        decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#ff4e5f"
-        current_entry_price = get_no_ask(market)
-    else:
-        decision, signal, icon, color = "ESPERANDO","SIN CONFIRMACIÓN","•","#38bdf8"
-        current_entry_price = None
-
-    quality, quality_color = entry_quality(current_entry_price, seconds_left)
-    save_round_state(state)
-    if seconds_left is not None and seconds_left <= 0:
-        save_round_history(state)
-    return {
-        "decision":decision,"signal":signal,"icon":icon,"color":color,
-        "round_state":state,"reversal":reversal,"reversal_text":reversal_text,
-        "entry_price":current_entry_price,"entry_quality":quality,
-        "entry_quality_color":quality_color,
-    }
 
 # =========================================================
 # REGISTRADOR AUTÓNOMO 12 HORAS — SOLO HISTORIAL
@@ -1624,31 +1523,13 @@ def _background_get_live_price(market, with_source=False):
     return (float(price), "COINBASE") if with_source else float(price)
 
 def _background_update_state(state, sig, market, seconds_left):
-    now = datetime.now(timezone.utc)
-    price = float(sig.get("price", 0.0))
-    target = get_target_from_market(market)
-    if target is not None:
-        state["last_target"] = float(target)
-    state["previous_live_price"] = state.get("last_live_price")
-    state["last_live_price"] = price
-    state["last_seconds_left"] = seconds_left
-    state["previous_score"] = float(state.get("last_score", 0.0))
-    state["last_score"] = float(sig.get("final_score", 0.0))
-    candidate = sig.get("candidate")
-    if candidate in ("UP", "DOWN"):
-        if state.get("active_direction") != candidate:
-            state["active_since"] = now
-        state["active_direction"] = candidate
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = get_yes_ask(market) if candidate == "UP" else get_no_ask(market)
-    else:
-        state["active_direction"] = None
-        state["active_since"] = None
-    save_round_state(state)
-    return state
+    def apply():
+        latest = load_round_state(state['ticker'])
+        current = latest if latest is not None else state
+        current.pop('_restored_from_disk',None)
+        return _background_update_state_without_coordinator(current,sig,market,seconds_left)
+    return _run_round_transaction(apply)
+
 
 def _background_history_loop():
     started = time.monotonic()
@@ -2213,35 +2094,7 @@ def execution_choice(sig, cfg, secs):
     return side, sig.get("up_probability" if side == "UP" else "down_probability", 50)
 
 def refine_main_signal(sig):
-    """Integra impulso actual sin espera fija ni disparador en dólares.
-
-    Los porcentajes son puntuaciones heurísticas, no probabilidades calibradas.
-    Sin cinta suficiente se conserva la lectura técnica de las velas.
-    """
-    recent = sig.get("recent_moves") or {}
-    if not recent.get("ready"):
-        return sig
-    deltas = recent["deltas"]
-    threshold = recent["minimum"]
-    side = "UP" if all(d > threshold for d in deltas) else "DOWN" if all(d < -threshold for d in deltas) else None
-    if side is None:
-        sig["candidate"] = None
-        sig["quality"] = "IMPULSO MIXTO O PLANO"
-        return sig
-    sign = 1 if side == "UP" else -1
-    # El impulso por sí solo no basta: exige apoyo del momentum de velas.
-    momentum = sig.get("mom3", 0)
-    if sign * momentum <= 0:
-        sig["candidate"] = None
-        sig["quality"] = "CAMBIO DE IMPULSO SIN APOYO DE VELAS"
-        return sig
-    sig["candidate"] = side
-    sig["quality"] = "TEMPRANA · IMPULSO ACTUAL"
-    # Limita la contribución lenta para que no decida contra el impulso actual.
-    evidence = float(np.clip(sig.get("technical_score", 0), -2, 2)) + sign * 3
-    sig["technical_score"] = sig["final_score"] = evidence
-    sig["up_probability"] = round(float(np.clip(50 + evidence * 7, 5, 95)))
-    sig["down_probability"] = 100 - sig["up_probability"]
+    """Compatibilidad: no modifica el cerebro original v4.6.1."""
     return sig
 
 def v2_order_payload(ticker, direction, action, quantity, price, client_id):
@@ -2584,6 +2437,15 @@ class ExecutionWorker:
                 if ledger["pending"]: return
 
     def tick(self, mode, cfg):
+        # Bloqueo de seguridad de esta integración: no ejecutar órdenes reales
+        # antes de validar señales y comportamiento del sistema.
+        if mode == "REAL" and not ALLOW_REAL_TRADING:
+            self.message = "Modo REAL bloqueado para pruebas de integración"
+            self.status_by_mode[mode] = {
+                "message": self.message,
+                "heartbeat": datetime.now(timezone.utc).isoformat(),
+            }
+            return
         # A running thread keeps its original run() code after an in-place
         # class upgrade. Publish here as well so even that legacy loop supplies
         # a fresh, mode-specific status on every completed evaluation.
@@ -2647,8 +2509,15 @@ class ExecutionWorker:
             self.message = "Velas desactualizadas"; return
         sig = build_signal(df, target, secs, live_price)
         sig["recent_moves"] = gate.movement(sig.get("atr", 0), time.monotonic())
-        sig = refine_main_signal(sig)
-        side, confidence = execution_choice(sig, cfg, secs)
+        # Cerebro original v4.6.1: señal y confirmación temporal intactas.
+        confirm_states = self.__dict__.setdefault("brain_confirm_states", {})
+        confirm_key = (mode, m["ticker"])
+        if confirm_key not in confirm_states:
+            confirm_states[confirm_key] = new_round_state(m["ticker"], secs)
+        confirm_state = confirm_states[confirm_key]
+        confirm_round_candidate(confirm_state, sig.get("candidate"), m, secs, datetime.now(timezone.utc))
+        side = confirm_state.get("active_direction")
+        confidence = sig.get("up_probability" if side == "UP" else "down_probability", 50)
         if side not in ("UP", "DOWN") or confidence < cfg["min_conf"]:
             gate.reset_candidate()
             pre_reason = sig.get("quality") if side not in ("UP", "DOWN") else None
@@ -3055,7 +2924,6 @@ def live_dashboard():
     if live_btc_price is not None:
         ui_gate.observe(ticker, source, float(live_btc_price), time.monotonic())
     sig["recent_moves"] = ui_gate.movement(sig.get("atr", 0), time.monotonic())
-    sig = refine_main_signal(sig)
     round_signal = process_round_signal(ticker, sig, market, seconds_left)
     reader = closing_reader(sig, round_signal, seconds_left, micro)
 
@@ -3074,6 +2942,9 @@ def live_dashboard():
 
     # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
     whale_html = render_whale_panel(whale, active)
+    early_reversal_html = render_early_reversal_panel(
+        detect_early_reversal(ticker, micro, whale, live_btc_price)
+    )
 
     if active == "UP":
         accent = "#34e982"
@@ -3251,7 +3122,7 @@ def live_dashboard():
     {final_panel}
   </section>
 
-  {whale_html}
+  {whale_html}{early_reversal_html}
 
   <section class="rcard tech">
     <div class="techhead"><span>DETALLES TÉCNICOS</span><span>⌃</span></div>
@@ -3323,6 +3194,634 @@ def live_dashboard():
         unsafe_allow_html=True,
     )
 
+
+ALLOW_REAL_TRADING = False  # Activación deliberada tras pruebas; no modifica señales.
+LEGACY_ROUND_STATE_DB = "btc_signal_round_state.db"
+ROUND_STATE_DB = "btc_signal_round_state_v2.db"
+_ROUND_TRANSACTION = threading.local()
+LEGACY_HISTORY_DB = "btc_signal_history.db"
+HISTORY_DB = "btc_signal_history_v2.db"
+import zlib
+SIGNAL_TRACE_DB = "btc_signal_decisions.db"
+_TRACE_CONTEXT = threading.local()
+
+
+# ===== FUNCIONES ADICIONALES ORIGINALES v4.6.1 =====
+
+def _decode_round_payload(payload):
+    state = json.loads(payload)
+    for key in ('detected_at','first_signal_time','active_since'):
+        value = state.get(key)
+        if isinstance(value, str) and value:
+            try:
+                state[key] = datetime.fromisoformat(value)
+            except ValueError:
+                state[key] = None
+    state['_restored_from_disk'] = True
+    return state
+
+
+def _load_state_from_connection(conn, ticker):
+    row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
+    if row:
+        return _decode_round_payload(row[0])
+    # La primera lectura conserva la ronda anterior, sin permitir que un trabajador
+    # antiguo escriba en la nueva base coordinada.
+    try:
+        with sqlite3.connect('file:' + LEGACY_ROUND_STATE_DB + '?mode=ro', uri=True, timeout=1) as legacy:
+            row = legacy.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
+        return _decode_round_payload(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def _write_state_to_connection(conn, state):
+    row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (state['ticker'],)).fetchone()
+    saved = json.loads(row[0]) if row else {}
+    if saved.get('first_direction') in ('UP','DOWN'):
+        for key in ('first_direction','first_signal_time','first_signal_seconds','first_signal_price'):
+            value = saved.get(key)
+            if key == 'first_signal_time' and isinstance(value, str) and value:
+                value = datetime.fromisoformat(value)
+            state[key] = value
+    keep = {key:value for key,value in state.items() if key != '_restored_from_disk'}
+    for key in ('detected_at','first_signal_time','active_since'):
+        if isinstance(keep.get(key), datetime):
+            keep[key] = keep[key].isoformat()
+    conn.execute('INSERT INTO round_state(ticker,payload,updated_at) VALUES(?,?,?) '
+                 'ON CONFLICT(ticker) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
+                 (state['ticker'],json.dumps(keep,allow_nan=False),datetime.now(timezone.utc).isoformat()))
+
+
+def _run_round_transaction(action):
+    if getattr(_ROUND_TRANSACTION,'conn',None) is not None:
+        return action()
+    conn = _round_db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        _ROUND_TRANSACTION.conn = conn
+        try:
+            result = action()
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            _ROUND_TRANSACTION.conn = None
+    finally:
+        conn.close()
+
+
+def verified_binary_outcome(market, ticker, now=None):
+    """Acepta solamente una liquidación binaria fechada y no provisional."""
+    now = now or datetime.now(timezone.utc)
+    if not isinstance(market, dict) or market.get('ticker') != ticker:
+        return None
+    if not ticker.startswith('KXBTC15M-') or market.get('market_type') != 'binary':
+        return None
+    if market.get('is_provisional') not in (None, False):
+        return None
+    result = str(market.get('result') or '').lower()
+    if result not in ('yes', 'no'):
+        return None
+    try:
+        settled = datetime.fromisoformat(str(market['settlement_ts']).replace('Z', '+00:00'))
+        if settled.tzinfo is None or settled > now:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return 'UP' if result == 'yes' else 'DOWN'
+
+
+def reconcile_history_once(limit=4, fetch_market=None):
+    """Consulta resultados públicos fuera del motor de señales."""
+    with _history_db() as conn:
+        tickers = [row[0] for row in conn.execute('''SELECT ticker FROM round_history
+            WHERE verification_status != 'official' AND ticker LIKE 'KXBTC15M-%'
+            ORDER BY COALESCE(last_verification_attempt,''),closed_at DESC LIMIT ?''', (int(limit),))]
+    verified = 0
+    for ticker in tickers:
+        try:
+            with _history_db() as conn:
+                conn.execute('UPDATE round_history SET last_verification_attempt=? WHERE ticker=?',
+                             (datetime.now(timezone.utc).isoformat(), ticker))
+            if fetch_market is None:
+                response = requests.get(
+                    'https://external-api.kalshi.com/trade-api/v2/markets/' + ticker,
+                    headers={'User-Agent': 'MacalyAlphaBot/4.6.1'}, timeout=5)
+                response.raise_for_status()
+                market = response.json().get('market')
+            else:
+                market = fetch_market(ticker)
+            outcome = verified_binary_outcome(market, ticker)
+            if outcome is None:
+                continue
+            expiration = market.get('expiration_value')
+            try:
+                expiration = float(expiration)
+                if not np.isfinite(expiration) or not 10000 < expiration < 1000000:
+                    expiration = None
+            except (ValueError, TypeError):
+                expiration = None
+            with _history_db() as conn:
+                conn.execute('''UPDATE round_history SET final_outcome=?,
+                    final_btc=COALESCE(?,final_btc),
+                    result=CASE WHEN first_signal NOT IN ('UP','DOWN') OR first_signal IS NULL THEN 'NO TRADE'
+                                WHEN first_signal=? THEN 'GANADA' ELSE 'PERDIDA' END,
+                    verification_status='official',official_result=?,settlement_at=?,verified_at=?,verified_expiration_value=?
+                    WHERE ticker=?''',
+                    (outcome, expiration, outcome, market['result'], market['settlement_ts'],
+                     datetime.now(timezone.utc).isoformat(), expiration, ticker))
+            verified += 1
+        except Exception:
+            continue
+    return verified
+
+
+def _history_verification_loop():
+    started = time.monotonic()
+    while time.monotonic() - started < BACKGROUND_RUN_SECONDS:
+        try:
+            reconcile_history_once()
+        except Exception:
+            pass
+        time.sleep(30)
+
+
+@st.cache_resource(validate=lambda worker: worker.is_alive())
+def start_history_verifier():
+    worker = threading.Thread(target=_history_verification_loop, name='btc-history-verification-v2', daemon=True)
+    worker.start()
+    return worker
+
+
+def _fetch_current_btc_candles():
+    """Solicita una ventana explícita y verifica la fecha de las velas recibidas.
+
+    Una respuesta HTTP correcta puede contener velas antiguas. No se sustituye
+    una vela antigua por un precio live para calcular los indicadores.
+    """
+    last_error = None
+    for attempt in range(2):
+        requested_at = datetime.now(timezone.utc)
+        minute_start = requested_at.replace(second=0, microsecond=0)
+        start = minute_start - pd.Timedelta(minutes=299)
+        response = requests.get(
+            "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+            params={
+                "granularity": 60,
+                "start": start.isoformat(),
+                "end": requested_at.isoformat(),
+            },
+            headers={
+                "User-Agent": "MacalyAlphaBot/4.6.1",
+                "Cache-Control": "no-cache, no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or len(rows) < 30:
+            raise ValueError("Coinbase no devolvió suficientes velas.")
+        frame = pd.DataFrame(
+            rows, columns=["time", "low", "high", "open", "close", "volume"]
+        )
+        for column in ["time", "low", "high", "open", "close", "volume"]:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["time"] = pd.to_datetime(frame["time"], unit="s", utc=True, errors="coerce")
+        frame = frame.dropna().drop_duplicates("time").sort_values("time").reset_index(drop=True)
+        if len(frame) < 30:
+            raise ValueError("Coinbase devolvió velas inválidas o insuficientes.")
+        received_at = datetime.now(timezone.utc)
+        latest_start = frame.iloc[-1]["time"]
+        age = (received_at - latest_start.to_pydatetime()).total_seconds()
+        # Una vela de 1m puede estar abierta o ser la última cerrada. Se permite
+        # hasta un minuto adicional de publicación, sin aceptar varios minutos.
+        if -5 <= age <= 120:
+            frame.attrs["received_at"] = received_at.isoformat()
+            frame.attrs["latest_candle_at"] = latest_start.isoformat()
+            frame.attrs["candle_age_seconds"] = age
+            return frame
+        last_error = ValueError(
+            "Velas Coinbase desactualizadas: última vela "
+            f"{latest_start.strftime('%H:%M:%S UTC')} ({age:.0f} s). "
+            "El motor necesita velas actuales."
+        )
+    raise last_error
+
+
+def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
+    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
+    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
+    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
+    def direction(row):
+        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
+        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
+    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
+    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
+    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
+    target_atr=(distance/atr) if distance is not None else 0.0
+    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
+    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
+    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
+    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
+    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
+    candidate=None; quality="SIN CONFIRMACIÓN"
+    if aligned=="UP" and (trend_strong or (rsi3>=52 and rsi5>=50)) and vwap_atr>-0.15:
+        candidate="UP"
+    elif aligned=="DOWN" and (trend_strong or (rsi3<=48 and rsi5<=50)) and vwap_atr<0.15:
+        candidate="DOWN"
+    # Señal temprana: no espera alineación perfecta de 3M/5M cuando 5M no se opone
+    # y el impulso de 1M/3M + VWAP/participación ya apuntan a la misma dirección.
+    elif d5 != "DOWN" and l3["macd_hist"] > 0 and rsi1 >= 53 and rsi3 >= 50 and vwap_atr >= 0.05 and (rvol >= 0.90 or mom3 > 0.025):
+        candidate="UP"
+        quality="TEMPRANA"
+    elif d5 != "UP" and l3["macd_hist"] < 0 and rsi1 <= 47 and rsi3 <= 50 and vwap_atr <= -0.05 and (rvol >= 0.90 or mom3 < -0.025):
+        candidate="DOWN"
+        quality="TEMPRANA"
+    # Near expiry, the contract target can dominate only when BTC has a meaningful ATR cushion.
+    if seconds_left is not None and seconds_left<=180 and distance is not None:
+        if target_atr>=0.35 and d5!="DOWN": candidate="UP"
+        elif target_atr<=-0.35 and d5!="UP": candidate="DOWN"
+    if near_noise and not trend_strong: candidate=None
+    if candidate:
+        confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
+        if quality != "TEMPRANA":
+            quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
+    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
+    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
+    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
+    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr}
+
+
+def _confirmation_without_trace(state, candidate, market, seconds_left, now):
+    """Confirmación compartida por la pantalla y el registrador de fondo.
+
+    La primera señal queda inmutable. Un cambio UP/DOWN posterior también
+    necesita confirmación. Una lectura neutral cancela la candidatura pendiente.
+    """
+    if candidate not in ("UP", "DOWN"):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        state["active_direction"] = None
+        state["active_since"] = None
+        return
+
+    if candidate == state.get("active_direction"):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        return
+
+    last = state.get("pending_last_at")
+    if isinstance(last, str):
+        try:
+            last = datetime.fromisoformat(last)
+        except ValueError:
+            last = None
+    since = state.get("pending_since")
+    if isinstance(since, str):
+        try:
+            since = datetime.fromisoformat(since)
+        except ValueError:
+            since = None
+
+    if state.get("pending_direction") != candidate:
+        state["pending_direction"] = candidate
+        state["pending_count"] = 1
+        state["pending_since"] = now.isoformat()
+        state["pending_last_at"] = now.isoformat()
+        return
+
+    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
+        state["pending_count"] = int(state.get("pending_count", 0)) + 1
+        state["pending_last_at"] = now.isoformat()
+
+    elapsed = (now - since).total_seconds() if since else 0
+    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
+            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+        state["active_direction"] = candidate
+        state["active_since"] = now
+        if state.get("first_direction") is None:
+            state["first_direction"] = candidate
+            state["first_signal_time"] = now
+            state["first_signal_seconds"] = seconds_left
+            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                           else get_no_ask(market))
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+
+
+def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
+    now = datetime.now(timezone.utc)
+
+    if ticker and ticker != "--" and st.session_state.active_ticker != ticker:
+        previous_ticker = st.session_state.active_ticker
+        if previous_ticker and previous_ticker in st.session_state.rounds:
+            save_round_history(st.session_state.rounds.get(previous_ticker))
+        st.session_state.active_ticker = ticker
+        restored = load_round_state(ticker)
+        st.session_state.rounds[ticker] = restored if restored is not None else new_round_state(ticker, seconds_left)
+        st.session_state.micro_ticker = ticker
+        st.session_state.micro_prices = []
+
+    if not ticker or ticker == "--":
+        return {
+            "decision":"NO TRADE","signal":"SIN RONDA","icon":"•","color":"#fbbf24",
+            "round_state":None,"reversal":False,"reversal_text":"","entry_price":None,
+            "entry_quality":"SIN DATOS","entry_quality_color":"#94a3b8",
+        }
+
+    if ticker not in st.session_state.rounds:
+        restored = load_round_state(ticker)
+        st.session_state.rounds[ticker] = restored if restored is not None else new_round_state(ticker, seconds_left)
+
+    state = st.session_state.rounds[ticker]
+    restored_from_disk = bool(state.pop("_restored_from_disk", False))
+    score = float(sig.get("final_score", 0.0))
+    price = float(sig.get("price", 0.0))
+    distance_now = sig.get("distance")
+    if distance_now is not None:
+        try:
+            state["last_target"] = price - float(distance_now)
+        except Exception:
+            pass
+
+    previous_live_price = state.get("last_live_price")
+    state["previous_live_price"] = previous_live_price
+    state["last_live_price"] = price
+    price_change = price - previous_live_price if previous_live_price is not None else 0.0
+
+    previous_score = float(state.get("last_score", 0.0))
+    state["previous_score"] = previous_score
+    state["last_score"] = score
+    score_change = score - previous_score
+
+    # El cerebro propone; tres lecturas espaciadas confirman la señal.
+    candidate = sig.get("candidate")
+    if restored_from_disk and candidate not in ("UP", "DOWN"):
+        # No se mantiene una señal antigua ante una lectura neutral actual.
+        pass
+    confirm_round_candidate(state, candidate, market, seconds_left, now)
+
+    active = state.get("active_direction")
+    reversal = False
+    reversal_text = ""
+
+    # Aviso informativo solamente; nunca bloquea ni congela la señal.
+    if active == "UP":
+        weakness_points = 0
+        if score < 0: weakness_points += 1
+        if score_change <= -1.25: weakness_points += 1
+        if sig.get("mom3",0) < -0.02: weakness_points += 1
+        if sig.get("mom5",0) < 0: weakness_points += 1
+        if price_change < -8: weakness_points += 1
+        if weakness_points >= 2:
+            reversal = True
+            reversal_text = "UP PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
+
+    elif active == "DOWN":
+        weakness_points = 0
+        if score > 0: weakness_points += 1
+        if score_change >= 1.25: weakness_points += 1
+        if sig.get("mom3",0) > 0.02: weakness_points += 1
+        if sig.get("mom5",0) > 0: weakness_points += 1
+        if price_change > 8: weakness_points += 1
+        if weakness_points >= 2:
+            reversal = True
+            reversal_text = "DOWN PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
+
+    state["reversal_warning"] = reversal
+    state["reversal_text"] = reversal_text
+
+    if active == "UP":
+        decision, signal, icon, color = "UP","SEÑAL UP","⬆","#34e982"
+        current_entry_price = get_yes_ask(market)
+    elif active == "DOWN":
+        decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#ff4e5f"
+        current_entry_price = get_no_ask(market)
+    else:
+        decision, signal, icon, color = "ESPERANDO","SIN CONFIRMACIÓN","•","#38bdf8"
+        current_entry_price = None
+
+    quality, quality_color = entry_quality(current_entry_price, seconds_left)
+    save_round_state(state)
+    if seconds_left is not None and seconds_left <= 0:
+        save_round_history(state)
+    return {
+        "decision":decision,"signal":signal,"icon":icon,"color":color,
+        "round_state":state,"reversal":reversal,"reversal_text":reversal_text,
+        "entry_price":current_entry_price,"entry_quality":quality,
+        "entry_quality_color":quality_color,
+    }
+
+
+def _background_update_state_without_coordinator(state, sig, market, seconds_left):
+    now = datetime.now(timezone.utc)
+    price = float(sig.get("price", 0.0))
+    target = get_target_from_market(market)
+    if target is not None:
+        state["last_target"] = float(target)
+    state["previous_live_price"] = state.get("last_live_price")
+    state["last_live_price"] = price
+    state["last_seconds_left"] = seconds_left
+    state["previous_score"] = float(state.get("last_score", 0.0))
+    state["last_score"] = float(sig.get("final_score", 0.0))
+    confirm_round_candidate(state, sig.get("candidate"), market, seconds_left, now)
+    save_round_state(state)
+    return state
+
+
+def detect_early_reversal(ticker, micro, whale, price):
+    """Detector observacional autónomo: no consulta señal ni estado del cerebro.
+
+    Busca un cambio de dirección entre el movimiento previo y los últimos
+    10 segundos. El flujo Coinbase aporta contexto, no impide la lectura.
+    """
+    empty = {"status": "OBSERVANDO", "direction": None,
+             "detail": "Reuniendo movimiento del precio.", "checks": 0}
+    if ticker in (None, "--") or price is None:
+        return empty
+    tape = st.session_state.get("micro_prices", [])
+    if len(tape) < 4 or not micro.get("ready"):
+        return empty
+
+    now = datetime.now(timezone.utc).timestamp()
+    if now - float(tape[-1]["t"]) > 6:
+        return {**empty, "detail": "Esperando precio actualizado."}
+
+    last_t = float(tape[-1]["t"])
+    current = float(tape[-1]["p"])
+    def at_or_before(age):
+        cutoff = last_t - age
+        earlier = [x for x in tape if float(x["t"]) <= cutoff]
+        return float(earlier[-1]["p"]) if earlier else None
+
+    p10 = at_or_before(10)
+    p30 = at_or_before(30)
+    if p10 is None or p30 is None:
+        return {**empty, "detail": "Reuniendo 30 segundos de precio para comparar tendencias."}
+
+    recent = current - p10
+    previous = p10 - p30
+    direction = None
+    if previous < 0 and recent > 0:
+        direction = "UP"
+    elif previous > 0 and recent < 0:
+        direction = "DOWN"
+
+    buy = float((whale or {}).get("live_buy", 0) or 0)
+    sell = float((whale or {}).get("live_sell", 0) or 0)
+    total = buy + sell
+    flow_direction = "UP" if buy > sell else "DOWN" if sell > buy else None
+    flow_share = max(buy, sell) / total * 100 if total else 0
+    detail = f"Tramo previo {previous:+.0f} USD · últimos 10s {recent:+.0f} USD"
+    if total:
+        detail += f" · flujo Coinbase {flow_direction} {flow_share:.0f}%"
+    else:
+        detail += " · flujo Coinbase no disponible"
+
+    if direction:
+        return {"status": "POSIBLE REVERSIÓN", "direction": direction,
+                "detail": detail + " · cambio de dirección observado, no confirmado",
+                "checks": 1}
+    return {"status": "SIN REVERSIÓN OBSERVADA", "direction": None,
+            "detail": detail, "checks": 0}
+
+
+def render_early_reversal_panel(result):
+    direction = result.get("direction")
+    color = "#ff5367" if direction == "DOWN" else "#34e982" if direction == "UP" else "#8fa3b8"
+    title = result.get("status", "OBSERVANDO")
+    detail = result.get("detail", "")
+    return f'''<section style="margin:7px 0;padding:10px;border:1px solid {color};border-radius:10px;background:#0b1520">
+      <div style="font-size:9px;font-weight:900;color:#dce7f3">DETECTOR DE REVERSIÓN · EXPERIMENTAL</div>
+      <div style="margin-top:6px;font-size:13px;font-weight:950;color:{color}">{title}{' → ' + direction if direction else ''}</div>
+      <div style="margin-top:5px;font-size:9px;color:#b5c4d4">{detail}</div>
+      <div style="margin-top:4px;font-size:8px;color:#8495aa">Alerta informativa, no orden de compra ni predicción garantizada. No cambia la señal oficial.</div>
+    </section>'''
+
+
+def _trace_json(value):
+    def encode(item):
+        if isinstance(item, datetime):
+            return item.isoformat()
+        if isinstance(item, np.generic):
+            return item.item()
+        raise TypeError(type(item).__name__)
+    return json.dumps(value, default=encode, ensure_ascii=False, allow_nan=False)
+
+
+def _trace_event(kind, payload, ticker=None):
+    """Diagnóstico independiente: un fallo de escritura no altera la decisión."""
+    try:
+        observed = datetime.now(timezone.utc).isoformat()
+        thread_key = str(id(threading.current_thread()))
+        packed = zlib.compress(_trace_json(payload).encode("utf-8"))
+        # Give a brief competing writer time to finish, while bounding the
+        # diagnostic delay. Long locks still fail without changing the signal.
+        with sqlite3.connect(SIGNAL_TRACE_DB, timeout=0.2) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS decisions (id INTEGER PRIMARY KEY, observed_at TEXT NOT NULL, thread_key TEXT NOT NULL, kind TEXT NOT NULL, ticker TEXT, build_id INTEGER, payload BLOB NOT NULL)")
+            conn.execute("CREATE INDEX IF NOT EXISTS decisions_thread_kind ON decisions(thread_key,kind,id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS decisions_time ON decisions(observed_at)")
+            conn.execute("CREATE INDEX IF NOT EXISTS decisions_ticker ON decisions(ticker,id)")
+            build_id = getattr(_TRACE_CONTEXT, "build_id", None) if kind == "confirmation" else None
+            inserted = conn.execute("INSERT INTO decisions(observed_at,thread_key,kind,ticker,build_id,payload) VALUES(?,?,?,?,?,?)", (observed, thread_key, kind, ticker, build_id, packed))
+            cutoff = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - 12*3600, timezone.utc).isoformat()
+            conn.execute("DELETE FROM decisions WHERE observed_at < ?", (cutoff,))
+            event_id = inserted.lastrowid
+        return event_id
+    except Exception:
+        # La observación nunca cambia señales ni bloquea por errores de diagnóstico.
+        return
+
+
+def export_round_diagnostics(ticker, limit=4000):
+    """Exporta lecturas de una ronda y su verificación; no calcula señales."""
+    import gzip
+    import io
+    if (not ticker.startswith('KXBTC15M-') or len(ticker) > 128
+            or any(not (ch.isascii() and (ch.isalnum() or ch == '-')) for ch in ticker)):
+        raise ValueError('Ronda no válida.')
+    history = None
+    try:
+        with _history_db() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute('SELECT * FROM round_history WHERE ticker=?', (ticker,)).fetchone()
+            history = dict(row) if row else None
+    except Exception:
+        pass
+    output = io.BytesIO()
+    with sqlite3.connect(SIGNAL_TRACE_DB, timeout=1) as conn:
+        total, last_id = conn.execute("SELECT COUNT(*),MAX(id) FROM decisions WHERE kind='confirmation' AND ticker=?", (ticker,)).fetchone()
+        rows = conn.execute("SELECT id,observed_at,thread_key,ticker,build_id,payload FROM decisions WHERE kind='confirmation' AND ticker=? AND id<=? ORDER BY id LIMIT ?", (ticker, last_id or 0, int(limit))).fetchall()
+        header = dict(schema_version=1,ticker=ticker,
+                      exported_at=datetime.now(timezone.utc).isoformat(),
+                      available_confirmations=total,exported_confirmations=len(rows),
+                      truncated=total > len(rows),history=history)
+        # Comprime cada fila por separado para evitar acumular todas las velas en memoria.
+        with gzip.GzipFile(fileobj=output, mode='wb') as packed:
+            packed.write((json.dumps(header, ensure_ascii=False, allow_nan=False)[:-1] + ',"entries":[').encode('utf-8'))
+            for index, (event_id, observed, thread_key, round_ticker, build_id, payload) in enumerate(rows):
+                confirmation = json.loads(zlib.decompress(payload))
+                fallback = confirmation.pop("input_fallback", None)
+                build = conn.execute("SELECT observed_at,payload FROM decisions WHERE id=? AND kind='build'", (build_id,)).fetchone() if build_id else None
+                entry = dict(id=event_id,observed_at=observed,thread_key=thread_key,ticker=round_ticker,
+                             confirmation=confirmation,build_observed_at=build[0] if build else None,
+                             input=json.loads(zlib.decompress(build[1])) if build else fallback)
+                if index:
+                    packed.write(b',')
+                packed.write(json.dumps(entry, ensure_ascii=False, allow_nan=False).encode('utf-8'))
+            packed.write(b']}')
+    return output.getvalue()
+
+
+def render_signal_trace_page():
+    """Página técnica separada; no cambia la pantalla de señales."""
+    st.title("Datos de decisiones")
+    ticker = str(st.query_params.get("ticker", ""))
+    entries = str(st.query_params.get("view", "")) == "entries"
+    if ticker and st.button("Preparar exportación de esta ronda", key="prepare_trace_export"):
+        try:
+            st.session_state["prepared_trace_export"] = (ticker, export_round_diagnostics(ticker))
+        except Exception as error:
+            st.info("No se pudo preparar la exportación: " + str(error))
+    prepared = st.session_state.get("prepared_trace_export")
+    if prepared and prepared[0] == ticker:
+        st.download_button("Descargar lecturas de la ronda", prepared[1],
+                           file_name=f"diagnostico_{ticker}.json.gz", mime="application/gzip",
+                           key="download_trace_export")
+    try:
+        with sqlite3.connect(SIGNAL_TRACE_DB, timeout=1) as conn:
+            if ticker:
+                rows = conn.execute("SELECT id,observed_at,ticker,build_id,payload FROM decisions WHERE kind='confirmation' AND ticker=? ORDER BY id DESC LIMIT ?", (ticker, 2000 if entries else 10)).fetchall()
+            else:
+                rows = conn.execute("SELECT id,observed_at,ticker,build_id,payload FROM decisions WHERE kind='confirmation' ORDER BY id DESC LIMIT 10").fetchall()
+            readings = []
+            for event_id, observed, round_ticker, build_id, payload in rows:
+                confirmation = json.loads(zlib.decompress(payload))
+                fallback = confirmation.pop("input_fallback", None)
+                if entries:
+                    before, after = confirmation["before"], confirmation["after"]
+                    changed = any(before.get(key) != after.get(key) for key in ("first_direction", "active_direction"))
+                    if not changed:
+                        continue
+                build = conn.execute("SELECT observed_at,payload FROM decisions WHERE id=? AND kind='build'", (build_id,)).fetchone() if build_id else None
+                readings.append({"id":event_id, "observed_at":observed, "ticker":round_ticker, "confirmation":confirmation, "build_observed_at":build[0] if build else None, "input":json.loads(zlib.decompress(build[1])) if build else fallback})
+        st.json(readings)
+    except Exception as error:
+        st.info("Datos todavía no disponibles: " + str(error))
+
+
 # Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
 worker = current_execution_worker()
 if (not worker.key_id and st.session_state.get("kalshi_key_id")
@@ -3338,9 +3837,12 @@ except FileNotFoundError:
 
 # Inicia una sola vez el registrador autónomo de 12 horas.
 start_12h_history_worker()
+start_history_verifier()
 
 page = str(st.query_params.get("page", "signal"))
-if page == "settings":
+if page == "signal_trace":
+    render_signal_trace_page()
+elif page == "settings":
     render_history_page()
 elif page == "auto":
     render_auto_trading_page()
