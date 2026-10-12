@@ -2540,7 +2540,20 @@ class ExecutionWorker:
         # Reserva conservadora para fees (hasta 7¢ por contrato); no promete costes.
         fee_buffer = .07 if mode == "REAL" else 0
         qty = math.floor((budget + 1e-9) / (price + fee_buffer))
-        if qty < 1: self.message = "Presupuesto insuficiente para 1 contrato y comisiones"; return
+        if qty < 1:
+            # Diagnóstico preciso: el saldo total no equivale al presupuesto del nivel.
+            # No aumentar capital, saltar niveles ni enviar una orden sin cobertura.
+            required = price + fee_buffer
+            balance_info = f" · saldo Kalshi ${self.balance:.2f}" if mode == "REAL" and self.balance is not None else ""
+            self.message = (
+                f"Nivel {level + 1}/{levels}: presupuesto ${budget:.2f}; "
+                f"1 contrato {side} cuesta ${price:.2f} + reserva de comisión "
+                f"${fee_buffer:.2f} = ${required:.2f}. "
+                f"Faltan ${max(0, required - budget):.2f}. "
+                f"Capital total autorizado ${cfg['capital']:.2f}{balance_info}. "
+                "No se envió orden."
+            )
+            return
         intent = {"client_id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
                   "ticker": m["ticker"], "direction": side, "action": "buy", "quantity": qty,
                   "price": price, "level": level + 1, "mode": mode, "cfg": cfg,
