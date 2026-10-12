@@ -1469,21 +1469,20 @@ BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
 
 def _background_get_btc_data():
-    response = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-USD/candles",
-        params={"granularity": 60},
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    data = response.json()
-    if not isinstance(data, list) or len(data) < 30:
-        raise ValueError("Coinbase no devolvió suficientes datos.")
-    df = pd.DataFrame(data, columns=["time", "low", "high", "open", "close", "volume"])
-    for column in ["low", "high", "open", "close", "volume"]:
-        df[column] = pd.to_numeric(df[column], errors="coerce")
-    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
-    return df.dropna().sort_values("time").reset_index(drop=True)
+    """Use the same freshness-validated Coinbase candles as the signal UI.
+
+    Background requests bypass Streamlit's UI cache. A stale response must
+    never be used to authorize a new trade.
+    """
+    last_error = None
+    for attempt in range(3):
+        try:
+            return _fetch_current_btc_candles()
+        except (requests.RequestException, ValueError) as exc:
+            last_error = exc
+            if attempt < 2:
+                time.sleep(1.5)
+    raise ValueError(f"Velas no disponibles o desactualizadas: {last_error}") from last_error
 
 def _background_get_market():
     response = requests.get(
@@ -2505,8 +2504,12 @@ class ExecutionWorker:
         with ThreadPoolExecutor(max_workers=2) as pool:
             candles_job = pool.submit(_background_get_btc_data)
             price_job = pool.submit(_background_get_live_price, m, True)
-            df = candles_job.result()
-            live_price, live_source = price_job.result()
+            try:
+                df = candles_job.result()
+                live_price, live_source = price_job.result()
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                self.message = f"Datos de mercado no disponibles; compras nuevas en pausa: {exc}"
+                return
         gate = self.entry_gates.setdefault(mode, RecentEntryConfirmation())
         gate.observe(m["ticker"], live_source, float(live_price), time.monotonic())
         if (datetime.now(timezone.utc) - df.iloc[-1]["time"].to_pydatetime()).total_seconds() > 120:
@@ -2535,11 +2538,15 @@ class ExecutionWorker:
                     for p in positions)
         if count >= cfg["max_trades_day"]: self.message = "Límite diario alcanzado"; return
         level = losses if cfg["martingale_on"] else 0
+        # La dirección de compra es EXCLUSIVAMENTE la señal principal
+        # confirmada del cerebro v4.6.1. Las preferencias de dirección
+        # por nivel no pueden invertirla ni forzar UP/DOWN.
         rule = cfg["level_directions"][level]
-        if rule == "No operar": self.message = "Nivel configurado: No operar"; return
-        if rule == "Solo UP": side = "UP"
-        elif rule == "Solo DOWN": side = "DOWN"
-        elif rule == "Contraria a la señal": side = "DOWN" if side == "UP" else "UP"
+        if rule == "No operar":
+            self.message = "Nivel configurado: No operar"
+            return
+        # 'Solo UP', 'Solo DOWN' y 'Contraria a la señal' se ignoran
+        # deliberadamente: la señal confirmada es la única autoridad.
         confirmation_note = sig.get("quality", "Entrada por motor principal")
         price = get_yes_ask(m) if side == "UP" else get_no_ask(m)
         if price is None or not cfg["min_price"] <= price * 100 <= cfg["max_price"]:
@@ -2562,7 +2569,7 @@ class ExecutionWorker:
         intent = {"client_id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
                   "ticker": m["ticker"], "direction": side, "action": "buy", "quantity": qty,
                   "price": price, "level": level + 1, "mode": mode, "cfg": cfg,
-                  "note": f'{cfg.get("entry_source","PRESEÑAL")} puntuación {confidence} · {confirmation_note}'}
+                  "note": f'{cfg.get("entry_source","SEÑAL PRINCIPAL")} puntuación {confidence} · {confirmation_note}'}
         self.submit(scope, ledger, intent)
 
     def run(self):
