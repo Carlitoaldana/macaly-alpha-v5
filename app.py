@@ -2020,6 +2020,24 @@ def martingale_plan(capital, levels, multiplier):
         amounts[-1] = round(amounts[-1] + max(0, remainder), 2)
     return amounts
 
+def dollar_level_plan(initial_amount, levels, multiplier):
+    from decimal import Decimal, ROUND_DOWN
+    base = Decimal(str(initial_amount))
+    factor = Decimal(str(multiplier))
+    if not base.is_finite() or base <= 0 or not factor.is_finite() or factor < 1:
+        raise ValueError("Importe inicial o multiplicador inválidos")
+    return [float((base * factor ** i).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+            for i in range(max(1, min(12, int(levels))))]
+
+
+def dollar_contract_quantity(amount, price):
+    from decimal import Decimal, ROUND_FLOOR
+    budget, quote = Decimal(str(amount)), Decimal(str(price))
+    if not budget.is_finite() or budget <= 0 or not quote.is_finite() or not 0 < quote < 1:
+        raise ValueError("Importe o precio inválidos")
+    return int((budget / quote).to_integral_value(rounding=ROUND_FLOOR))
+
+
 def profit_target_cents(entry_cents, profit_pct):
     if entry_cents is None:
         return None
@@ -2057,6 +2075,8 @@ def load_auto_config():
             saved = json.loads(row[0]); cfg.update(saved)
         except Exception:
             pass
+    cfg.setdefault("quantity_mode", "CONTRATOS")
+    cfg.setdefault("initial_amount", 0.50)
     cfg["entry_source"] = "SEÑAL PRINCIPAL"
     dirs = cfg.get("level_directions") or []
     cfg["level_directions"] = (dirs + ["Seguir señal"] * 12)[:12]
@@ -2526,7 +2546,18 @@ class ExecutionWorker:
         # Martingala por cantidad de contratos, sin reservar capital futuro.
         # Nivel 1 = 1 contrato; siguientes niveles aumentan según multiplicador.
         fee_buffer = .07 if mode == "REAL" else 0
-        qty = max(1, math.ceil((cfg["multiplier"] if cfg["martingale_on"] else 1.0) ** level))
+        level_amount = None
+        if cfg.get("quantity_mode", "CONTRATOS") == "DÓLARES":
+            amounts = dollar_level_plan(cfg.get("initial_amount", 0.50), levels,
+                                        cfg["multiplier"] if cfg["martingale_on"] else 1.0)
+            level_amount = amounts[level]
+            qty = dollar_contract_quantity(level_amount, price)
+            if qty < 1:
+                self.message = (f"Nivel {level+1}: importe ${level_amount:.2f} insuficiente "
+                                f"para un contrato a {price*100:.1f}¢. No se envió orden.")
+                return
+        else:
+            qty = max(1, math.ceil((cfg["multiplier"] if cfg["martingale_on"] else 1.0) ** level))
         if mode == "REAL":
             bal, _ = kalshi_get_balance(self.key_id, self.pem)
             self.balance = bal
@@ -2540,7 +2571,7 @@ class ExecutionWorker:
         intent = {"client_id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
                   "ticker": m["ticker"], "direction": side, "action": "buy", "quantity": qty,
                   "price": price, "level": level + 1, "mode": mode, "cfg": cfg,
-                  "note": f'{cfg.get("entry_source","PRESEÑAL")} puntuación {confidence} · {confirmation_note}'}
+                  "note": f'{cfg.get("entry_source","PRESEÑAL")} puntuación {confidence} · {confirmation_note}' + (f" · Nivel ${level_amount:.2f} (comisiones aparte)" if level_amount is not None else "")}
         self.submit(scope, ledger, intent)
 
     def run(self):
@@ -2732,6 +2763,12 @@ def render_auto_trading_page():
     stop_pct=_select_value("Stop Loss",list(range(5,101,5)),int(round(cfg["stop_pct"]/5)*5),"a_stop",disabled=not stop_on)
 
     st.markdown('<div class="auto-section">MARTINGALA</div>', unsafe_allow_html=True)
+    quantity_mode = "DÓLARES"  # Los importes se configuran siempre en dólares.
+    initial_amount = st.number_input("Importe inicial ($)", min_value=0.01, max_value=1000000.0,
+                                    value=max(0.01, min(1000000.0, float(cfg.get("initial_amount", 0.50)))),
+                                    step=0.01, format="%.2f", key="a_initial_amount",
+                                    disabled=quantity_mode != "DÓLARES")
+    st.caption("En DÓLARES, cada nivel fija el importe máximo de compra; comisiones aparte. Se compran contratos enteros sin superar ese importe. Los cambios solo se aplican al guardar.")
     martingale_on=st.toggle("Martingala",value=bool(cfg["martingale_on"]),key="a_marton")
     levels=_select_value("Máximo de niveles",list(range(1,13)),int(cfg["levels"]),"a_levels",disabled=not martingale_on)
     multiplier=_select_value("Multiplicador",[1.25,1.5,1.75,2.0,2.25,2.5,3.0],float(cfg["multiplier"]) if float(cfg["multiplier"]) in [1.25,1.5,1.75,2.0,2.25,2.5,3.0] else 2.0,"a_mult",disabled=not martingale_on)
@@ -2742,7 +2779,9 @@ def render_auto_trading_page():
             st.success("Ciclo reiniciado al nivel 1. Las compras siguen sujetas a tus filtros y al saldo real.")
         except ValueError as error:
             st.error(str(error))
-    plan=[max(1, math.ceil((float(multiplier) if martingale_on else 1.0)**i)) for i in range(int(levels) if martingale_on else 1)]
+    plan = (dollar_level_plan(initial_amount, int(levels) if martingale_on else 1, float(multiplier) if martingale_on else 1.0)
+            if quantity_mode == "DÓLARES" else
+            [max(1, math.ceil((float(multiplier) if martingale_on else 1.0)**i)) for i in range(int(levels) if martingale_on else 1)])
     # El trabajador de ejecución es la fuente de verdad de la conexión.
     # La sesión de Streamlit puede reiniciarse aunque Kalshi siga autenticado.
     active_worker = current_execution_worker()
@@ -2767,7 +2806,8 @@ def render_auto_trading_page():
     for i in range(visible_levels):
         amount=plan[i] if i<len(plan) else 1
         title="Entrada inicial" if i==0 else f"Martingala {i}"
-        st.markdown(f'<div class="level-card"><div class="level-title">{title}</div><div class="level-sub">Nivel {i+1} · {amount} contrato(s)</div></div>',unsafe_allow_html=True)
+        amount_text = f"${amount:.2f}" if quantity_mode == "DÓLARES" else f"{amount} contrato(s)"
+        st.markdown(f'<div class="level-card"><div class="level-title">{title}</div><div class="level-sub">Nivel {i+1} · {amount_text}</div></div>',unsafe_allow_html=True)
         cur=cfg["level_directions"][i]
         directions.append(_select_value(f"Dirección nivel {i+1}",dir_options,cur,f"a_dir_{i}"))
     directions += cfg["level_directions"][visible_levels:12]
@@ -2779,6 +2819,8 @@ def render_auto_trading_page():
     new_cfg={"enabled":bool(enabled),"mode":mode,"min_price":int(min_price),"max_price":int(max_price),"min_conf":int(min_conf),"profit_on":bool(profit_on),"profit_pct":int(profit_pct),"stop_on":bool(stop_on),"stop_pct":int(stop_pct),"martingale_on":bool(martingale_on),"levels":int(levels),"multiplier":float(multiplier),"one_per_round":bool(one_per_round),"max_trades_day":int(max_trades_day),"level_directions":directions[:12]}
 
     st.markdown('<div class="auto-section">GUARDAR</div>',unsafe_allow_html=True)
+    new_cfg["quantity_mode"] = quantity_mode
+    new_cfg["initial_amount"] = float(initial_amount)
     new_cfg["entry_source"] = entry_source
     c1,c2,c3=st.columns([1.2,1,1.25])
     if c1.button("RESTAURAR",use_container_width=True):
