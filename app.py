@@ -1263,6 +1263,18 @@ def get_no_ask(market):
         return max(0.0, min(1.0, 1.0 - yes_bid))
     return None
 
+def kalshi_quote_display(market, direction=None):
+    """Actual buy asks; never substitute the signal engine's estimate."""
+    def label(price):
+        if price is None or not math.isfinite(price) or not 0 < price <= 1:
+            return "—"
+        return f"{price * 100:g}¢"
+    if direction in ("UP", "DOWN"):
+        price = get_yes_ask(market) if direction == "UP" else get_no_ask(market)
+        value = label(price)
+        return value, f"{direction} · ASK" if value != "—" else "PRECIO NO DISPONIBLE"
+    return f"UP {label(get_yes_ask(market))} / DOWN {label(get_no_ask(market))}", "ASK · MISMA RONDA"
+
 # =========================================================
 # PROBABILIDAD ORIGINAL
 # =========================================================
@@ -2035,7 +2047,9 @@ def dollar_contract_quantity(amount, price):
     budget, quote = Decimal(str(amount)), Decimal(str(price))
     if not budget.is_finite() or budget <= 0 or not quote.is_finite() or not 0 < quote < 1:
         raise ValueError("Importe o precio inválidos")
-    return int((budget / quote).to_integral_value(rounding=ROUND_FLOOR))
+    # Kalshi V2 accepts fractional counts in increments of 0.01 contracts.
+    # Round down only at that precision, never to whole contracts.
+    return float((budget / quote).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
 
 
 def profit_target_cents(entry_cents, profit_pct):
@@ -2540,11 +2554,24 @@ class ExecutionWorker:
         elif rule == "Solo DOWN": side = "DOWN"
         elif rule == "Contraria a la señal": side = "DOWN" if side == "UP" else "UP"
         confirmation_note = sig.get("quality", "Entrada por motor principal")
+        # Refresh only the selected contract: sizing and price gate share this ask.
+        try:
+            fresh_market = self.market(m["ticker"])
+        except Exception:
+            self.message = "No se pudo actualizar el precio de Kalshi; no se envió orden"
+            return
+        fresh_seconds = get_seconds_remaining(fresh_market)
+        if (fresh_market.get("ticker") != m["ticker"] or
+                fresh_market.get("status") != "active" or
+                fresh_seconds is None or fresh_seconds <= 0):
+            self.message = "La ronda no está activa; no se envió orden"
+            return
+        m = fresh_market
         price = get_yes_ask(m) if side == "UP" else get_no_ask(m)
-        if price is None or not cfg["min_price"] <= price * 100 <= cfg["max_price"]:
+        if (price is None or not math.isfinite(price) or not 0 < price <= 1 or
+                not cfg["min_price"] <= price * 100 <= cfg["max_price"]):
             self.message = f'{side}: precio fuera de {cfg["min_price"]}–{cfg["max_price"]}¢'; return
-        # Martingala por cantidad de contratos, sin reservar capital futuro.
-        # Nivel 1 = 1 contrato; siguientes niveles aumentan según multiplicador.
+        # Importes por nivel y límite de precio se calculan por separado.
         fee_buffer = .07 if mode == "REAL" else 0
         level_amount = None
         if cfg.get("quantity_mode", "CONTRATOS") == "DÓLARES":
@@ -2552,9 +2579,13 @@ class ExecutionWorker:
                                         cfg["multiplier"] if cfg["martingale_on"] else 1.0)
             level_amount = amounts[level]
             qty = dollar_contract_quantity(level_amount, price)
-            if qty < 1:
+            if qty < .01:
                 self.message = (f"Nivel {level+1}: importe ${level_amount:.2f} insuficiente "
-                                f"para un contrato a {price*100:.1f}¢. No se envió orden.")
+                                f"para 0.01 contratos a {price*100:.1f}¢. No se envió orden.")
+                return
+            if m.get("fractional_trading_enabled") is False and abs(qty - round(qty)) > 1e-9:
+                self.message = (f"Nivel {level+1}: este mercado no admite contratos fraccionados; "
+                                "no se aumenta el importe configurado. No se envió orden.")
                 return
         else:
             qty = max(1, math.ceil((cfg["multiplier"] if cfg["martingale_on"] else 1.0) ** level))
@@ -2768,7 +2799,7 @@ def render_auto_trading_page():
                                     value=max(0.01, min(1000000.0, float(cfg.get("initial_amount", 0.50)))),
                                     step=0.01, format="%.2f", key="a_initial_amount",
                                     disabled=quantity_mode != "DÓLARES")
-    st.caption("En DÓLARES, cada nivel fija el importe máximo de compra; comisiones aparte. Se compran contratos enteros sin superar ese importe. Los cambios solo se aplican al guardar.")
+    st.caption("Cada nivel fija el importe en dólares. Se calcula la cantidad fraccionada en pasos de 0.01 contratos sin superar el importe; el redondeo puede dejar menos de $0.01 sin usar. Comisiones aparte. El rango de precio se comprueba por separado. Los cambios solo se aplican al guardar.")
     martingale_on=st.toggle("Martingala",value=bool(cfg["martingale_on"]),key="a_marton")
     levels=_select_value("Máximo de niveles",list(range(1,13)),int(cfg["levels"]),"a_levels",disabled=not martingale_on)
     multiplier=_select_value("Multiplicador",[1.25,1.5,1.75,2.0,2.25,2.5,3.0],float(cfg["multiplier"]) if float(cfg["multiplier"]) in [1.25,1.5,1.75,2.0,2.25,2.5,3.0] else 2.0,"a_mult",disabled=not martingale_on)
@@ -3017,6 +3048,8 @@ def live_dashboard():
         )
 
     market_live = kalshi_ok and live_btc_price is not None
+    quote_direction = active or (state.get("first_direction") if state else None)
+    kalshi_price_text, kalshi_price_note = kalshi_quote_display(market, quote_direction)
 
     distance = sig["distance"]
     distance_pct = sig.get("distance_pct")
@@ -3177,7 +3210,7 @@ def live_dashboard():
     <div class="techhead"><span>DETALLES TÉCNICOS</span><span>⌃</span></div>
     <div class="techrow">
       <div><small>1ª SEÑAL</small><b style="color:var(--accent)">{first_signal}</b><i>{first_time}</i></div>
-      <div><small>KALSHI</small><b>{confidence}%</b><i>{round_signal["entry_quality"]}</i></div>
+      <div><small>KALSHI · PRECIO</small><b>{kalshi_price_text}</b><i>{kalshi_price_note}</i></div>
       <div><small>EMA</small><b class="{ema_class}">{ema_display}</b><i>9 / 21</i></div>
       <div><small>RSI</small><b class="{rsi_class}">{sig["rsi"]:.0f}</b><i>14</i></div>
       <div><small>MOMENTUM</small><b class="{mom_class}">{sig["mom3"]:+.2f}</b><i>3 MIN</i></div>
