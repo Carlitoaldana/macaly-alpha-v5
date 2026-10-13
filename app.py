@@ -2479,9 +2479,7 @@ class ExecutionWorker:
             return
         losses = self.loss_streak(ledger)
         levels = cfg["levels"] if cfg["martingale_on"] else 1
-        if cfg["martingale_on"] and losses >= levels:
-            self.message = "Ciclo de martingala agotado; usa REINICIAR CICLO en Auto Trading"
-            return
+        # Reinicia la progresión tras agotar los niveles, sin detener nuevas señales.
         m = _background_get_market()
         if not m or m.get("status") != "active": self.message = "Sin mercado activo"; return
         secs = get_seconds_remaining(m); target = get_target_from_market(m)
@@ -2505,7 +2503,7 @@ class ExecutionWorker:
         confirm_round_candidate(confirm_state, sig.get("candidate"), m, secs, datetime.now(timezone.utc))
         side = confirm_state.get("active_direction")
         confidence = sig.get("up_probability" if side == "UP" else "down_probability", 50)
-        if side not in ("UP", "DOWN") or confidence < cfg["min_conf"]:
+        if side not in ("UP", "DOWN"):
             gate.reset_candidate()
             pre_reason = sig.get("quality") if side not in ("UP", "DOWN") else None
             self.message = pre_reason or f'Lectura {side or "NEUTRAL"} · puntuación {confidence}: mínimo {cfg["min_conf"]}'; return
@@ -2515,8 +2513,7 @@ class ExecutionWorker:
         today = datetime.now(ZoneInfo("America/New_York")).date()
         count = sum(datetime.fromisoformat(p["created_at"]).astimezone(ZoneInfo("America/New_York")).date() == today
                     for p in positions)
-        if count >= cfg["max_trades_day"]: self.message = "Límite diario alcanzado"; return
-        level = losses if cfg["martingale_on"] else 0
+        level = (losses % levels) if cfg["martingale_on"] else 0
         rule = cfg["level_directions"][level]
         if rule == "No operar": self.message = "Nivel configurado: No operar"; return
         if rule == "Solo UP": side = "UP"
@@ -2526,34 +2523,20 @@ class ExecutionWorker:
         price = get_yes_ask(m) if side == "UP" else get_no_ask(m)
         if price is None or not cfg["min_price"] <= price * 100 <= cfg["max_price"]:
             self.message = f'{side}: precio fuera de {cfg["min_price"]}–{cfg["max_price"]}¢'; return
-        # Capital = presupuesto global: descuenta pérdidas netas y costes abiertos.
-        realized = sum(p["pnl"] or 0 for p in positions)
-        available = max(0, cfg["capital"] + min(0, realized))
-        allocation = martingale_plan(max(0, cfg["capital"] - cfg["reserve"]), levels,
-                                     cfg["multiplier"] if cfg["martingale_on"] else 1)[level]
-        budget = min(allocation, max(0, available - cfg["reserve"]))
+        # Martingala por cantidad de contratos, sin reservar capital futuro.
+        # Nivel 1 = 1 contrato; siguientes niveles aumentan según multiplicador.
+        fee_buffer = .07 if mode == "REAL" else 0
+        qty = max(1, math.ceil((cfg["multiplier"] if cfg["martingale_on"] else 1.0) ** level))
         if mode == "REAL":
-            bal, _ = kalshi_get_balance(self.key_id, self.pem); self.balance = bal
-            budget = min(budget, max(0, bal - cfg["reserve"]))
+            bal, _ = kalshi_get_balance(self.key_id, self.pem)
+            self.balance = bal
             if abs(self.position(m["ticker"])) > .0001:
                 self.message = "Ya hay posición externa en esta ronda; revisar Kalshi"; return
-        # Reserva conservadora para fees (hasta 7¢ por contrato); no promete costes.
-        fee_buffer = .07 if mode == "REAL" else 0
-        qty = math.floor((budget + 1e-9) / (price + fee_buffer))
-        if qty < 1:
-            # Diagnóstico preciso: el saldo total no equivale al presupuesto del nivel.
-            # No aumentar capital, saltar niveles ni enviar una orden sin cobertura.
-            required = price + fee_buffer
-            balance_info = f" · saldo Kalshi ${self.balance:.2f}" if mode == "REAL" and self.balance is not None else ""
-            self.message = (
-                f"Nivel {level + 1}/{levels}: presupuesto ${budget:.2f}; "
-                f"1 contrato {side} cuesta ${price:.2f} + reserva de comisión "
-                f"${fee_buffer:.2f} = ${required:.2f}. "
-                f"Faltan ${max(0, required - budget):.2f}. "
-                f"Capital total autorizado ${cfg['capital']:.2f}{balance_info}. "
-                "No se envió orden."
-            )
-            return
+            if qty * (price + fee_buffer) > bal + 1e-9:
+                self.message = (f"Saldo real insuficiente: nivel {level+1}, "
+                                f"{qty} contratos requieren hasta ${qty*(price+fee_buffer):.2f}; "
+                                f"disponible ${bal:.2f}. No se envió orden.")
+                return
         intent = {"client_id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
                   "ticker": m["ticker"], "direction": side, "action": "buy", "quantity": qty,
                   "price": price, "level": level + 1, "mode": mode, "cfg": cfg,
@@ -2734,13 +2717,11 @@ def render_auto_trading_page():
     st.caption("Entradas conectadas al motor principal · lectura temprana del impulso actual.")
     st.caption("La preseñal es informativa. Las puntuaciones no son probabilidades comprobadas.")
     enabled=st.toggle("Auto Trading", value=bool(cfg["enabled"]), key="a_enabled")
-    capital_opts=[5,10,15,20,25,30,40,50,75,100,150,200,300,500,1000]
-    cap_current=min(capital_opts,key=lambda x:abs(x-float(cfg["capital"])))
-    capital=float(_select_value("Capital máximo a usar ($)",capital_opts,cap_current,"a_cap"))
+    st.caption("Sin límite artificial de capital ni reserva para niveles futuros. Las órdenes usan el saldo real de Kalshi.")
     min_price=_select_value("Precio mínimo de compra",list(range(5,96,5)),int(round(cfg["min_price"]/5)*5),"a_minp")
     max_price=_select_value("Precio máximo de compra",list(range(5,100,5)),int(round(cfg["max_price"]/5)*5),"a_maxp")
-    min_conf=_select_value("Confianza mínima de señal",list(range(50,96,5)),int(round(cfg["min_conf"]/5)*5),"a_conf")
-    st.caption("Los precios están en centavos por contrato. El bot solo entra cuando cumple todos los filtros.")
+    min_conf=cfg["min_conf"]  # No aplica filtro adicional a una señal ya confirmada.
+    st.caption("Compra con señal confirmada y precio dentro del rango configurado, si hay saldo suficiente.")
     st.caption("Sigue operando al cerrar esta pantalla mientras el servidor esté encendido. Si Streamlit suspende o reinicia el servidor, necesita reconectar; las credenciales locales pueden perderse.")
 
     st.markdown('<div class="auto-section">FINALIZACIÓN</div>', unsafe_allow_html=True)
@@ -2754,14 +2735,14 @@ def render_auto_trading_page():
     martingale_on=st.toggle("Martingala",value=bool(cfg["martingale_on"]),key="a_marton")
     levels=_select_value("Máximo de niveles",list(range(1,13)),int(cfg["levels"]),"a_levels",disabled=not martingale_on)
     multiplier=_select_value("Multiplicador",[1.25,1.5,1.75,2.0,2.25,2.5,3.0],float(cfg["multiplier"]) if float(cfg["multiplier"]) in [1.25,1.5,1.75,2.0,2.25,2.5,3.0] else 2.0,"a_mult",disabled=not martingale_on)
-    st.caption("Reinicia el contador del modo guardado al nivel 1. Conserva operaciones, pérdidas, capital y límites.")
+    st.caption("La progresión vuelve al nivel 1 al completar los niveles; no reserva dinero futuro.")
     if st.button("REINICIAR CICLO", key="reset_martingale_cycle", use_container_width=True):
         try:
             current_execution_worker().reset_cycle(cfg["mode"])
-            st.success("Ciclo reiniciado al nivel 1. Las compras siguen sujetas a tus filtros y al capital restante.")
+            st.success("Ciclo reiniciado al nivel 1. Las compras siguen sujetas a tus filtros y al saldo real.")
         except ValueError as error:
             st.error(str(error))
-    plan=martingale_plan(max(0,capital-float(cfg["reserve"])),int(levels) if martingale_on else 1,float(multiplier) if martingale_on else 1.0)
+    plan=[max(1, math.ceil((float(multiplier) if martingale_on else 1.0)**i)) for i in range(int(levels) if martingale_on else 1)]
     # El trabajador de ejecución es la fuente de verdad de la conexión.
     # La sesión de Streamlit puede reiniciarse aunque Kalshi siga autenticado.
     active_worker = current_execution_worker()
@@ -2777,27 +2758,25 @@ def render_auto_trading_page():
         bal_text = f"${bal:,.2f}" if bal is not None else "saldo no disponible"
     else:
         bal_text = "sin conectar"
-    st.markdown(f'<div class="balance-box">Saldo disponible: <b>{bal_text}</b> · Capital autorizado: <b>${capital:,.2f}</b></div>',unsafe_allow_html=True)
+    st.markdown(f'<div class="balance-box">Saldo disponible: <b>{bal_text}</b></div>',unsafe_allow_html=True)
 
     st.markdown('<div class="auto-section">ELIGE LA DIRECCIÓN</div><div class="auto-note">Configura cada nivel por separado.</div>',unsafe_allow_html=True)
     directions=[]
     visible_levels=int(levels) if martingale_on else 1
     dir_options=["Seguir señal","Solo UP","Solo DOWN","Contraria a la señal","No operar"]
     for i in range(visible_levels):
-        amount=plan[i] if i<len(plan) else 0
+        amount=plan[i] if i<len(plan) else 1
         title="Entrada inicial" if i==0 else f"Martingala {i}"
-        st.markdown(f'<div class="level-card"><div class="level-title">{title}</div><div class="level-sub">Nivel {i+1} · ${amount:.2f}</div></div>',unsafe_allow_html=True)
+        st.markdown(f'<div class="level-card"><div class="level-title">{title}</div><div class="level-sub">Nivel {i+1} · {amount} contrato(s)</div></div>',unsafe_allow_html=True)
         cur=cfg["level_directions"][i]
         directions.append(_select_value(f"Dirección nivel {i+1}",dir_options,cur,f"a_dir_{i}"))
     directions += cfg["level_directions"][visible_levels:12]
 
-    st.markdown('<div class="auto-section">PROTECCIONES</div>',unsafe_allow_html=True)
-    one_per_round=st.toggle("Máximo una compra por ronda",value=bool(cfg["one_per_round"]),key="a_one")
-    max_trades_day=_select_value("Máximo de operaciones por día",[1,2,3,5,10,12,15,20,25,30,40,50],int(cfg["max_trades_day"]) if int(cfg["max_trades_day"]) in [1,2,3,5,10,12,15,20,25,30,40,50] else 12,"a_maxday")
-    reserve_opts=[0,1,2,5,10,15,20,25,50,100]
-    reserve=float(_select_value("Reserva que el bot no puede tocar ($)",reserve_opts,min(reserve_opts,key=lambda x:abs(x-float(cfg["reserve"]))),"a_reserve"))
-
-    new_cfg={"enabled":bool(enabled),"mode":mode,"capital":capital,"min_price":int(min_price),"max_price":int(max_price),"min_conf":int(min_conf),"profit_on":bool(profit_on),"profit_pct":int(profit_pct),"stop_on":bool(stop_on),"stop_pct":int(stop_pct),"martingale_on":bool(martingale_on),"levels":int(levels),"multiplier":float(multiplier),"one_per_round":bool(one_per_round),"max_trades_day":int(max_trades_day),"reserve":reserve,"level_directions":directions[:12]}
+    st.markdown('<div class="auto-section">SEGURIDAD DE ÓRDENES</div>',unsafe_allow_html=True)
+    st.caption("Una compra por ronda, sin duplicados ni órdenes con saldo insuficiente.")
+    one_per_round=True  # Previene compras duplicadas de la misma ronda.
+    max_trades_day=cfg["max_trades_day"]  # Sin bloqueo diario adicional.
+    new_cfg={"enabled":bool(enabled),"mode":mode,"min_price":int(min_price),"max_price":int(max_price),"min_conf":int(min_conf),"profit_on":bool(profit_on),"profit_pct":int(profit_pct),"stop_on":bool(stop_on),"stop_pct":int(stop_pct),"martingale_on":bool(martingale_on),"levels":int(levels),"multiplier":float(multiplier),"one_per_round":bool(one_per_round),"max_trades_day":int(max_trades_day),"level_directions":directions[:12]}
 
     st.markdown('<div class="auto-section">GUARDAR</div>',unsafe_allow_html=True)
     new_cfg["entry_source"] = entry_source
@@ -2808,7 +2787,6 @@ def render_auto_trading_page():
         st.query_params["page"]="signal"; st.rerun()
     if c3.button("GUARDAR CAMBIOS",type="primary",use_container_width=True):
         if new_cfg["min_price"]>new_cfg["max_price"]: st.error("El precio mínimo no puede ser mayor que el máximo.")
-        elif new_cfg["reserve"]>=new_cfg["capital"]: st.error("La reserva debe ser menor que el capital autorizado.")
         else:
             save_auto_config(new_cfg); st.session_state.auto_config=new_cfg
             st.success("Configuración guardada. Auto Trading conservará estos ajustes al salir de esta pantalla.")
