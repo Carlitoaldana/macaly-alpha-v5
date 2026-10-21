@@ -1,9 +1,5 @@
+# Panel informativo de niveles fijos. No altera candidaturas, confirma ni opera por este panel.
 import streamlit as st
-# requirements.txt: streamlit>=1.40, requests>=2.31, pandas>=2.0,
-# numpy>=1.26, cryptography>=42
-# Secrets opcionales para reconectar tras reiniciar:
-# KALSHI_KEY_ID = "tu API Key ID"
-# KALSHI_PRIVATE_KEY = PEM multilinea de tu cuenta (nunca subirlo al repositorio).
 import requests
 import pandas as pd
 import numpy as np
@@ -13,16 +9,6 @@ import sqlite3
 import json
 import threading
 import time
-import base64
-import math
-import uuid
-import hashlib
-import fcntl
-from concurrent.futures import ThreadPoolExecutor
-
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 # =========================================================
 # MACALY + ALPHA BOT v4.6.1 • MOBILE PRO UI
@@ -43,9 +29,27 @@ st.set_page_config(
 NEW_ROUND_WAIT = 8
 NEW_ENTRY_LOCK = 75
 
-# Confirmación original v4.6.1: tres lecturas con separación mínima de 2 s.
+# Tres lecturas coherentes, separadas por al menos 2 s (mínimo 4 s).
 SIGNAL_CONFIRM_READINGS = 3
 SIGNAL_CONFIRM_INTERVAL = 2.0
+# Caducidad operativa: una pausa >10s reinicia las lecturas pendientes.
+SIGNAL_CONFIRM_MAX_GAP = 10.0
+LIVE_PRICE_MAX_AGE = 30.0
+_PRICE_OBSERVATIONS = threading.local()
+
+def _valid_live_observation(price, observed_at, source):
+    value = float(price)
+    stamp = pd.to_datetime(observed_at, utc=True, errors="coerce")
+    if not np.isfinite(value) or value <= 0 or pd.isna(stamp):
+        raise ValueError("Precio o fecha de origen inválidos.")
+    age = (pd.Timestamp.now(tz="UTC") - stamp).total_seconds()
+    if age < -5 or age > LIVE_PRICE_MAX_AGE:
+        raise ValueError("Precio de origen atrasado o fechado en el futuro.")
+    observations = getattr(_PRICE_OBSERVATIONS, "values", {})
+    observations[source] = stamp.timestamp()
+    _PRICE_OBSERVATIONS.values = observations
+    return value
+
 
 UP_THRESHOLD = 4.0
 DOWN_THRESHOLD = -4.0
@@ -118,7 +122,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
     width:7px;
     height:7px;
     border-radius:50%;
-    background:#2ee67b;
+    background:#00dfb5;
     box-shadow:0 0 10px rgba(46,230,123,.8);
 }
 
@@ -187,7 +191,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
     font-weight:800;
     margin-top:3px;
 }
-.green {color:#36e985;}
+.green {color:#00dfb5;}
 .red {color:#ff5363;}
 .blue {color:#54c6f5;}
 .amber {color:#f7bd4d;}
@@ -279,7 +283,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 }
 .ring {
     --p:50;
-    --ring:#36e985;
+    --ring:#00dfb5;
     width:66px;
     height:66px;
     border-radius:50%;
@@ -467,7 +471,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
     width:20px;height:20px;border-radius:50%;
     display:grid;place-items:center;
     border:1px solid #28dd79;
-    color:#34e982;
+    color:#00dfb5;
     font-size:10px;font-weight:1000;
 }
 .ref-feature strong{
@@ -489,6 +493,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
     margin-top:4px !important;
 }
 .nav-item{font-size:6.8px !important;}
+
 
 /* FINAL REFERENCE MATCH */
 .block-container{max-width:430px!important;padding:7px 10px 22px!important}
@@ -524,6 +529,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .tech-head{display:flex;justify-content:space-between;align-items:center}
 .tech-chevron{font-size:13px;color:#b6c6da}
 
+
 /* ===== REBUILT REFERENCE FRONTEND ===== */
 .block-container{max-width:430px!important;padding:4px 9px 18px!important}
 .refapp{font-family:Arial,sans-serif;color:#eaf2fb}
@@ -539,21 +545,22 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:2px}
 .rcard{background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px}
 .keycard{height:68px;padding:8px 9px;display:flex;align-items:center;gap:8px}
-.bigicon{font-size:31px;font-weight:900;line-height:1}.btcicon{color:#ff9d00}.targeticon{color:#a9cff5}
+.bigicon{font-size:31px;font-weight:900;line-height:1}.btcicon{color:#ff9d00}.targeticon{color:#8acfc3}
 .rlabel{font-size:8px;color:#b9c9dc;letter-spacing:.4px}.rvalue{font-size:19px;font-weight:900;line-height:1.05;margin-top:2px}.rdelta{font-size:9px;font-weight:900;margin-top:2px}
-.green{color:#32e981!important}.red{color:#ff4c5d!important}
+.green{color:#00dfb5!important}.red{color:#e64b4b!important}
 .bars{display:flex;align-items:flex-end;gap:3px;width:31px;height:30px}.bars b{width:7px;background:var(--accent);border-radius:2px}.bars b:nth-child(1){height:11px}.bars b:nth-child(2){height:20px}.bars b:nth-child(3){height:28px}
-.clock{font-size:30px;color:#b9d8f7}.timecontent{flex:1}.timebar{height:6px;background:#16324a;border-radius:5px;margin-top:5px;overflow:hidden}.timebar b{display:block;height:100%;background:var(--accent);border-radius:5px}
+.clock{font-size:30px;color:#8acfc3}.timecontent{flex:1}.timebar{height:6px;background:#16324a;border-radius:5px;margin-top:5px;overflow:hidden}.timebar b{display:block;height:100%;background:var(--accent);border-radius:5px}
 .probs{margin-top:6px;padding:8px}.pbar{display:flex;gap:4px;margin-top:5px}.pup,.pdown{height:21px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;border-radius:4px}.pup{background:linear-gradient(90deg,#10d76d,#54ed91);color:#06331d}.pdown{background:linear-gradient(90deg,#ff3548,#ff6472);color:#3d0710}.pleg{display:flex;justify-content:space-between;font-size:10px;font-weight:900;margin-top:6px}
 .reader{margin-top:6px;border:1.5px solid var(--rb);background:var(--rbg);border-radius:9px;padding:9px 10px}
-.readerhead{display:flex;align-items:center;gap:7px;font-size:9px;color:var(--rr)}.readerhead .pulse{font-size:18px}.readerhead em{margin-left:auto;border:1px solid #24d873;border-radius:12px;padding:3px 8px;font-style:normal;font-size:8px;color:#45ec8e}
+.readerhead{display:flex;align-items:center;gap:7px;font-size:9px;color:var(--rr)}.readerhead .pulse{font-size:18px}.readerhead em{margin-left:auto;border:1px solid #24d873;border-radius:12px;padding:3px 8px;font-style:normal;font-size:8px;color:#00dfb5}
 .readerbody{display:grid;grid-template-columns:1fr 65px;align-items:center;margin-top:7px}.readerbody strong{display:block;font-size:15px;line-height:1.12}.readerbody small{display:block;color:#aab8c9;font-size:7px;margin-top:5px}
 .rring{width:62px;height:62px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--rr) calc(var(--p)*1%),#263342 0);position:relative}.rring:after{content:"";position:absolute;width:48px;height:48px;background:#08121b;border-radius:50%}.rring span{z-index:1;font-size:15px;font-weight:900}
 .tech{margin-top:6px;padding:7px 8px}.techhead{display:flex;justify-content:space-between;font-size:9px;color:#c2d0df;padding-bottom:6px}.techrow{display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid #172737}.techrow>div{text-align:center;padding:7px 2px 2px;border-right:1px solid #172737}.techrow>div:last-child{border:0}.techrow small,.techrow i{display:block;font-size:6px;color:#8d9db0;font-style:normal}.techrow b{display:block;font-size:10px;margin:4px 0}
 .rnav{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid #203448;border-bottom:1px solid #203448;margin-top:7px;padding:7px 0}.rnav div{text-align:center;color:#9db0c5;font-size:8px}.rnav b{display:block;font-size:17px;margin-bottom:2px}.rnav .active{color:var(--accent)}
-.features{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:8px 1px}.features>div{display:flex;gap:5px;align-items:center}.features>div>b{width:25px;height:25px;border:1px solid #28e57f;border-radius:50%;display:grid;place-items:center;color:#35e986;font-size:13px}.features p{margin:0}.features strong{display:block;font-size:5.7px;color:#e1e8f0}.features span{display:block;font-size:5.4px;color:#8c9db0;margin-top:2px}
+.features{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:8px 1px}.features>div{display:flex;gap:5px;align-items:center}.features>div>b{width:25px;height:25px;border:1px solid #00dfb5;border-radius:50%;display:grid;place-items:center;color:#00dfb5;font-size:13px}.features p{margin:0}.features strong{display:block;font-size:5.7px;color:#e1e8f0}.features span{display:block;font-size:5.4px;color:#8c9db0;margin-top:2px}
 .refapp footer{border-top:1px solid #182a3a;padding:5px 1px;display:flex;justify-content:space-between;color:#708197;font-size:5.2px}
 .ticker{text-align:center;color:#53667d;font-size:6px;margin-top:5px}
+
 
 /* ===== FINAL PHONE REFERENCE PROPORTIONS ===== */
 .block-container{max-width:365px!important;padding:3px 7px 14px!important}
@@ -589,6 +596,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 
 /* Make arrows chunky like the reference rather than thin text arrows */
 .rarrow{font-family:Arial Black,Arial,sans-serif!important;font-weight:1000!important}
+
 
 /* ===== TRUE FINAL: CSS ARROW + VISIBLE HEADER ===== */
 .rhead{
@@ -643,6 +651,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .rgrid{margin-top:1px!important}
 .reader{min-height:0!important}
 
+
 /* ===== PRESEÑAL — CAPA VISUAL, NO TOCA EL MOTOR ===== */
 .presignal{margin:0 0 6px;padding:9px 10px;border:1px solid var(--precolor);border-radius:10px;background:linear-gradient(135deg,var(--prebg),rgba(8,18,27,.88));box-shadow:0 0 18px var(--preglow)}
 .prehead{display:flex;justify-content:space-between;align-items:center;gap:8px}
@@ -661,9 +670,100 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .finalcard{min-height:67px;border:1px solid #29445a;border-radius:8px;background:linear-gradient(180deg,#0b1822,#08121a);padding:6px;text-align:center}
 .finalcard.motion{border-color:#25bff2}.finalcard.distance{border-color:#8c4cff}.finalcard.speed{border-color:#ff3f86}
 .finaltitle{font-size:6.5px;font-weight:950;color:#e6edf6}.motionrow{display:grid;grid-template-columns:repeat(3,1fr);margin-top:5px}.motionrow>div{border-right:1px solid #203344}.motionrow>div:last-child{border:0}.motionrow small{display:block;font-size:6px;color:#b7c6d7}.motionrow b{display:block;font-size:11px;margin-top:2px}.finalbig{font-size:14px;font-weight:1000;margin-top:8px}.finalsub{font-size:8px;font-weight:900;margin-top:2px}.finalnote{font-size:5.8px;color:#91a3b6;margin-top:4px}
-.finalanalysis{display:grid;grid-template-columns:1fr 80px;gap:5px;margin-top:4px}.analysisbox,.probbox{border:1px solid #1fae7a;border-radius:8px;background:#07151a;padding:7px}.analysisbox{display:flex;align-items:center;gap:7px}.analysisicon{font-size:23px;color:#2ee98a}.analysistext small{display:block;font-size:6.3px;color:#d4deea}.analysistext b{display:block;font-size:10px;color:var(--rr);margin-top:2px}.analysistext span{display:block;font-size:6.3px;color:#a3b2c3;margin-top:3px}.probbox{border-color:#ff3f86;text-align:center}.probbox small{display:block;font-size:6.5px;color:#e4ebf3}.probbox b{display:block;font-size:15px;color:var(--rr);margin-top:8px}
+.finalanalysis{display:grid;grid-template-columns:1fr 80px;gap:5px;margin-top:4px}.analysisbox,.probbox{border:1px solid #1fae7a;border-radius:8px;background:#07151a;padding:7px}.analysisbox{display:flex;align-items:center;gap:7px}.analysisicon{font-size:23px;color:#00dfb5}.analysistext small{display:block;font-size:6.3px;color:#d4deea}.analysistext b{display:block;font-size:10px;color:var(--rr);margin-top:2px}.analysistext span{display:block;font-size:6.3px;color:#a3b2c3;margin-top:3px}.probbox{border-color:#ff3f86;text-align:center}.probbox small{display:block;font-size:6.5px;color:#e4ebf3}.probbox b{display:block;font-size:15px;color:var(--rr);margin-top:8px}
 .chartbox{margin-top:10px;background:linear-gradient(180deg,#08121d,#060c14);border:1px solid #203a51;border-radius:12px;padding:10px 8px 8px;box-shadow:inset 0 0 28px rgba(20,80,110,.08)}
-.charttop{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#eef6ff}.charttop b{font-size:13px}.chartlive{font-size:7px;color:#28e69a;margin-left:8px}.charttf{border:1px solid #26384b;border-radius:7px;padding:5px 8px;color:#dce8f5;font-size:9px}.ohlc{font-size:7px;color:#8ea0b5;margin-top:5px;white-space:nowrap}.indicators{font-size:7px;color:#aab8ca;margin:7px 0 1px;white-space:nowrap}.ema9dot{color:#df42e7}.ema21dot{color:#32d7ef}.targetdot{color:#23e7c1}.candlesvg{display:block;width:100%;height:265px}.chartfoot{display:flex;align-items:center;gap:10px;border-top:1px solid #18283a;padding:7px 2px 1px;color:#71839a;font-size:6px}.chartfoot .selected{border:1px solid #2a7189;border-radius:7px;padding:4px 8px;color:#e7f5ff;background:#0d2632}.chartempty{height:160px;display:grid;place-items:center;color:#708197;font-size:10px}
+.charttop{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#eef6ff}.charttop b{font-size:13px}.chartlive{font-size:7px;color:#00dfb5;margin-left:8px}.charttf{border:1px solid #26384b;border-radius:7px;padding:5px 8px;color:#dce8f5;font-size:9px}.ohlc{font-size:7px;color:#8ea0b5;margin-top:5px;white-space:nowrap}.indicators{font-size:7px;color:#aab8ca;margin:7px 0 1px;white-space:nowrap}.ema9dot{color:#df42e7}.ema21dot{color:#32d7ef}.targetdot{color:#23e7c1}.candlesvg{display:block;width:100%;height:265px}.chartfoot{display:flex;align-items:center;gap:10px;border-top:1px solid #18283a;padding:7px 2px 1px;color:#71839a;font-size:6px}.chartfoot .selected{border:1px solid #2a7189;border-radius:7px;padding:4px 8px;color:#e7f5ff;background:#0d2632}.chartempty{height:160px;display:grid;place-items:center;color:#708197;font-size:10px}
+
+/* UNIFIED NEON THEME — visual layer only */
+:root{--neon-up:#00dfb5;--neon-down:#e64b4b;--neon-purple:#00dfb5;--neon-cyan:#00eaff}
+.stApp,[data-testid="stAppViewContainer"]{background:radial-gradient(ellipse at 50% 0,rgba(0,100,85,.12),transparent 42%),#06121a!important}
+.block-container{max-width:720px!important;padding:8px 12px 26px!important}
+.refapp{color:#e9eafa;font-family:Inter,Arial,sans-serif}
+.rcard,.mini,.section,.close-reader{background:linear-gradient(135deg,#111221,#080d17)!important;border-color:#23685e!important;border-radius:14px!important;box-shadow:inset 0 0 20px #8e48f208,0 0 11px #00dfb50c}
+.refapp>section[style]{border-color:#23685e!important;border-radius:15px!important;box-shadow:0 0 13px #00dfb510}
+.rtitle{color:#ecedff;text-shadow:0 0 18px #00dfb555}
+.gear{color:#00dfb5!important;text-shadow:0 0 12px #00dfb566}
+.rlive{color:#00dfb5!important}.rlive i{background:#00dfb5!important;box-shadow:0 0 11px #00dfb555!important}
+.green{color:#00dfb5!important;text-shadow:0 0 7px #00dfb5aa,0 0 18px #00dfb555}
+.red{color:#e64b4b!important;text-shadow:0 0 7px #e64b4baa,0 0 18px #e64b4b55}
+.rconf{box-shadow:0 0 14px var(--soft),inset 0 0 12px var(--soft)!important}
+.pup,.prob-up{background:linear-gradient(90deg,#00dfb5,#00dfb5)!important;color:#03281f!important;box-shadow:0 0 18px #00dfb580}
+.pdown,.prob-down{background:linear-gradient(90deg,#e64b4b,#e64b4b)!important;color:#320515!important;box-shadow:0 0 18px #e64b4b80}
+.timebar b,.ref-timebar b{box-shadow:0 0 11px var(--accent)}
+.reader{box-shadow:0 0 14px var(--soft),inset 0 0 20px #9c63ed07!important;border-radius:15px!important}
+.readerhead em{border-color:#00dfb5!important;color:#00dfb5!important;box-shadow:0 0 9px #00dfb51a}
+.rring{filter:drop-shadow(0 0 6px var(--soft))}.rring:after{background:#080d17!important}
+.techrow{border-color:#244047!important}.techrow>div{border-color:#244047!important}
+.rnav{border-color:#244047!important}.rnav .active{color:var(--accent);text-shadow:0 0 12px var(--glow)}
+.features>div>b{border-color:#00dfb5!important;color:#00dfb5!important;box-shadow:0 0 9px #00dfb521}
+.targeticon,.clock{color:#8acfc3!important}.btcicon{filter:drop-shadow(0 0 7px #ff9d0044)}
+.stRadio [role="radiogroup"]{gap:8px!important;flex-wrap:wrap;padding:8px 0}
+.stRadio label{border:1px solid #23685e;border-radius:18px;padding:6px 10px!important;background:#110e20;color:#ded9f4!important}
+[data-testid="stButton"] button{border-color:#23685e;color:#ece3ff;background:#141022;border-radius:12px}
+[data-testid="stButton"] button:hover{border-color:#00dfb5;box-shadow:0 0 13px #00dfb533}
+[data-testid="stMetricValue"]{color:#00eaff;text-shadow:0 0 10px #00eaff28}
+@media(max-width:460px){.block-container{max-width:100%!important;padding:5px 8px 20px!important}}
+
+
+/* Strong neon and readable labels across both visual surfaces. */
+.green{color:#00dfb5!important;text-shadow:0 0 5px #00dfb588,0 0 14px #00dfb555!important}
+.red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
+.pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
+.pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
+.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
+.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
+.rhero{filter:drop-shadow(0 0 9px var(--accent))}
+.note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
+.floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
+.canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
+@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
+
+
+/* Purple neon outlines, consistent across dashboard and chart cards. */
+.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
+.finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
+.panel,.card,.metric,details,.floatcounts div{
+ border-color:#23685e!important;
+ box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
+}
+.panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
+.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
+.techrow,.rnav,.chartnav{border-color:#23685e!important}
+
+
+/* Uniform turquoise presentation. Signal values and timing are unchanged. */
+.stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
+.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
+.panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
+ background:linear-gradient(125deg,#0c2026,#0a151e)!important;
+ border-color:#23685e!important;box-shadow:none!important;
+}
+.refapp .techrow,.refapp .techrow>div,.refapp .rnav,.panel .chartnav{border-color:#244047!important}
+.refapp .gear,.panel summary:after{color:#00dfb5!important;text-shadow:none!important}
+.refapp .finalcard,.refapp .finalclose,.refapp .analysisbox,.refapp .probbox{border-color:#244047!important}
+.stRadio label,[data-testid="stButton"] button,.panel .toggle,.panel .chartnav button{
+ background:#0a151e!important;border-color:#23685e!important;color:#e3f0ee!important;
+}
+.panel{background:#06121a!important}
+
+/* Visible only when the already-existing reversal flag is active. */
+.weakness-inline{
+    margin:2px auto 6px;
+    padding:6px 9px;
+    width:fit-content;
+    max-width:98%;
+    border:1px solid #d99a31;
+    border-radius:8px;
+    background:#3b2b12;
+    color:#ffdb8b!important;
+    text-align:center;
+    font-size:10px;
+    font-weight:900;
+    line-height:1.35;
+    letter-spacing:.1px;
+}
+
 </style>
 """,
     unsafe_allow_html=True,
@@ -684,6 +784,114 @@ if "micro_prices" not in st.session_state:
 
 if "micro_ticker" not in st.session_state:
     st.session_state.micro_ticker = None
+
+
+# Informational price plan; never predicts settlement or sends an order.
+import math
+import html
+from datetime import datetime,timezone
+
+def _plan_number(value):
+    if isinstance(value,bool):return None
+    try:
+        result=float(value)
+        return result if math.isfinite(result) else None
+    except (TypeError,ValueError,OverflowError):return None
+
+def make_exit_plan(state, signal, seconds_left, now):
+    if not signal or signal.get('data_valid') is False:return None
+    side=state.get('first_direction');price=_plan_number(signal.get('price'));atr=_plan_number(signal.get('atr'));secs=_plan_number(seconds_left)
+    if side not in ('UP','DOWN') or price is None or atr is None or secs is None or min(price,atr,secs)<=0 or atr>=price:return None
+    first=state.get('first_signal_time')
+    if not isinstance(first,datetime) or first.tzinfo is None or now.tzinfo is None or first>now:return None
+    source=signal.get('price_source')
+    if source not in ('KALSHI LIVE','COINBASE','COINBASE CANDLE'):return None
+    sign=1 if side=='UP' else -1
+    return {'rule':'fixed_1atr_reference_v1','direction':side,'reference_btc':price,
+        'reference_kind':'confirmation' if first==now else 'resumed',
+        'atr_at_confirmation':atr,'target_btc':price+sign*atr,'invalidation_btc':price-sign*atr,
+        'source':source,'first_time':first.isoformat(),'created_at':now.isoformat(),
+        'terminal_status':None,'terminal_at':None,'terminal_price':None,'last_at':now.isoformat()}
+
+def exit_plan_status(plan, signal, seconds_left, now):
+    secs=_plan_number(seconds_left)
+    if secs is not None and secs<=0:return 'ROUND_CLOSED'
+    if not isinstance(plan,dict):return 'NO_PLAN'
+    if plan.get('terminal_status'):return plan['terminal_status']
+    if secs is None or not signal or signal.get('data_valid') is False:return 'NO_CURRENT_DATA'
+    if signal.get('price_source')!=plan.get('source'):return 'REFERENCE_CHANGED'
+    price=_plan_number(signal.get('price'))
+    if price is None or price<=0:return 'NO_CURRENT_DATA'
+    try:
+        last=datetime.fromisoformat(plan['last_at'])
+        if now.tzinfo is None or now<last:return 'NO_CURRENT_DATA'
+    except (KeyError,TypeError,ValueError):return 'NO_CURRENT_DATA'
+    sign=1 if plan['direction']=='UP' else -1
+    if sign*(price-plan['invalidation_btc'])<=0:return 'INVALIDATED'
+    if sign*(price-plan['target_btc'])>=0:return 'TARGET_REACHED'
+    return 'IN_RANGE'
+
+def update_exit_plan(state, signal, seconds_left, now):
+    plan=state.get('exit_plan');status=exit_plan_status(plan,signal,seconds_left,now)
+    if not plan or plan.get('terminal_status') or status not in ('IN_RANGE','INVALIDATED','TARGET_REACHED'):return status
+    updated=dict(plan,last_at=now.isoformat())
+    if status!='IN_RANGE':updated.update(terminal_status=status,terminal_at=now.isoformat(),terminal_price=float(signal['price']))
+    state['exit_plan']=updated
+    return status
+
+def preserve_exit_plan(state, saved):
+    old=saved.get('exit_plan')
+    if not isinstance(old,dict) or old.get('first_time')!=saved.get('first_signal_time'):return
+    current=state.get('exit_plan')
+    if not isinstance(current,dict) or current.get('first_time')!=old['first_time'] or old.get('terminal_status'):
+        state['exit_plan']=old
+        return
+    fixed=('reference_kind','rule','direction','reference_btc','atr_at_confirmation','target_btc','invalidation_btc','source','first_time','created_at')
+    state['exit_plan']={**current,**{k:old[k] for k in fixed if k in old}}
+
+def plan_bid(market, side):
+    market=market or {};prefix='yes' if side=='UP' else 'no'
+    value=_plan_number(market.get(prefix+'_bid_dollars'))
+    if value is None:
+        value=_plan_number(market.get(prefix+'_bid'))
+        if value is not None:value/=100
+    return value if value is not None and 0<value<=1 else None
+
+def render_exit_plan(state, signal, market, seconds_left, now):
+    plan=(state or {}).get('exit_plan');status=exit_plan_status(plan,signal,seconds_left,now)
+    titles={'NO_PLAN':'ESPERANDO UNA NUEVA SEÑAL','ROUND_CLOSED':'ESTA RONDA YA TERMINÓ',
+        'NO_CURRENT_DATA':'ESPERANDO UN PRECIO ACTUAL','REFERENCE_CHANGED':'NO PUEDO COMPARAR EL PRECIO AHORA',
+        'IN_RANGE':'SIGUIENDO LA SEÑAL','TARGET_REACHED':'LLEGÓ AL OBJETIVO · REVISA SALIR',
+        'INVALIDATED':'VA EN CONTRA · REVISA SALIR'}
+    title=titles[status]
+    if status=='NO_PLAN' and (state or {}).get('first_direction') in ('UP','DOWN'):
+        title='SEÑAL ACTIVA · ESPERANDO DATOS PARA LA REFERENCIA'
+    color='#e64b4b' if status=='INVALIDATED' else '#00dfb5' if status=='TARGET_REACHED' else '#38bdf8'
+    if not plan:
+        details=('La señal ya está activa. Falta un precio y ATR válidos para iniciar el seguimiento.' if (state or {}).get('first_direction') in ('UP','DOWN') else 'Los precios aparecerán cuando el bot confirme una nueva señal.')
+        rows=''
+    else:
+        if status=='IN_RANGE':title+=' '+plan['direction']
+        active_side=(state or {}).get('active_direction')
+        if active_side in ('UP','DOWN') and active_side!=plan['direction']:
+            title='LA SEÑAL ACTIVA CAMBIÓ A '+active_side+' · REVISA LA REFERENCIA INICIAL'
+        bid=plan_bid(market,plan['direction']);bid_text=f'{bid*100:.1f}¢ por contrato' if bid is not None else 'No disponible'
+        goal_verb='sube' if plan['direction']=='UP' else 'baja'
+        against_verb='baja' if plan['direction']=='UP' else 'sube'
+        fields=[('Señal inicial',plan['direction']),('Referencia BTC al reanudar' if plan.get('reference_kind')=='resumed' else 'Precio al dar la señal',f"${plan['reference_btc']:,.2f}"),
+            ('Si '+goal_verb+' a esto, revisa salir',f"${plan['target_btc']:,.2f}"),
+            ('Si '+against_verb+' a esto, revisa salir',f"${plan['invalidation_btc']:,.2f}"),
+            ('Precio orientativo para vender',bid_text)]
+        rows=''.join('<div style="display:flex;justify-content:space-between;gap:12px;margin-top:8px"><span>'+html.escape(k)+'</span><strong>'+html.escape(v)+'</strong></div>' for k,v in fields)
+        details='Estos precios son una guía; el mercado puede seguir moviéndose.'
+        if plan.get('reference_kind')=='resumed':details+=' Referencia fijada al reanudar el seguimiento; no es el precio de la señal original.'
+        current_price=_plan_number((signal or {}).get('price'))
+        if status=='IN_RANGE' and current_price is not None and (1 if plan['direction']=='UP' else -1)*(current_price-plan['reference_btc'])<0:
+            title='RETROCESO CONTRA '+plan['direction']+' · REVISA LA SALIDA'
+            details+=' BTC está en contra de la referencia inicial, sin alcanzar aún el límite marcado.'
+        if plan.get('terminal_at'):details+=' El aviso ya se activó y seguirá visible aunque el precio regrese.'
+    return '<section style="border:1px solid '+color+';border-radius:18px;padding:18px;margin:12px 0;background:#0b1720;color:#cbd5e1"><div style="font-size:13px;color:'+color+'">CUÁNDO REVISAR LA SALIDA</div><h3 style="color:'+color+';margin:10px 0">'+title+'</h3>'+rows+'<p style="font-size:12px;color:#94a3b8;margin:12px 0 0">'+details+' No vende automáticamente. El precio de venta puede cambiar y no asegura ganancias.</p></section>'
+
 
 def new_round_state(ticker, seconds_left):
     now = datetime.now(timezone.utc)
@@ -710,6 +918,7 @@ def new_round_state(ticker, seconds_left):
         "pending_count": 0,
         "pending_since": None,
         "pending_last_at": None,
+        "pending_price_source": None,
     }
 
 # =========================================================
@@ -717,7 +926,10 @@ def new_round_state(ticker, seconds_left):
 # Solo guarda el estado de la ronda; NO cambia el cerebro.
 # =========================================================
 
-ROUND_STATE_DB = "btc_signal_round_state.db"
+LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
+ROUND_STATE_DB = 'btc_signal_round_state_v2.db'
+_ROUND_TRANSACTION = threading.local()
+
 
 def _round_db():
     conn = sqlite3.connect(ROUND_STATE_DB, timeout=5)
@@ -725,16 +937,31 @@ def _round_db():
     return conn
 
 
-def save_round_state(state):
-    if not state or not state.get('ticker'):
-        return
-    conn = getattr(_ROUND_TRANSACTION,'conn',None)
-    if conn is not None:
-        _write_state_to_connection(conn,state)
-        return
-    with _round_db() as conn:
-        conn.execute('BEGIN IMMEDIATE')
-        _write_state_to_connection(conn,state)
+def _decode_round_payload(payload):
+    state = json.loads(payload)
+    for key in ('detected_at','first_signal_time','active_since'):
+        value = state.get(key)
+        if isinstance(value, str) and value:
+            try:
+                state[key] = datetime.fromisoformat(value)
+            except ValueError:
+                state[key] = None
+    state['_restored_from_disk'] = True
+    return state
+
+
+def _load_state_from_connection(conn, ticker):
+    row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
+    if row:
+        return _decode_round_payload(row[0])
+    # La primera lectura conserva la ronda anterior, sin permitir que un trabajador
+    # antiguo escriba en la nueva base coordinada.
+    try:
+        with sqlite3.connect('file:' + LEGACY_ROUND_STATE_DB + '?mode=ro', uri=True, timeout=1) as legacy:
+            row = legacy.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
+        return _decode_round_payload(row[0]) if row else None
+    except Exception:
+        return None
 
 
 def load_round_state(ticker):
@@ -750,12 +977,86 @@ def load_round_state(ticker):
         return None
 
 
+def _write_state_to_connection(conn, state):
+    row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (state['ticker'],)).fetchone()
+    saved = json.loads(row[0]) if row else {}
+    if saved.get('first_direction') in ('UP','DOWN'):
+        for key in ('first_direction','first_signal_time','first_signal_seconds','first_signal_price'):
+            value = saved.get(key)
+            if key == 'first_signal_time' and isinstance(value, str) and value:
+                value = datetime.fromisoformat(value)
+            state[key] = value
+    preserve_exit_plan(state, saved)
+    keep = {key:value for key,value in state.items() if key != '_restored_from_disk'}
+    for key in ('detected_at','first_signal_time','active_since'):
+        if isinstance(keep.get(key), datetime):
+            keep[key] = keep[key].isoformat()
+    conn.execute('INSERT INTO round_state(ticker,payload,updated_at) VALUES(?,?,?) '
+                 'ON CONFLICT(ticker) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
+                 (state['ticker'],json.dumps(keep,allow_nan=False),datetime.now(timezone.utc).isoformat()))
+
+
+def save_round_state(state):
+    if not state or not state.get('ticker'):
+        return
+    conn = getattr(_ROUND_TRANSACTION,'conn',None)
+    if conn is not None:
+        _write_state_to_connection(conn,state)
+        return
+    with _round_db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        _write_state_to_connection(conn,state)
+
+
+def _run_round_transaction(action):
+    if getattr(_ROUND_TRANSACTION,'conn',None) is not None:
+        return action()
+    conn = _round_db()
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        _ROUND_TRANSACTION.conn = conn
+        try:
+            result = action()
+            conn.commit()
+            return result
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            _ROUND_TRANSACTION.conn = None
+    finally:
+        conn.close()
+
+
+def process_round_signal(ticker, sig, market, seconds_left):
+    if not ticker or ticker == '--':
+        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
+    def apply():
+        latest = load_round_state(ticker)
+        if latest is not None:
+            st.session_state.rounds[ticker] = latest
+        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
+    return _run_round_transaction(apply)
+
+
+def _background_update_state(state, sig, market, seconds_left):
+    def apply():
+        latest = load_round_state(state['ticker'])
+        current = latest if latest is not None else state
+        current.pop('_restored_from_disk',None)
+        return _background_update_state_without_coordinator(current,sig,market,seconds_left)
+    return _run_round_transaction(apply)
+
+
+
+
 # =========================================================
 # HISTORIAL Y RENDIMIENTO — CAPA INDEPENDIENTE
 # No modifica build_signal(), preseñal, lector, ballenas ni gráfico.
 # =========================================================
 
-HISTORY_DB = "btc_signal_history.db"
+LEGACY_HISTORY_DB = "btc_signal_history.db"
+HISTORY_DB = "btc_signal_history_v2.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
@@ -863,6 +1164,89 @@ def save_round_history(state):
         pass
 
 
+def verified_binary_outcome(market, ticker, now=None):
+    """Acepta solamente una liquidación binaria fechada y no provisional."""
+    now = now or datetime.now(timezone.utc)
+    if not isinstance(market, dict) or market.get('ticker') != ticker:
+        return None
+    if not ticker.startswith('KXBTC15M-') or market.get('market_type') != 'binary':
+        return None
+    if market.get('is_provisional') not in (None, False):
+        return None
+    result = str(market.get('result') or '').lower()
+    if result not in ('yes', 'no'):
+        return None
+    try:
+        settled = datetime.fromisoformat(str(market['settlement_ts']).replace('Z', '+00:00'))
+        if settled.tzinfo is None or settled > now:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    return 'UP' if result == 'yes' else 'DOWN'
+
+
+def reconcile_history_once(limit=4, fetch_market=None):
+    """Consulta resultados públicos fuera del motor de señales."""
+    with _history_db() as conn:
+        tickers = [row[0] for row in conn.execute('''SELECT ticker FROM round_history
+            WHERE verification_status != 'official' AND ticker LIKE 'KXBTC15M-%'
+            ORDER BY COALESCE(last_verification_attempt,''),closed_at DESC LIMIT ?''', (int(limit),))]
+    verified = 0
+    for ticker in tickers:
+        try:
+            with _history_db() as conn:
+                conn.execute('UPDATE round_history SET last_verification_attempt=? WHERE ticker=?',
+                             (datetime.now(timezone.utc).isoformat(), ticker))
+            if fetch_market is None:
+                response = requests.get(
+                    'https://external-api.kalshi.com/trade-api/v2/markets/' + ticker,
+                    headers={'User-Agent': 'MacalyAlphaBot/4.6.1'}, timeout=5)
+                response.raise_for_status()
+                market = response.json().get('market')
+            else:
+                market = fetch_market(ticker)
+            outcome = verified_binary_outcome(market, ticker)
+            if outcome is None:
+                continue
+            expiration = market.get('expiration_value')
+            try:
+                expiration = float(expiration)
+                if not np.isfinite(expiration) or not 10000 < expiration < 1000000:
+                    expiration = None
+            except (ValueError, TypeError):
+                expiration = None
+            with _history_db() as conn:
+                conn.execute('''UPDATE round_history SET final_outcome=?,
+                    final_btc=COALESCE(?,final_btc),
+                    result=CASE WHEN first_signal NOT IN ('UP','DOWN') OR first_signal IS NULL THEN 'NO TRADE'
+                                WHEN first_signal=? THEN 'GANADA' ELSE 'PERDIDA' END,
+                    verification_status='official',official_result=?,settlement_at=?,verified_at=?,verified_expiration_value=?
+                    WHERE ticker=?''',
+                    (outcome, expiration, outcome, market['result'], market['settlement_ts'],
+                     datetime.now(timezone.utc).isoformat(), expiration, ticker))
+            verified += 1
+        except Exception:
+            continue
+    return verified
+
+
+def _history_verification_loop():
+    started = time.monotonic()
+    while True:
+        try:
+            reconcile_history_once()
+        except Exception as exc:
+            print(f"[ALPHA HISTORY VERIFY] {type(exc).__name__}: {exc}")
+        time.sleep(30)
+
+
+@st.cache_resource(validate=lambda worker: worker.is_alive())
+def start_history_verifier():
+    worker = threading.Thread(target=_history_verification_loop, name='btc-history-verification-v2', daemon=True)
+    worker.start()
+    return worker
+
+
 def load_history(limit=100):
     try:
         with _history_db() as conn:
@@ -900,6 +1284,69 @@ def history_stats(df):
 # COINBASE — VELAS ORIGINALES DE 1 MINUTO
 # =========================================================
 
+def _fetch_current_btc_candles():
+    """Solicita una ventana explícita y verifica la fecha de las velas recibidas.
+
+    Una respuesta HTTP correcta puede contener velas antiguas. No se sustituye
+    una vela antigua por un precio live para calcular los indicadores.
+    """
+    last_error = None
+    for attempt in range(2):
+        requested_at = datetime.now(timezone.utc)
+        minute_start = requested_at.replace(second=0, microsecond=0)
+        start = minute_start - pd.Timedelta(minutes=299)
+        response = requests.get(
+            "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+            params={
+                "granularity": 60,
+                "start": start.isoformat(),
+                "end": requested_at.isoformat(),
+            },
+            headers={
+                "User-Agent": "MacalyAlphaBot/4.6.1",
+                "Cache-Control": "no-cache, no-store, max-age=0",
+                "Pragma": "no-cache",
+            },
+            timeout=10,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        if not isinstance(rows, list) or len(rows) < 30:
+            raise ValueError("Coinbase no devolvió suficientes velas.")
+        frame = pd.DataFrame(
+            rows, columns=["time", "low", "high", "open", "close", "volume"]
+        )
+        for column in ["time", "low", "high", "open", "close", "volume"]:
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        frame["time"] = pd.to_datetime(frame["time"], unit="s", utc=True, errors="coerce")
+        frame = frame.dropna().drop_duplicates("time").sort_values("time").reset_index(drop=True)
+        if len(frame) < 30:
+            raise ValueError("Coinbase devolvió velas inválidas o insuficientes.")
+        values = frame[["low", "high", "open", "close", "volume"]].to_numpy(dtype=float)
+        if (not np.isfinite(values).all() or (values[:, :4] <= 0).any()
+                or (values[:, 4] < 0).any()
+                or (frame["high"] < frame[["open", "close", "low"]].max(axis=1)).any()
+                or (frame["low"] > frame[["open", "close", "high"]].min(axis=1)).any()
+                or (frame["time"].diff().dropna() != pd.Timedelta(minutes=1)).any()):
+            raise ValueError("Velas inválidas o con huecos; no se calcula una señal.")
+        received_at = datetime.now(timezone.utc)
+        latest_start = frame.iloc[-1]["time"]
+        age = (received_at - latest_start.to_pydatetime()).total_seconds()
+        # Una vela de 1m puede estar abierta o ser la última cerrada. Se permite
+        # hasta un minuto adicional de publicación, sin aceptar varios minutos.
+        if -5 <= age <= 120:
+            frame.attrs["received_at"] = received_at.isoformat()
+            frame.attrs["latest_candle_at"] = latest_start.isoformat()
+            frame.attrs["candle_age_seconds"] = age
+            return frame
+        last_error = ValueError(
+            "Velas Coinbase desactualizadas: última vela "
+            f"{latest_start.strftime('%H:%M:%S UTC')} ({age:.0f} s). "
+            "El motor necesita velas actuales."
+        )
+    raise last_error
+
+
 @st.cache_data(ttl=5)
 def get_btc_data():
     return _fetch_current_btc_candles()
@@ -933,19 +1380,24 @@ def get_coinbase_whale_flow():
             maker_side = str(row.get("side", "")).lower()
             aggressor = "COMPRA" if maker_side == "sell" else "VENTA" if maker_side == "buy" else ""
             ts = pd.to_datetime(row.get("time"), utc=True, errors="coerce")
-            t = ts.timestamp() if not pd.isna(ts) else now
+            if pd.isna(ts):
+                continue
+            t = ts.timestamp()
+            if (not np.isfinite(price) or not np.isfinite(size) or not np.isfinite(notional)
+                    or price <= 0 or size <= 0 or not 0 <= now - t <= 75):
+                continue
             if notional > 0 and aggressor:
                 tape.append({"id": trade_id, "t": t, "notional": notional, "side": aggressor})
                 seen[trade_id] = t
         except Exception:
             continue
 
-    tape[:] = [x for x in tape if now - x["t"] <= 75]
+    tape[:] = [x for x in tape if 0 <= now - x["t"] <= 75]
     for k in [k for k, t in seen.items() if now - t > 90]:
         seen.pop(k, None)
 
     def window(seconds):
-        w = [x for x in tape if now - x["t"] <= seconds]
+        w = [x for x in tape if 0 <= now - x["t"] <= seconds]
         buy = sum(x["notional"] for x in w if x["side"] == "COMPRA")
         sell = sum(x["notional"] for x in w if x["side"] == "VENTA")
         total = buy + sell
@@ -984,6 +1436,7 @@ def get_coinbase_whale_flow():
         "flow_strength": max(i10, i30 if same_side else 0.0),
     }
 
+
 def compact_usd(value):
     value = float(value or 0)
     if value >= 1_000_000:
@@ -992,13 +1445,14 @@ def compact_usd(value):
         return f"${value/1_000:.0f}K"
     return f"${value:,.0f}"
 
+
 def render_whale_panel(whale, active):
     base = "margin:8px 0;padding:12px;border:1px solid #26384b;border-radius:13px;background:linear-gradient(180deg,#0c1724,#09111b)"
     if not whale or not whale.get("detected"):
         buy = compact_usd((whale or {}).get("live_buy", 0))
         sell = compact_usd((whale or {}).get("live_sell", 0))
         return f'''<section style="{base}">
-          <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:10px;color:#e4edf7">🐋 FLUJO BALLENA · EN VIVO</b><span style="font-size:8px;color:#35e986">● COINBASE</span></div>
+          <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:10px;color:#e4edf7">🐋 FLUJO BALLENA · EN VIVO</b><span style="font-size:8px;color:#00dfb5">● COINBASE</span></div>
           <div style="margin-top:8px;font-size:13px;font-weight:900;color:#91a2b5">SIN FLUJO EXTREMO AHORA</div>
           <div style="margin-top:6px;font-size:9px;color:#8da0b4">Últimos 10 s · COMPRAS {buy} · VENTAS {sell}</div>
           <div style="margin-top:4px;font-size:8px;color:#6f8195">Confirma presión con ventanas de 10 s y 30 s; no alerta por una operación aislada.</div>
@@ -1006,7 +1460,7 @@ def render_whale_panel(whale, active):
 
     a = whale["alert"]
     up = a["direction"] == "UP"
-    color = "#35e986" if up else "#ff5367"
+    color = "#00dfb5" if up else "#e64b4b"
     arrow = "↑" if up else "↓"
     label = "COMPRADOR · POSIBLE IMPULSO UP" if up else "VENDEDOR · POSIBLE IMPULSO DOWN"
     dominant = a["buy"] if up else a["sell"]
@@ -1021,6 +1475,7 @@ def render_whale_panel(whale, active):
       <div style="margin-top:4px;font-size:8px;color:#7f91a5">Alerta temprana de presión extraordinaria en el flujo real de BTC/USD.</div>
     </section>'''
 
+
 def get_btc_live_price():
     response = requests.get(
         "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
@@ -1032,10 +1487,9 @@ def get_btc_live_price():
         timeout=6,
     )
     response.raise_for_status()
-    price = response.json().get("price")
-    if price in [None, ""]:
-        raise ValueError("Coinbase ticker no devolvió precio.")
-    return float(price)
+    data = response.json()
+    return _valid_live_observation(data.get("price"), data.get("time"), "COINBASE")
+
 
 # =========================================================
 # KALSHI BTC 15 MIN
@@ -1060,6 +1514,7 @@ def get_kalshi_btc_market():
     markets.sort(key=lambda m: str(m.get("close_time") or "9999"))
     return markets[0]
 
+
 def get_event_ticker_from_market(market):
     if not market:
         return None
@@ -1072,59 +1527,36 @@ def get_event_ticker_from_market(market):
     parts = str(ticker).split("-")
     return "-".join(parts[:-1]) if len(parts) >= 2 else None
 
+
 def extract_kalshi_btc_price(data):
     if not isinstance(data, dict):
         return None
 
     live_data = data.get("live_data", data)
     details = live_data.get("details", {}) if isinstance(live_data, dict) else {}
-    candidates = []
+    # Prefiere la observación fechada más reciente a un cierre anterior.
+    timed_points = []
+    points = details.get("timeseries", []) if isinstance(details, dict) else []
+    for index, point in enumerate(points if isinstance(points, list) else []):
+        if not isinstance(point, dict):
+            continue
+        try:
+            stamp, value = float(point["t"]), float(point["v"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if np.isfinite(stamp) and stamp > 0 and np.isfinite(value) and 10000 < value < 1000000:
+            # La serie puede devolver epoch en segundos o milisegundos.
+            stamp = stamp / 1000 if stamp > 100_000_000_000 else stamp
+            timed_points.append((stamp, index, value))
+    if timed_points:
+        stamp, _, value = max(timed_points)
+        try:
+            return _valid_live_observation(value, pd.to_datetime(stamp, unit="s", utc=True), "KALSHI LIVE")
+        except (ValueError, TypeError, OverflowError):
+            return None
+    # Un precio sin fecha verificable no se anuncia como live.
+    return None
 
-    preferred_keys = {
-        "price", "value", "index_value", "indexvalue",
-        "current_price", "currentprice", "current_value", "currentvalue",
-        "last_price", "lastprice", "close",
-    }
-
-    def walk_preferred(obj):
-        if isinstance(obj, dict):
-            for key, value in obj.items():
-                normalized_key = str(key).lower().replace("-", "_")
-                if normalized_key in preferred_keys:
-                    try:
-                        number = float(value)
-                        if 10000 < number < 1000000:
-                            candidates.append(number)
-                    except (TypeError, ValueError):
-                        pass
-                walk_preferred(value)
-        elif isinstance(obj, list):
-            for item in obj:
-                walk_preferred(item)
-
-    walk_preferred(details)
-    if candidates:
-        return float(candidates[-1])
-
-    pair_candidates = []
-
-    def walk_pairs(obj):
-        if isinstance(obj, list):
-            if len(obj) >= 2:
-                try:
-                    possible_price = float(obj[-1])
-                    if 10000 < possible_price < 1000000:
-                        pair_candidates.append(possible_price)
-                except (TypeError, ValueError):
-                    pass
-            for item in obj:
-                walk_pairs(item)
-        elif isinstance(obj, dict):
-            for value in obj.values():
-                walk_pairs(value)
-
-    walk_pairs(details)
-    return float(pair_candidates[-1]) if pair_candidates else None
 
 def get_kalshi_live_btc(market):
     event_ticker = get_event_ticker_from_market(market)
@@ -1149,6 +1581,7 @@ def get_kalshi_live_btc(market):
     if price is None:
         raise ValueError("Kalshi live respondió sin precio BTC válido.")
     return float(price)
+
 
 # =========================================================
 # INDICADORES ORIGINALES
@@ -1179,18 +1612,15 @@ def _indicator_frame(df):
     x["vol_ratio"]=vol/vol.rolling(20).mean().replace(0,np.nan)
     return x
 
-
 def _resample_indicators(df, minutes):
     if minutes == 1: return _indicator_frame(df)
     x=df.set_index("time").resample(f"{minutes}min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna().reset_index()
     return _indicator_frame(x)
 
-
 def add_indicators(df):
     x=_indicator_frame(df)
     x["mom3"]=x["close"].pct_change(3)*100; x["mom5"]=x["close"].pct_change(5)*100; x["mom15"]=x["close"].pct_change(15)*100
     return x
-
 
 def get_target_from_market(market):
     if not market:
@@ -1207,6 +1637,7 @@ def get_target_from_market(market):
                 pass
     return None
 
+
 def get_seconds_remaining(market):
     if not market or not market.get("close_time"):
         return None
@@ -1221,10 +1652,12 @@ def get_seconds_remaining(market):
     except Exception:
         return None
 
+
 def format_countdown(seconds):
     if seconds is None:
         return "--:--"
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
 
 def numeric_kalshi_price(dollar_value, cent_value):
     if dollar_value not in [None, ""]:
@@ -1239,12 +1672,14 @@ def numeric_kalshi_price(dollar_value, cent_value):
             pass
     return None
 
+
 def get_yes_ask(market):
     if not market:
         return None
     return numeric_kalshi_price(
         market.get("yes_ask_dollars"), market.get("yes_ask")
     )
+
 
 def get_no_ask(market):
     if not market:
@@ -1263,17 +1698,6 @@ def get_no_ask(market):
         return max(0.0, min(1.0, 1.0 - yes_bid))
     return None
 
-def kalshi_quote_display(market, direction=None):
-    """Actual buy asks; never substitute the signal engine's estimate."""
-    def label(price):
-        if price is None or not math.isfinite(price) or not 0 < price <= 1:
-            return "—"
-        return f"{price * 100:g}¢"
-    if direction in ("UP", "DOWN"):
-        price = get_yes_ask(market) if direction == "UP" else get_no_ask(market)
-        value = label(price)
-        return value, f"{direction} · ASK" if value != "—" else "PRECIO NO DISPONIBLE"
-    return f"UP {label(get_yes_ask(market))} / DOWN {label(get_no_ask(market))}", "ASK · MISMA RONDA"
 
 # =========================================================
 # PROBABILIDAD ORIGINAL
@@ -1308,22 +1732,113 @@ def estimated_probabilities(
     up_prob = float(np.clip(up_prob, 5, 95))
     return round(up_prob), round(100 - up_prob)
 
+
 # =========================================================
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-def build_signal(df, target, seconds_left, live_price=None):
-    _TRACE_CONTEXT.build_id = None
-    _TRACE_CONTEXT.build_payload = None
-    sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
-    try:
-        candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
-        payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
-        _TRACE_CONTEXT.build_payload = payload
-        _TRACE_CONTEXT.build_id = _trace_event("build", payload)
-    except Exception:
-        pass
-    return sig
+def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
+    """Directional persistence / exhaustion in comparable ATR units.
+
+    Informational internally; never imposes a permanent UP/DOWN lock.
+    Percent momentum is converted to dollars before ATR normalization.
+    Uses completed/current candle history, not fabricated price targets.
+    """
+    if not np.isfinite(price) or price <= 0 or not np.isfinite(atr) or atr <= 0:
+        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
+                "exhaust_down": False, "reliable": False}
+    close = one["close"].astype(float).tail(9).to_numpy()
+    if len(close) < 7 or not np.all(np.isfinite(close)):
+        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
+                "exhaust_down": False, "reliable": False}
+    changes = np.diff(close)
+    # Directional efficiency: net movement divided by total absolute movement.
+    travel = float(np.sum(np.abs(changes[-5:])))
+    efficiency = abs(float(close[-1] - close[-6])) / max(travel, 1e-8)
+    recent = float(np.sum(changes[-2:])) / atr
+    previous = float(np.sum(changes[-5:-2])) / atr
+    m3 = float(np.clip(price * mom3 / 100.0 / atr, -3, 3))
+    m5 = float(np.clip(price * mom5 / 100.0 / atr, -3, 3))
+    m15 = float(np.clip(price * mom15 / 100.0 / atr, -3, 3))
+    volume = float(np.clip(rvol, 0, 3)) if np.isfinite(rvol) else 1.0
+    # No invented dollar target: these are dimensionless internal strengths.
+    trend = .48 * m3 + .32 * m5 + .20 * m15
+    strength = float(np.clip(trend * (.75 + .25 * efficiency) *
+                             (.90 + .10 * min(volume, 1.5)), -3, 3))
+    exhaust_up = (previous > .35 and recent < -.10) or (m5 > .35 and m3 < -.12)
+    exhaust_down = (previous < -.35 and recent > .10) or (m5 < -.35 and m3 > .12)
+    return {"up": max(0., strength), "down": max(0., -strength),
+            "exhaust_up": bool(exhaust_up), "exhaust_down": bool(exhaust_down),
+            "reliable": True, "efficiency": round(float(efficiency), 3),
+            "recent_atr": round(recent, 3)}
+
+
+def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
+    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
+    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
+    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
+    def direction(row):
+        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
+        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
+    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
+    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
+    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
+    target_atr=(distance/atr) if distance is not None else 0.0
+    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
+    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
+    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
+    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
+    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
+    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
+    candidate=None; quality="SIN CONFIRMACIÓN"
+    if aligned=="UP" and (trend_strong or (rsi3>=52 and rsi5>=50)) and vwap_atr>-0.15:
+        candidate="UP"
+    elif aligned=="DOWN" and (trend_strong or (rsi3<=48 and rsi5<=50)) and vwap_atr<0.15:
+        candidate="DOWN"
+    # Señal temprana: no espera alineación perfecta de 3M/5M cuando 5M no se opone
+    # y el impulso de 1M/3M + VWAP/participación ya apuntan a la misma dirección.
+    elif d5 != "DOWN" and l3["macd_hist"] > 0 and rsi1 >= 53 and rsi3 >= 50 and vwap_atr >= 0.05 and (rvol >= 0.90 or mom3 > 0.025):
+        candidate="UP"
+        quality="TEMPRANA"
+    elif d5 != "UP" and l3["macd_hist"] < 0 and rsi1 <= 47 and rsi3 <= 50 and vwap_atr <= -0.05 and (rvol >= 0.90 or mom3 < -0.025):
+        candidate="DOWN"
+        quality="TEMPRANA"
+    # Early entry: reject an already fading impulse, not a direction forever.
+    # Next reading can immediately reconsider either UP or DOWN.
+    if quality == "TEMPRANA" and candidate in ("UP", "DOWN") and impulse["reliable"]:
+        fading = impulse["exhaust_up"] if candidate == "UP" else impulse["exhaust_down"]
+        support = impulse["up"] if candidate == "UP" else impulse["down"]
+        if fading and support < 0.45:
+            candidate = None
+            quality = "IMPULSO EN REVISIÓN"
+    # A confirmed aligned trend may also exhaust: keep the 3-reading confirmation,
+    # but do not invent a direction from the exhaustion signal alone.
+    # Near expiry, the contract target can dominate only when BTC has a meaningful ATR cushion.
+    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
+        # Gradually increase target relevance as expiry approaches; never
+        # assume that being above/below target guarantees the final outcome.
+        cushion = 0.35 if seconds_left > 60 else 0.25
+        if target_atr >= cushion and not impulse["exhaust_up"]:
+            candidate = "UP"
+            quality = "TRAMO FINAL"
+        elif target_atr <= -cushion and not impulse["exhaust_down"]:
+            candidate = "DOWN"
+            quality = "TRAMO FINAL"
+    if near_noise and not trend_strong: candidate=None
+    if candidate:
+        confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
+        if quality != "TEMPRANA":
+            quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
+    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
+    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
+    # Closing support adapts continuously; it is NOT a calibrated win probability.
+    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
+        weight = .35 + .35 * (180 - seconds_left) / 180
+        evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
+    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
+    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse}
 
 
 def build_presignal(sig, seconds_left):
@@ -1424,12 +1939,11 @@ def build_presignal(sig, seconds_left):
 
     return {"direction":direction, "percent":percent, "bull":bull, "bear":bear}
 
-
 def entry_quality(price, seconds_left):
     if price is None:
         return "PRECIO NO DISPONIBLE", "#94a3b8"
     if price <= 0.60:
-        return "BUENA", "#34d399"
+        return "BUENA", "#00dfb5"
     if price <= 0.70:
         return "PRECAUCIÓN", "#fbbf24"
     return "CARA", "#fb7185"
@@ -1439,2120 +1953,73 @@ def entry_quality(price, seconds_left):
 # CONTROL DE RONDA — EL CEREBRO MANDA
 # =========================================================
 
-def confirm_round_candidate(state, candidate, market, seconds_left, now):
-    before = dict(state)
-    result = _confirmation_without_trace(state, candidate, market, seconds_left, now)
+def _retention_supported(state, signal, seconds_left):
+    """Retain only a previously confirmed side with current finite support."""
+    if not signal or seconds_left is None or seconds_left <= 0:
+        return False
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
-        if getattr(_TRACE_CONTEXT, "build_id", None) is None:
-            fallback = getattr(_TRACE_CONTEXT, "build_payload", None)
-            if fallback is not None:
-                payload["input_fallback"] = fallback
-        _trace_event("confirmation", payload, state.get("ticker"))
-    except Exception:
-        pass
-    finally:
-        _TRACE_CONTEXT.build_id = None
-        _TRACE_CONTEXT.build_payload = None
-    return result
-
-
-
-def process_round_signal(ticker, sig, market, seconds_left):
-    if not ticker or ticker == '--':
-        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
-    def apply():
-        latest = load_round_state(ticker)
-        if latest is not None:
-            st.session_state.rounds[ticker] = latest
-        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
-    return _run_round_transaction(apply)
-
-
-# =========================================================
-# REGISTRADOR AUTÓNOMO 12 HORAS — SOLO HISTORIAL
-# Sigue leyendo las rondas aunque no haya una sesión de Streamlit abierta,
-# siempre que el proceso del servidor siga encendido.
-# NO modifica el motor, la preseñal, el lector, ballenas ni la interfaz.
-# =========================================================
-
-BACKGROUND_RUN_SECONDS = 12 * 60 * 60
-BACKGROUND_POLL_SECONDS = 2
-
-def _background_get_btc_data():
-    return _fetch_current_btc_candles()
-
-def _background_get_market():
-    response = requests.get(
-        "https://external-api.kalshi.com/trade-api/v2/markets",
-        params={"limit": 100, "status": "open", "series_ticker": "KXBTC15M"},
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    markets = response.json().get("markets", [])
-    if not markets:
-        return None
-    markets.sort(key=lambda m: str(m.get("close_time") or "9999"))
-    return markets[0]
-
-def _background_get_live_price(market, with_source=False):
-    try:
-        event_ticker = get_event_ticker_from_market(market)
-        if event_ticker:
-            response = requests.get(
-                "https://external-api.kalshi.com/trade-api/v2/live_data/events/" + str(event_ticker),
-                params={"range": "15min", "_": int(datetime.now(timezone.utc).timestamp())},
-                headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
-                timeout=6,
-            )
-            response.raise_for_status()
-            price = extract_kalshi_btc_price(response.json())
-            if price is not None:
-                return (float(price), "KALSHI") if with_source else float(price)
-    except Exception:
-        pass
-    response = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
-        params={"_": int(datetime.now(timezone.utc).timestamp())},
-        timeout=6,
-    )
-    response.raise_for_status()
-    price = response.json().get("price")
-    if price in (None, ""):
-        raise ValueError("Sin precio BTC live.")
-    return (float(price), "COINBASE") if with_source else float(price)
-
-def _background_update_state(state, sig, market, seconds_left):
-    def apply():
-        latest = load_round_state(state['ticker'])
-        current = latest if latest is not None else state
-        current.pop('_restored_from_disk',None)
-        return _background_update_state_without_coordinator(current,sig,market,seconds_left)
-    return _run_round_transaction(apply)
-
-
-def _background_history_loop():
-    started = time.monotonic()
-    active_ticker = None
-    active_state = None
-    while time.monotonic() - started < BACKGROUND_RUN_SECONDS:
-        try:
-            market = _background_get_market()
-            if not market:
-                time.sleep(BACKGROUND_POLL_SECONDS); continue
-            ticker = str(market.get("ticker") or "--")
-            if ticker == "--":
-                time.sleep(BACKGROUND_POLL_SECONDS); continue
-            if active_ticker and ticker != active_ticker and active_state:
-                save_round_history(active_state)
-                active_state = None
-            if ticker != active_ticker:
-                active_ticker = ticker
-                restored = load_round_state(ticker)
-                if restored:
-                    restored.pop("_restored_from_disk", None)
-                active_state = restored or new_round_state(ticker, get_seconds_remaining(market))
-            seconds_left = get_seconds_remaining(market)
-            target = get_target_from_market(market)
-            live_price = _background_get_live_price(market)
-            btc_df = _background_get_btc_data()
-            sig = build_signal(btc_df, target, seconds_left, live_price)
-            active_state = _background_update_state(active_state, sig, market, seconds_left)
-            if seconds_left is not None and seconds_left <= 0:
-                save_round_history(active_state)
-        except Exception:
-            pass
-        time.sleep(BACKGROUND_POLL_SECONDS)
-
-@st.cache_resource
-def start_12h_history_worker():
-    worker = threading.Thread(target=_background_history_loop, name="btc-history-12h", daemon=True)
-    worker.start()
-    return worker
-
-# =========================================================
-# LECTOR DE CIERRE PRO — MICRO LECTURA ~2 SEGUNDOS
-# Mantiene intacto el motor v4.6.1 y sus señales.
-# No inventa velas REST de 1 segundo: construye una cinta
-# de muestras del BTC live que ya recibe el dashboard.
-# =========================================================
-
-def update_micro_tape(ticker, live_price):
-    if not ticker or ticker == "--" or live_price is None:
-        return
-
-    # Cada ronda empieza con su propia cinta.
-    if st.session_state.micro_ticker != ticker:
-        st.session_state.micro_ticker = ticker
-        st.session_state.micro_prices = []
-
-    now_ts = datetime.now(timezone.utc).timestamp()
-    tape = st.session_state.micro_prices
-
-    # Evita duplicar muestras dentro del mismo refresco.
-    if not tape or now_ts - tape[-1]["t"] >= 1.0:
-        tape.append({"t": now_ts, "p": float(live_price)})
-
-    # Conserva aproximadamente los últimos 90 segundos.
-    cutoff = now_ts - 90
-    st.session_state.micro_prices = [
-        x for x in tape if x["t"] >= cutoff
-    ]
-
-def micro_reading():
-    tape = st.session_state.micro_prices
-
-    if len(tape) < 4:
-        return {
-            "ready": False,
-            "change_5s": 0.0,
-            "change_10s": 0.0,
-            "change_30s": 0.0,
-            "slope": 0.0,
-            "up_ratio": 0.5,
-            "pressure": "NEUTRAL",
-        }
-
-    now_t = tape[-1]["t"]
-    current = tape[-1]["p"]
-
-    def price_ago(seconds):
-        target_t = now_t - seconds
-        candidates = [x for x in tape if x["t"] <= target_t]
-        if candidates:
-            return candidates[-1]["p"]
-        return tape[0]["p"]
-
-    p5 = price_ago(5)
-    p10 = price_ago(10)
-    p30 = price_ago(30)
-
-    changes = [
-        tape[i]["p"] - tape[i - 1]["p"]
-        for i in range(1, len(tape))
-    ]
-    nonzero = [x for x in changes if x != 0]
-    up_ratio = (
-        sum(1 for x in nonzero if x > 0) / len(nonzero)
-        if nonzero else 0.5
-    )
-
-    # Regresión simple precio/tiempo para medir dirección micro.
-    xs = np.array([x["t"] - tape[0]["t"] for x in tape], dtype=float)
-    ys = np.array([x["p"] for x in tape], dtype=float)
-    slope = float(np.polyfit(xs, ys, 1)[0]) if len(xs) >= 3 and xs[-1] > 0 else 0.0
-
-    c5 = current - p5
-    c10 = current - p10
-    c30 = current - p30
-
-    if slope > 0.35 and up_ratio >= 0.58:
-        pressure = "ALCISTA"
-    elif slope < -0.35 and up_ratio <= 0.42:
-        pressure = "BAJISTA"
-    else:
-        pressure = "NEUTRAL"
-
-    return {
-        "ready": True,
-        "change_5s": c5,
-        "change_10s": c10,
-        "change_30s": c30,
-        "slope": slope,
-        "up_ratio": up_ratio,
-        "pressure": pressure,
-    }
-
-def closing_reader(sig, round_signal, seconds_left, micro):
-    """Lector de cierre adaptativo y conectado al reloj.
-
-    No toca la señal oficial. Estima qué lado tiene ventaja usando la distancia
-    REAL al target comparada con el movimiento que BTC todavía podría recorrer
-    en el tiempo restante. Esa capacidad de movimiento se recalcula con ATR,
-    momentum y la cinta live; no depende de una tabla fija de "$X con Ys".
-    """
-    state = round_signal.get("round_state")
-    active_direction = state.get("active_direction") if state else None
-    distance = sig.get("distance")
-    secs = 900 if seconds_left is None else max(0, int(seconds_left))
-
-    if seconds_left is not None and seconds_left <= 0:
-        if distance is None or abs(distance) < 1:
-            headline, color = "RONDA FINALIZADA", "#94a3b8"
-        elif distance > 0:
-            headline, color = "RONDA FINALIZADA • UP", "#34e982"
-        else:
-            headline, color = "RONDA FINALIZADA • DOWN", "#ff4e5f"
-        return {
-            "percent":100, "headline":headline,
-            "note":"La ronda terminó. Ya no se muestra una predicción de cierre.",
-            "micro":"RONDA CERRADA","color":color,
-            "border":"rgba(148,163,184,.45)",
-            "bg":"linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))",
-            "direction":"UP" if (distance or 0) > 0 else "DOWN" if (distance or 0) < 0 else None,
-        }
-
-    if distance is None:
-        return {
-            "percent":50, "headline":"ESPERANDO TARGET",
-            "note":"Falta la referencia del target para estimar el cierre.",
-            "micro":"MICROLECTURA PREPARÁNDOSE","color":"#38bdf8",
-            "border":"rgba(56,189,248,.45)",
-            "bg":"linear-gradient(135deg,rgba(11,64,91,.30),rgba(9,23,34,.72))",
-            "direction":None,
-        }
-
-    market_side = "UP" if distance > 0 else "DOWN" if distance < 0 else None
-    direction = market_side or active_direction
-    if direction not in ("UP", "DOWN"):
-        direction = "UP" if float(sig.get("mom3", 0) or 0) >= 0 else "DOWN"
-
-    # Movimiento restante esperado: ATR de 1 minuto escalado por sqrt(tiempo).
-    # Se adapta solo a la volatilidad actual de BTC y se afina con la cinta live.
-    atr1 = max(float(sig.get("atr", 0) or 0), 1.0)
-    remaining_sigma = atr1 * np.sqrt(max(secs, 1) / 60.0)
-
-    micro_text = "MICROLECTURA REUNIENDO DATOS"
-    micro_drift = 0.0
-    micro_noise = None
-    if micro.get("ready"):
-        c5 = float(micro.get("change_5s", 0) or 0)
-        c10 = float(micro.get("change_10s", 0) or 0)
-        c30 = float(micro.get("change_30s", 0) or 0)
-        slope = float(micro.get("slope", 0) or 0)
-        ratio = float(micro.get("up_ratio", .5) or .5)
-
-        # Drift reciente amortiguado: cuanto menos tiempo queda, más relevante.
-        observed_drift = (0.45*c5/5.0 + 0.35*c10/10.0 + 0.20*c30/30.0)
-        time_focus = 1.0 - min(1.0, secs / 180.0)
-        micro_drift = observed_drift * secs * (0.20 + 0.80*time_focus)
-
-        # Ruido observado por segundo, convertido al horizonte restante.
-        local_scale = max(abs(c5)/np.sqrt(5), abs(c10)/np.sqrt(10), abs(c30)/np.sqrt(30), abs(slope)*1.5, 1.0)
-        micro_noise = local_scale * np.sqrt(max(secs, 1))
-        # Cerca del cierre la cinta manda más; lejos, ATR manda más.
-        blend = 1.0 - min(1.0, secs / 180.0)
-        remaining_sigma = (1.0-blend)*remaining_sigma + blend*micro_noise
-
-        micro_text = f"MICRO {micro.get('pressure','NEUTRAL')} • 10s {c10:+.1f} • 30s {c30:+.1f}"
-
-    # Distancia proyectada al cierre. Positiva = UP, negativa = DOWN.
-    projected_distance = float(distance) + micro_drift
-
-    # Convierte colchón/volatilidad restante a probabilidad sin umbrales de dólares.
-    # logistic evita reglas rígidas y permite que una ronda prácticamente definida
-    # llegue naturalmente a 100% al redondear.
-    risk_scale = max(remaining_sigma * 0.72, 0.75)
-    z = projected_distance / risk_scale
-    up_close_prob = 100.0 / (1.0 + np.exp(-np.clip(z, -12, 12)))
-    side_prob = up_close_prob if direction == "UP" else 100.0 - up_close_prob
-
-    # Si la dirección estimada por la proyección cruzó el target, el lector gira.
-    projected_side = "UP" if projected_distance > 0 else "DOWN" if projected_distance < 0 else market_side
-    if projected_side in ("UP", "DOWN") and projected_side != direction:
-        direction = projected_side
-        side_prob = up_close_prob if direction == "UP" else 100.0 - up_close_prob
-
-    # Antes de los últimos 3 minutos conserva algo del contexto técnico;
-    # al acercarse el cierre, tiempo+target dominan progresivamente.
-    if secs > 180 and active_direction in ("UP", "DOWN"):
-        tech_prob = float(sig.get("up_probability", 50) if direction == "UP" else sig.get("down_probability", 50))
-        clock_weight = max(0.15, min(0.55, (900-secs)/720.0))
-        side_prob = tech_prob*(1-clock_weight) + side_prob*clock_weight
-
-    confidence = int(round(np.clip(side_prob, 0, 100)))
-
-    # Texto coherente con reloj + colchón dinámico, no con una distancia fija.
-    cushion = abs(projected_distance) / max(remaining_sigma, 1.0)
-    if confidence >= 99:
-        confidence = 100
-        headline = f"CIERRE PRÁCTICAMENTE DEFINIDO • {direction}"
-        note = (f"Quedan {secs}s · BTC está ${abs(distance):,.0f} "
-                f"{'arriba' if distance > 0 else 'abajo'} del target. "
-                "La distancia domina ampliamente el movimiento restante estimado.")
-    elif secs <= 60 and cushion >= 1.35:
-        headline = f"CIERRE MUY FAVORECIDO PARA {direction}"
-        note = (f"Quedan {secs}s · BTC está ${abs(distance):,.0f} "
-                f"{'arriba' if distance > 0 else 'abajo'} del target; "
-                "el colchón supera el movimiento restante estimado.")
-    elif secs <= 60:
-        headline = f"VENTAJA FINAL {direction}"
-        note = (f"Quedan {secs}s · BTC está ${abs(distance):,.0f} "
-                f"{'arriba' if distance > 0 else 'abajo'} del target. "
-                "La cinta de segundos pesa cada vez más en la estimación.")
-    elif market_side in ("UP", "DOWN"):
-        headline = f"AÚN FAVORABLE A {direction}"
-        note = "La ventaja se recalcula con distancia, volatilidad y tiempo real restante."
-    else:
-        headline = f"CIERRE {direction} SIN VENTAJA CLARA"
-        note = "La lectura todavía no tiene colchón suficiente frente al movimiento esperado."
-
-    if direction == "UP":
-        color = "#34e982"; border = "rgba(52,233,130,.48)"
-        bg = "linear-gradient(135deg,rgba(4,86,43,.46),rgba(7,36,25,.78))"
-    else:
-        color = "#ff4e5f"; border = "rgba(255,78,95,.48)"
-        bg = "linear-gradient(135deg,rgba(102,20,31,.48),rgba(43,10,17,.80))"
-
-    return {"percent":confidence,"headline":headline,"note":note,"micro":micro_text,
-            "color":color,"border":border,"bg":bg,"direction":direction}
-
-def render_live_candles(df, live_price, target, active, timeframe="1m"):
-    # Renderiza velas BTC/USD para visualización sin cambiar el motor v4.6.1.
-    # 3m y 5m se construyen agrupando las velas reales de Coinbase de 1 minuto.
-    if df is None or len(df) < 5:
-        return f'<div class="chartbox"><div class="charttitle">BTC/USD · {timeframe}</div><div class="chartempty">Esperando velas…</div></div>'
-
-    tf_minutes = {"1m": 1, "3m": 3, "5m": 5}.get(timeframe, 1)
-    source_df = df.copy().sort_values("time")
-    if tf_minutes > 1:
-        d = (
-            source_df.set_index("time")
-            .resample(f"{tf_minutes}min", label="left", closed="left")
-            .agg({
-                "open": "first",
-                "high": "max",
-                "low": "min",
-                "close": "last",
-                "volume": "sum",
-            })
-            .dropna()
-            .reset_index()
-        )
-    else:
-        d = source_df[["time", "open", "high", "low", "close", "volume"]].copy()
-
-    d = d.tail(42).reset_index(drop=True)
-    # La última vela se mantiene visualmente al precio live recibido por el dashboard.
-    if live_price is not None and len(d):
-        i = d.index[-1]
-        d.loc[i, "close"] = float(live_price)
-        d.loc[i, "high"] = max(float(d.loc[i, "high"]), float(live_price))
-        d.loc[i, "low"] = min(float(d.loc[i, "low"]), float(live_price))
-
-    close = d["close"].astype(float)
-    ema9 = close.ewm(span=9, adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-
-    W, H = 760, 430
-    left, right, top, bottom = 18, 142, 54, 82
-    pw, ph = W-left-right, H-top-bottom
-    vals = list(d["low"].astype(float)) + list(d["high"].astype(float))
-    if target is not None: vals.append(float(target))
-    if live_price is not None: vals.append(float(live_price))
-    lo, hi = min(vals), max(vals)
-    pad = max((hi-lo)*0.10, 8)
-    lo, hi = lo-pad, hi+pad
-    def y(v): return top + (hi-float(v))/(hi-lo)*ph
-    n=len(d); step=pw/max(n,1); body=max(3.2, min(8, step*.58))
-
-    svg=[]
-    # horizontal grid + prices
-    for k in range(5):
-        yy=top+ph*k/4; price=hi-(hi-lo)*k/4
-        svg.append(f'<line x1="{left}" y1="{yy:.1f}" x2="{W-right}" y2="{yy:.1f}" stroke="#182536" stroke-width="1"/>')
-        svg.append(f'<text x="{W-right+8}" y="{yy+4:.1f}" fill="#8392a7" font-size="12">{price:,.0f}</text>')
-    # vertical grid
-    for k in range(5):
-        xx=left+pw*k/4
-        svg.append(f'<line x1="{xx:.1f}" y1="{top}" x2="{xx:.1f}" y2="{top+ph}" stroke="#121e2d" stroke-width="1"/>')
-
-    # volume scaled into bottom 52 px of plot
-    vmax=max(float(d["volume"].max()),1)
-    vbase=top+ph
-    for i,row in d.iterrows():
-        x=left+(i+.5)*step; vh=float(row["volume"])/vmax*48
-        col='#16b97a' if float(row['close'])>=float(row['open']) else '#c43d59'
-        svg.append(f'<rect x="{x-body/2:.1f}" y="{vbase-vh:.1f}" width="{body:.1f}" height="{vh:.1f}" fill="{col}" opacity=".55"/>')
-
-    # candles
-    for i,row in d.iterrows():
-        x=left+(i+.5)*step
-        o,c,h,l=map(float,[row['open'],row['close'],row['high'],row['low']])
-        col='#19e6a2' if c>=o else '#ff4e6a'
-        svg.append(f'<line x1="{x:.1f}" y1="{y(h):.1f}" x2="{x:.1f}" y2="{y(l):.1f}" stroke="{col}" stroke-width="1.4"/>')
-        yy=min(y(o),y(c)); hh=max(2.0,abs(y(o)-y(c)))
-        svg.append(f'<rect x="{x-body/2:.1f}" y="{yy:.1f}" width="{body:.1f}" height="{hh:.1f}" rx=".7" fill="{col}"/>')
-
-    # EMA paths
-    def path(series,color):
-        pts=' '.join(f'{left+(i+.5)*step:.1f},{y(v):.1f}' for i,v in enumerate(series))
-        return f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
-    svg.append(path(ema9,'#df42e7'))
-    svg.append(path(ema21,'#32d7ef'))
-
-    # target line
-    if target is not None and lo <= float(target) <= hi:
-        ty=y(target)
-        svg.append(f'<line x1="{left}" y1="{ty:.1f}" x2="{W-right}" y2="{ty:.1f}" stroke="#23e7c1" stroke-width="1.8" stroke-dasharray="7 6"/>')
-        # La etiqueta queda en el margen derecho, fuera del área de velas.
-        svg.append(f'<rect x="{W-right+18}" y="{ty-12:.1f}" width="96" height="23" rx="3" fill="#20e7bd"/>')
-        svg.append(f'<text x="{W-right+25}" y="{ty+4:.1f}" fill="#061510" font-size="10" font-weight="800">TARGET</text>')
-    # live price line + label
-    if live_price is not None and lo <= float(live_price) <= hi:
-        ly=y(live_price); lc='#31e889' if active=='UP' else '#ff5367' if active=='DOWN' else '#38bdf8'
-        svg.append(f'<line x1="{left}" y1="{ly:.1f}" x2="{W-right}" y2="{ly:.1f}" stroke="{lc}" stroke-width="1.3" stroke-dasharray="3 4"/>')
-        svg.append(f'<rect x="{W-right+18}" y="{ly-12:.1f}" width="96" height="23" rx="3" fill="{lc}"/>')
-        svg.append(f'<text x="{W-right+25}" y="{ly+4:.1f}" fill="#061510" font-size="11" font-weight="900">{float(live_price):,.0f}</text>')
-
-    # time labels
-    picks=[0, max(0,n//3), max(0,2*n//3), n-1]
-    for idx in picks:
-        tm=d.iloc[idx]['time'].to_pydatetime().astimezone(ZoneInfo("America/New_York")).strftime('%-I:%M %p')
-        xx=left+(idx+.5)*step
-        svg.append(f'<text x="{xx:.1f}" y="{H-52}" text-anchor="middle" fill="#8392a7" font-size="11">{tm}</text>')
-
-    last=d.iloc[-1]
-    change=float(last['close'])-float(last['open'])
-    pct=(change/float(last['open'])*100) if float(last['open']) else 0
-    direction_color='#31e889' if change>=0 else '#ff5367'
-    target_label=f'${float(target):,.0f}' if target is not None else '--'
-    return f'''<section class="chartbox">
-      <div class="charttop"><div><b>BTC/USD · {timeframe}</b><span class="chartlive">● LIVE</span></div><div class="charttf">{timeframe}</div></div>
-      <div class="ohlc">O {float(last['open']):,.0f} &nbsp; H {float(last['high']):,.0f} &nbsp; L {float(last['low']):,.0f} &nbsp; C {float(last['close']):,.0f} &nbsp; <strong style="color:{direction_color}">{change:+,.0f} ({pct:+.2f}%)</strong></div>
-      <div class="indicators"><span class="ema9dot">●</span> EMA9 {float(ema9.iloc[-1]):,.0f} &nbsp;&nbsp; <span class="ema21dot">●</span> EMA21 {float(ema21.iloc[-1]):,.0f} &nbsp;&nbsp; <span class="targetdot">━</span> TARGET {target_label}</div>
-      <svg class="candlesvg" viewBox="0 0 {W} {H}" preserveAspectRatio="none">{''.join(svg)}</svg>
-      <div class="chartfoot"><span class="selected">{timeframe}</span><span>VELAS REALES COINBASE</span><span>ACTUALIZACIÓN LIVE</span></div>
-    </section>'''
-
-# =========================================================
-# NAVEGACIÓN REAL — EL ENGRANAJE ABRE AJUSTES
-# No muestra botones extra en la pantalla principal.
-# =========================================================
-
-# =========================================================
-# AUTO TRADING — PANEL SEPARADO (NO MODIFICA build_signal)
-# Configuración, conexión, simulación y ejecución REAL mediante el worker.
-# Las credenciales viven en memoria del servidor; nunca se escriben en SQLite.
-# =========================================================
-
-KALSHI_API_BASE = "https://external-api.kalshi.com"
-AUTO_DB = "btc_auto_trading.db"
-
-def _auto_db():
-    con = sqlite3.connect(AUTO_DB, check_same_thread=False)
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS auto_orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            ticker TEXT,
-            mode TEXT,
-            side TEXT,
-            level INTEGER,
-            entry_cents REAL,
-            contracts INTEGER,
-            amount REAL,
-            take_profit_pct REAL,
-            take_profit_cents REAL,
-            stop_loss_pct REAL,
-            status TEXT,
-            pnl REAL DEFAULT 0,
-            note TEXT
-        )
-    """)
-    con.commit()
-    return con
-
-def load_auto_orders(limit=100):
-    con = _auto_db()
-    try:
-        return pd.read_sql_query(
-            "SELECT * FROM auto_orders ORDER BY id DESC LIMIT ?", con,
-            params=(int(limit),)
-        )
-    finally:
-        con.close()
-
-def _normalize_private_key(pem_text):
-    return (pem_text or "").strip().replace("\\n", "\n")
-
-def _kalshi_private_key(pem_text):
-    return serialization.load_pem_private_key(
-        _normalize_private_key(pem_text).encode("utf-8"), password=None
-    )
-
-def _kalshi_signature(private_key, message):
-    raw = message.encode("utf-8")
-    if isinstance(private_key, Ed25519PrivateKey):
-        sig = private_key.sign(raw)
-    else:
-        sig = private_key.sign(
-            raw,
-            padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
-            hashes.SHA256(),
-        )
-    return base64.b64encode(sig).decode("utf-8")
-
-def kalshi_auth_headers(method, path, key_id, private_key_text):
-    timestamp = str(int(time.time() * 1000))
-    clean_path = path.split("?")[0]
-    private_key = _kalshi_private_key(private_key_text)
-    signature = _kalshi_signature(private_key, timestamp + method.upper() + clean_path)
-    return {
-        "KALSHI-ACCESS-KEY": key_id.strip(),
-        "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "KALSHI-ACCESS-SIGNATURE": signature,
-        "Content-Type": "application/json",
-    }
-
-def kalshi_get_balance(key_id, private_key_text):
-    path = "/trade-api/v2/portfolio/balance"
-    headers = kalshi_auth_headers("GET", path, key_id, private_key_text)
-    r = requests.get(KALSHI_API_BASE + path, headers=headers, timeout=12)
-    if r.status_code != 200:
-        try:
-            detail = r.json()
-        except Exception:
-            detail = r.text[:300]
-        raise RuntimeError(f"Kalshi {r.status_code}: {detail}")
-    data = r.json()
-    # Prefer fixed-point dollars; legacy integer balance is cents.
-    if data.get("balance_dollars") is not None:
-        balance = float(data["balance_dollars"])
-    else:
-        balance = float(data.get("balance", 0)) / 100.0
-    return balance, data
-
-def martingale_plan(capital, levels, multiplier):
-    capital = max(0.0, float(capital))
-    levels = max(1, min(12, int(levels)))
-    multiplier = max(1.0, float(multiplier))
-    if multiplier == 1.0:
-        weights = [1.0] * levels
-    else:
-        weights = [multiplier ** i for i in range(levels)]
-    total_w = sum(weights) or 1.0
-    raw = [capital * w / total_w for w in weights]
-    # cents-safe display; last level absorbs rounding without exceeding capital.
-    amounts = [math.floor(x * 100) / 100 for x in raw]
-    if amounts:
-        remainder = round(capital - sum(amounts), 2)
-        amounts[-1] = round(amounts[-1] + max(0, remainder), 2)
-    return amounts
-
-def dollar_level_plan(initial_amount, levels, multiplier):
-    from decimal import Decimal, ROUND_DOWN
-    base = Decimal(str(initial_amount))
-    factor = Decimal(str(multiplier))
-    if not base.is_finite() or base <= 0 or not factor.is_finite() or factor < 1:
-        raise ValueError("Importe inicial o multiplicador inválidos")
-    return [float((base * factor ** i).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
-            for i in range(max(1, min(12, int(levels))))]
-
-
-def dollar_contract_quantity(amount, price):
-    from decimal import Decimal, ROUND_FLOOR
-    budget, quote = Decimal(str(amount)), Decimal(str(price))
-    if not budget.is_finite() or budget <= 0 or not quote.is_finite() or not 0 < quote < 1:
-        raise ValueError("Importe o precio inválidos")
-    # Kalshi V2 accepts fractional counts in increments of 0.01 contracts.
-    # Round down only at that precision, never to whole contracts.
-    return float((budget / quote).quantize(Decimal("0.01"), rounding=ROUND_FLOOR))
-
-
-def profit_target_cents(entry_cents, profit_pct):
-    if entry_cents is None:
-        return None
-    pct = max(0.0, min(100.0, float(profit_pct)))
-    return min(100.0, float(entry_cents) * (1.0 + pct / 100.0))
-
-def _auto_default_config():
-    return {
-        "enabled": False, "mode": "SIMULACIÓN", "capital": 20.0,
-        "min_price": 20, "max_price": 70, "min_conf": 65,
-        "profit_on": True, "profit_pct": 85,
-        "stop_on": False, "stop_pct": 20,
-        "martingale_on": False, "levels": 4, "multiplier": 2.0,
-        "one_per_round": True, "max_trades_day": 12, "reserve": 0.0,
-        "level_directions": ["Seguir señal"] * 12,
-        "entry_source": "SEÑAL PRINCIPAL",
-    }
-
-def _ensure_auto_config_table():
-    con = _auto_db()
-    con.execute("""CREATE TABLE IF NOT EXISTS auto_config (
-        id INTEGER PRIMARY KEY CHECK (id=1), config_json TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-    )""")
-    con.commit(); con.close()
-
-def load_auto_config():
-    _ensure_auto_config_table()
-    cfg = _auto_default_config()
-    con = _auto_db()
-    row = con.execute("SELECT config_json FROM auto_config WHERE id=1").fetchone()
-    con.close()
-    if row:
-        try:
-            saved = json.loads(row[0]); cfg.update(saved)
-        except Exception:
-            pass
-    cfg.setdefault("quantity_mode", "CONTRATOS")
-    cfg.setdefault("initial_amount", 0.50)
-    cfg["entry_source"] = "SEÑAL PRINCIPAL"
-    dirs = cfg.get("level_directions") or []
-    cfg["level_directions"] = (dirs + ["Seguir señal"] * 12)[:12]
-    return cfg
-
-def save_auto_config(cfg):
-    _ensure_auto_config_table()
-    con = _auto_db()
-    con.execute("""INSERT INTO auto_config(id, config_json, updated_at)
-        VALUES(1, ?, ?) ON CONFLICT(id) DO UPDATE SET
-        config_json=excluded.config_json, updated_at=excluded.updated_at""",
-        (json.dumps(cfg), datetime.now(timezone.utc).isoformat()))
-    con.commit(); con.close()
-
-# =========================================================
-# EJECUCIÓN AUTÓNOMA: PRESEÑAL DIRECTA + ÓRDENES KALSHI V2
-# Uso individual: proteger el acceso al despliegue y sus ajustes.
-# Credenciales solo en memoria; al reiniciar se necesita reconectar
-# o configurar KALSHI_KEY_ID / KALSHI_PRIVATE_KEY en st.secrets.
-# =========================================================
-
-def execution_choice(sig, cfg, secs):
-    # La decisión automática pertenece únicamente al motor principal.
-    side = sig.get("candidate")
-    return side, sig.get("up_probability" if side == "UP" else "down_probability", 50)
-
-def refine_main_signal(sig):
-    """Compatibilidad: no modifica el cerebro original v4.6.1."""
-    return sig
-
-def v2_order_payload(ticker, direction, action, quantity, price, client_id):
-    # V2 cotiza siempre el lado YES. Compra NO = ask YES.
-    yes_price = price if direction == "UP" else 1.0 - price
-    bid = (direction == "UP") == (action == "buy")
-    if not (0 < yes_price < 1) or quantity <= 0:
-        raise ValueError("Precio o cantidad inválidos")
-    return {"ticker": ticker, "client_order_id": client_id,
-            "side": "bid" if bid else "ask", "count": f"{quantity:.2f}",
-            "price": f"{yes_price:.4f}",
-            "time_in_force": "immediate_or_cancel",
-            "self_trade_prevention_type": "taker_at_cross",
-            "reduce_only": action == "sell", "cancel_order_on_pause": True}
-
-class RecentEntryConfirmation:
-    """Filtro de entrada, no estimador de probabilidad ni señal de salida.
-
-    Exige cinta continua de 30s, movimiento coincidente en 5/10/30s y
-    coincidencia sostenida 10s. Umbrales iniciales sin calibración histórica.
-    """
-    def __init__(self):
-        self.key = None
-        self.samples = []
-        self.candidate = None
-        self.since = None
-
-    def reset_candidate(self):
-        self.candidate = None
-        self.since = None
-
-    def observe(self, ticker, source, price, now):
-        key = (ticker, source)
-        if not math.isfinite(price) or price <= 0:
-            self.samples = []
-            self.reset_candidate()
-            return
-        if key != self.key or (self.samples and
-                (now <= self.samples[-1][0] or now - self.samples[-1][0] > 12)):
-            self.key = key
-            self.samples = []
-            self.reset_candidate()
-        self.samples.append((now, price))
-        self.samples = [(t, p) for t, p in self.samples if now - t <= 50]
-
-    def check(self, side, atr, now):
-        if side not in ("UP", "DOWN"):
-            self.reset_candidate()
-            return False, "Preseñal sin dirección suficiente"
-        if not self.samples or now - self.samples[-1][0] > 6:
-            self.reset_candidate()
-            return False, "Esperando precios recientes"
-        deltas = []
-        for seconds in (5, 10, 30):
-            ref = next(((t, p) for t, p in reversed(self.samples)
-                        if t <= now - seconds), None)
-            if ref is None or now - seconds - ref[0] > 6:
-                self.reset_candidate()
-                return False, "Reuniendo 30 s de precios para confirmar entrada temprana"
-            deltas.append(self.samples[-1][1] - ref[1])
-        # Descarta movimiento plano; no exige estar ya del lado del target.
-        atr = float(atr)
-        if not math.isfinite(atr) or atr <= 0:
-            self.reset_candidate()
-            return False, "Volatilidad inválida; esperando datos"
-        minimum = max(0.50, atr * 0.01)
-        sign = 1 if side == "UP" else -1
-        detail = "/".join(f"{d:+.2f}" for d in deltas)
-        if any(sign * d < minimum for d in deltas):
-            self.reset_candidate()
-            return False, f"Esperando impulso {side}: 5/10/30 s {detail} USD"
-        if self.candidate != side:
-            self.candidate, self.since = side, now
-        elapsed = now - self.since
-        if elapsed < 10:
-            return False, f"Confirmando impulso {side}: {elapsed:.0f}/10 s"
-        return True, f"Impulso {side} confirmado · 5/10/30 s {detail} USD"
-
-    def movement(self, atr, now):
-        # Lectura pura: no avanza ni autoriza el temporizador de compras.
-        if not self.samples or now - self.samples[-1][0] > 6:
-            return {"ready":False, "reason":"Esperando precios recientes"}
-        deltas = []
-        for seconds in (5, 10, 30):
-            ref = next(((t, p) for t, p in reversed(self.samples)
-                        if t <= now - seconds), None)
-            if ref is None or now - seconds - ref[0] > 6:
-                return {"ready":False, "reason":"Reuniendo 30 s de precios de esta ronda"}
-            deltas.append(self.samples[-1][1] - ref[1])
-        if not math.isfinite(float(atr)) or float(atr) <= 0:
-            return {"ready":False, "reason":"Esperando volatilidad válida"}
-        return {"ready":True, "deltas":deltas, "minimum":max(0.50, float(atr)*0.01)}
-
-class ExecutionWorker:
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.key_id = ""; self.pem = ""
-        self.message = "Conecta Kalshi para operar en REAL"
-        self.status_by_mode = {}
-        self.heartbeat = None
-        self.balance = None
-        self.entry_gates = {}
-        self.thread = threading.Thread(target=self.run, name="alpha-execution", daemon=True)
-        self.thread.start()
-
-    def connect(self, key_id, pem):
-        with self.lock:
-            if self.key_id and self.key_id != key_id:
-                raise ValueError("Desconecta la cuenta actual antes de cambiarla")
-            self.key_id, self.pem = key_id, pem
-            self.status_by_mode["REAL"] = {"message": "Kalshi conectado; preparando próximo ciclo",
-                                          "heartbeat": None}
-
-    def disconnect(self):
-        with self.lock:
-            self.key_id = ""; self.pem = ""
-            self.message = "Desconectado: compras y ventas automáticas detenidas"
-            self.status_by_mode["REAL"] = {"message": self.message, "heartbeat": None}
-
-    def scope(self, mode):
-        account = hashlib.sha256(self.key_id.encode()).hexdigest()[:20] if mode == "REAL" else "paper"
-        return mode + ":" + account
-
-    def database(self):
-        c = sqlite3.connect(AUTO_DB, timeout=15)
-        c.execute("CREATE TABLE IF NOT EXISTS execution_ledger(scope TEXT PRIMARY KEY,payload TEXT NOT NULL)")
-        return c
-
-    def read_ledger(self, scope):
-        c = self.database()
-        try:
-            row = c.execute("SELECT payload FROM execution_ledger WHERE scope=?", (scope,)).fetchone()
-            return json.loads(row[0]) if row else {"positions": [], "pending": None}
-        finally:
-            c.close()
-
-    def write_ledger(self, scope, ledger):
-        c = self.database()
-        try:
-            c.execute("INSERT INTO execution_ledger VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET payload=excluded.payload",
-                      (scope, json.dumps(ledger)))
-            c.commit()
-        finally:
-            c.close()
-
-    def loss_streak(self, ledger):
-        start = max(0, int(ledger.get("cycle_start", 0)))
-        losses = 0
-        for p in reversed(ledger["positions"][start:]):
-            if p["pnl"] is not None and p["pnl"] < 0:
-                losses += 1
-            else:
-                break
-        return losses
-
-    def reset_cycle(self, mode):
-        with self.lock:
-            if mode == "REAL" and not (self.key_id and self.pem):
-                raise ValueError("Conecta la misma cuenta Kalshi antes de reiniciar su ciclo.")
-            scope = self.scope(mode)
-            ledger = self.read_ledger(scope)
-            if ledger.get("pending"):
-                raise ValueError("Hay una orden pendiente de reconciliar; el ciclo todavía no se puede reiniciar.")
-            if any(p["remaining"] > .0001 for p in ledger["positions"]):
-                raise ValueError("Hay una posición abierta; espera su cierre antes de reiniciar el ciclo.")
-            ledger["cycle_start"] = len(ledger["positions"])
-            ledger.setdefault("cycle_resets", []).append(datetime.now(timezone.utc).isoformat())
-            self.write_ledger(scope, ledger)
-            self.status_by_mode[mode] = {
-                "message": "Ciclo reiniciado al nivel 1; conserva pérdidas y límites",
-                "heartbeat": datetime.now(timezone.utc).isoformat(),
-            }
-
-    def api(self, method, path, payload=None, params=None):
-        headers = kalshi_auth_headers(method, path, self.key_id, self.pem)
-        r = requests.request(method, KALSHI_API_BASE + path, headers=headers,
-                             json=payload, params=params, timeout=10)
-        try:
-            r.raise_for_status()
-        except requests.HTTPError as error:
-            # Preserve HTTPError/response so submit() still handles rejected
-            # versus ambiguous orders without duplicating an unknown POST.
-            try:
-                detail = r.json()
-                if isinstance(detail, dict):
-                    detail = detail.get("error", detail)
-                if isinstance(detail, dict):
-                    detail = " · ".join(str(detail.get(k, "")) for k in
-                                        ("code", "message", "details") if detail.get(k))
-            except ValueError:
-                detail = "Respuesta de error sin JSON"
-            raise requests.HTTPError(
-                f"Kalshi {r.status_code}: {str(detail)[:180]}",
-                response=r, request=getattr(error, "request", None),
-            ) from error
-        return r.json()
-
-    def market(self, ticker):
-        r = requests.get(KALSHI_API_BASE + "/trade-api/v2/markets/" + ticker, timeout=8)
-        r.raise_for_status()
-        return r.json()["market"]
-
-    def position(self, ticker):
-        data = self.api("GET", "/trade-api/v2/portfolio/positions", params={"ticker": ticker})
-        return sum(float(p.get("position_fp", p.get("position", 0))) for p in data.get("market_positions", [])
-                   if p.get("ticker") == ticker)
-
-    def reconcile(self, intent):
-        # Nunca repetir un POST cuyo resultado sea desconocido.
-        cursor = ""
-        for _ in range(20):
-            data = self.api("GET", "/trade-api/v2/portfolio/orders",
-                            params={"ticker": intent["ticker"], "limit": 200, "cursor": cursor})
-            for order in data.get("orders", []):
-                if order.get("client_order_id") == intent["client_id"]:
-                    if order.get("status") not in ("executed", "canceled"):
-                        return None
-                    oid = order["order_id"]
-                    fills = []; fc = ""
-                    for _ in range(20):
-                        d = self.api("GET", "/trade-api/v2/portfolio/fills",
-                                     params={"order_id": oid, "limit": 200, "cursor": fc})
-                        fills += d.get("fills", [])
-                        fc = d.get("cursor", "")
-                        if not fc: break
-                    else:
-                        raise ValueError("Fills incompletos; esperando reconciliación")
-                    qty = sum(float(f.get("count_fp", f.get("count", 0))) for f in fills)
-                    expected = float(order.get("fill_count_fp", order.get("fill_count", 0)))
-                    if abs(qty - expected) > .0001: return None
-                    value = sum(float(f.get("count_fp", f.get("count", 0))) *
-                                float(f["yes_price_dollars"] if intent["direction"] == "UP" else f["no_price_dollars"])
-                                for f in fills)
-                    fees = sum(float(f.get("fee_cost", 0)) for f in fills)
-                    return {"quantity": qty, "value": value, "fees": fees, "order_id": oid}
-            cursor = data.get("cursor", "")
-            if not cursor: break
-        return None
-
-    def apply_result(self, ledger, result):
-        it = ledger["pending"]; qty = result["quantity"]
-        if qty > it["quantity"] + .0001:
-            raise ValueError("Cantidad ejecutada inesperada")
-        if qty > 0 and it["action"] == "buy":
-            ledger["positions"].append({
-                "id": it["client_id"], "created_at": it["created_at"], "ticker": it["ticker"],
-                "mode": it["mode"], "side": it["direction"], "level": it["level"],
-                "contracts": qty, "remaining": qty,
-                "entry_cents": result["value"] / qty * 100,
-                "amount": result["value"] + result["fees"], "proceeds": 0.0,
-                "take_profit_pct": it["cfg"]["profit_pct"],
-                "take_profit_cents": profit_target_cents(result["value"]/qty*100, it["cfg"]["profit_pct"]),
-                "stop_loss_pct": it["cfg"]["stop_pct"], "cfg": it["cfg"],
-                "status": "ABIERTA", "pnl": None, "order_id": result["order_id"],
-                "note": it.get("note", "")
-            })
-        elif qty > 0:
-            p = next(p for p in ledger["positions"] if p["id"] == it["position_id"])
-            p["remaining"] = max(0, p["remaining"] - qty)
-            p["proceeds"] += result["value"] - result["fees"]
-            if p["remaining"] < .0001:
-                p["status"] = it["reason"]; p["closed_at"] = datetime.now(timezone.utc).isoformat()
-                p["pnl"] = round(p["proceeds"] - p["amount"], 6)
-        ledger["pending"] = None
-        self.message = (f'{it["action"].upper()} {it["direction"]}: {qty:g} contratos ejecutados'
-                        if qty else "Orden sin ejecución: liquidez insuficiente; reevalúa en próximo ciclo")
-
-    def submit(self, scope, ledger, intent):
-        ledger["pending"] = intent
-        self.write_ledger(scope, ledger)  # durable antes de contactar el exchange
-        if intent["mode"] == "SIMULACIÓN":
-            result = {"quantity": intent["quantity"], "value": intent["quantity"] * intent["price"],
-                      "fees": 0, "order_id": "SIM-" + intent["client_id"]}
-        else:
-            body = v2_order_payload(intent["ticker"], intent["direction"], intent["action"],
-                                    intent["quantity"], intent["price"], intent["client_id"])
-            try:
-                d = self.api("POST", "/trade-api/v2/portfolio/events/orders", body)
-            except requests.HTTPError as e:
-                # 409/5xx son ambiguos: conservar el intento para reconciliar.
-                if e.response is not None and e.response.status_code in (400, 401, 403, 404, 422, 429):
-                    ledger["pending"] = None; self.write_ledger(scope, ledger)
-                raise
-            qty = float(d["fill_count"])
-            if qty > 0 and ("average_fill_price" not in d or "average_fee_paid" not in d):
-                result = self.reconcile(intent)
-                if result is None: return
-            else:
-                yes_price = float(d.get("average_fill_price", 0))
-                cost = yes_price if intent["direction"] == "UP" else 1 - yes_price
-                result = {"quantity": qty, "value": qty * cost,
-                          "fees": qty * float(d.get("average_fee_paid", 0)), "order_id": d["order_id"]}
-        self.apply_result(ledger, result)
-        self.write_ledger(scope, ledger)
-
-    def manage(self, scope, ledger, mode):
-        for p in ledger["positions"]:
-            if p["remaining"] <= .0001: continue
-            m = self.market(p["ticker"])
-            # Kalshi reports completed settlements as 'finalized'. Accept the
-            # older 'settled' spelling too, but never infer a result from time,
-            # a zero quote, or a merely closed/determined market.
-            market_status = str(m.get("status") or "").lower()
-            result = str(m.get("result") or "").lower()
-            if market_status in ("finalized", "settled") and result in ("yes", "no"):
-                winner = "UP" if result == "yes" else "DOWN"
-                p["proceeds"] += p["remaining"] if p["side"] == winner else 0
-                p["remaining"] = 0; p["status"] = "LIQUIDADA"
-                p["closed_at"] = datetime.now(timezone.utc).isoformat()
-                p["pnl"] = round(p["proceeds"] - p["amount"], 6)
-                p["settlement_result"] = result
-                p["settlement_ts"] = m.get("settlement_ts")
-                p["settlement_market_status"] = market_status
-                self.write_ledger(scope, ledger)
-                continue
-            if market_status != "active":
-                p["status"] = "ESPERANDO LIQUIDACIÓN"
-                p["market_status"] = market_status
-                self.write_ledger(scope, ledger)
-                continue
-            p["status"] = "ABIERTA"
-            bid = numeric_kalshi_price(m.get("yes_bid_dollars" if p["side"] == "UP" else "no_bid_dollars"),
-                                      m.get("yes_bid" if p["side"] == "UP" else "no_bid"))
-            if bid is None or bid <= 0: continue
-            change = (bid * 100 / p["entry_cents"] - 1) * 100
-            cfg = p["cfg"]
-            reason = "TAKE PROFIT" if cfg["profit_on"] and change >= cfg["profit_pct"] else (
-                     "STOP LOSS" if cfg["stop_on"] and change <= -cfg["stop_pct"] else None)
-            if reason:
-                if mode == "REAL":
-                    actual = self.position(p["ticker"])
-                    expected = p["remaining"] if p["side"] == "UP" else -p["remaining"]
-                    if abs(actual - expected) > .0001:
-                        raise ValueError("Posición cambió fuera del bot; revisar Kalshi antes de vender")
-                intent = {"client_id": str(uuid.uuid4()), "ticker": p["ticker"], "direction": p["side"],
-                          "action": "sell", "quantity": p["remaining"], "price": bid,
-                          "position_id": p["id"], "mode": mode, "reason": reason,
-                          "created_at": datetime.now(timezone.utc).isoformat()}
-                self.submit(scope, ledger, intent)
-                if ledger["pending"]: return
-
-    def tick(self, mode, cfg):
-        # Bloqueo de seguridad de esta integración: no ejecutar órdenes reales
-        # antes de validar señales y comportamiento del sistema.
-        if mode == "REAL" and not ALLOW_REAL_TRADING:
-            self.message = "Modo REAL bloqueado para pruebas de integración"
-            self.status_by_mode[mode] = {
-                "message": self.message,
-                "heartbeat": datetime.now(timezone.utc).isoformat(),
-            }
-            return
-        # A running thread keeps its original run() code after an in-place
-        # class upgrade. Publish here as well so even that legacy loop supplies
-        # a fresh, mode-specific status on every completed evaluation.
-        try:
-            return self._tick(mode, cfg)
-        except Exception as error:
-            if mode in self.entry_gates:
-                self.entry_gates[mode].reset_candidate()
-            self.message = "No se ejecutó otra orden: " + str(error)[:240]
-            raise
-        finally:
-            self.status_by_mode[mode] = {
-                "message": self.message,
-                "heartbeat": datetime.now(timezone.utc).isoformat(),
-            }
-
-    def _tick(self, mode, cfg):
-        scope = self.scope(mode); ledger = self.read_ledger(scope)
-        if ledger["pending"]:
-            if mode == "REAL":
-                result = self.reconcile(ledger["pending"])
-                if result is None:
-                    self.message = "Orden pendiente de reconciliar con Kalshi; no se duplica"
-                    return
-                self.apply_result(ledger, result); self.write_ledger(scope, ledger)
-            else:
-                raise ValueError("Intento de simulación interrumpido; revisar el registro")
-        self.manage(scope, ledger, mode)
-        if ledger["pending"]: return
-        if cfg["mode"] != mode or not cfg["enabled"]:
-            self.message = "Compras apagadas; continúa gestionando posiciones existentes"
-            return
-        if any(p["remaining"] > .0001 for p in ledger["positions"]):
-            awaiting = next((p for p in ledger["positions"]
-                             if p["remaining"] > .0001 and
-                             p.get("status") == "ESPERANDO LIQUIDACIÓN"), None)
-            self.message = (f'Esperando liquidación oficial: {awaiting["ticker"]} '
-                            f'· estado {awaiting.get("market_status", "desconocido")}'
-                            if awaiting else
-                            "Gestionando compra abierta: profit / stop / liquidación")
-            return
-        losses = self.loss_streak(ledger)
-        levels = cfg["levels"] if cfg["martingale_on"] else 1
-        # Reinicia la progresión tras agotar los niveles, sin detener nuevas señales.
-        m = _background_get_market()
-        if not m or m.get("status") != "active": self.message = "Sin mercado activo"; return
-        secs = get_seconds_remaining(m); target = get_target_from_market(m)
-        if secs is None or secs <= 0 or target is None:
-            self.message = "Sin reloj o target válidos"; return
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            candles_job = pool.submit(_background_get_btc_data)
-            price_job = pool.submit(_background_get_live_price, m, True)
-            df = candles_job.result()
-            live_price, live_source = price_job.result()
-        gate = self.entry_gates.setdefault(mode, RecentEntryConfirmation())
-        gate.observe(m["ticker"], live_source, float(live_price), time.monotonic())
-        sig = build_signal(df, target, secs, live_price)
-        sig["recent_moves"] = gate.movement(sig.get("atr", 0), time.monotonic())
-        # Cerebro original v4.6.1: señal y confirmación temporal intactas.
-        confirm_states = self.__dict__.setdefault("brain_confirm_states", {})
-        confirm_key = (mode, m["ticker"])
-        if confirm_key not in confirm_states:
-            confirm_states[confirm_key] = new_round_state(m["ticker"], secs)
-        confirm_state = confirm_states[confirm_key]
-        confirm_round_candidate(confirm_state, sig.get("candidate"), m, secs, datetime.now(timezone.utc))
-        side = confirm_state.get("active_direction")
-        confidence = sig.get("up_probability" if side == "UP" else "down_probability", 50)
-        if side not in ("UP", "DOWN"):
-            gate.reset_candidate()
-            pre_reason = sig.get("quality") if side not in ("UP", "DOWN") else None
-            self.message = pre_reason or f'Lectura {side or "NEUTRAL"} · puntuación {confidence}: mínimo {cfg["min_conf"]}'; return
-        positions = ledger["positions"]
-        if cfg["one_per_round"] and any(p["ticker"] == m["ticker"] for p in positions):
-            self.message = "Esta ronda ya tuvo una compra"; return
-        today = datetime.now(ZoneInfo("America/New_York")).date()
-        count = sum(datetime.fromisoformat(p["created_at"]).astimezone(ZoneInfo("America/New_York")).date() == today
-                    for p in positions)
-        level = (losses % levels) if cfg["martingale_on"] else 0
-        rule = cfg["level_directions"][level]
-        if rule == "No operar": self.message = "Nivel configurado: No operar"; return
-        if rule == "Solo UP": side = "UP"
-        elif rule == "Solo DOWN": side = "DOWN"
-        elif rule == "Contraria a la señal": side = "DOWN" if side == "UP" else "UP"
-        confirmation_note = sig.get("quality", "Entrada por motor principal")
-        # Refresh only the selected contract: sizing and price gate share this ask.
-        try:
-            fresh_market = self.market(m["ticker"])
-        except Exception:
-            self.message = "No se pudo actualizar el precio de Kalshi; no se envió orden"
-            return
-        fresh_seconds = get_seconds_remaining(fresh_market)
-        if (fresh_market.get("ticker") != m["ticker"] or
-                fresh_market.get("status") != "active" or
-                fresh_seconds is None or fresh_seconds <= 0):
-            self.message = "La ronda no está activa; no se envió orden"
-            return
-        m = fresh_market
-        price = get_yes_ask(m) if side == "UP" else get_no_ask(m)
-        if (price is None or not math.isfinite(price) or not 0 < price <= 1 or
-                not cfg["min_price"] <= price * 100 <= cfg["max_price"]):
-            self.message = f'{side}: precio fuera de {cfg["min_price"]}–{cfg["max_price"]}¢'; return
-        # Importes por nivel y límite de precio se calculan por separado.
-        fee_buffer = .07 if mode == "REAL" else 0
-        level_amount = None
-        if cfg.get("quantity_mode", "CONTRATOS") == "DÓLARES":
-            amounts = dollar_level_plan(cfg.get("initial_amount", 0.50), levels,
-                                        cfg["multiplier"] if cfg["martingale_on"] else 1.0)
-            level_amount = amounts[level]
-            qty = dollar_contract_quantity(level_amount, price)
-            if qty < .01:
-                self.message = (f"Nivel {level+1}: importe ${level_amount:.2f} insuficiente "
-                                f"para 0.01 contratos a {price*100:.1f}¢. No se envió orden.")
-                return
-            if m.get("fractional_trading_enabled") is False and abs(qty - round(qty)) > 1e-9:
-                self.message = (f"Nivel {level+1}: este mercado no admite contratos fraccionados; "
-                                "no se aumenta el importe configurado. No se envió orden.")
-                return
-        else:
-            qty = max(1, math.ceil((cfg["multiplier"] if cfg["martingale_on"] else 1.0) ** level))
-        if mode == "REAL":
-            bal, _ = kalshi_get_balance(self.key_id, self.pem)
-            self.balance = bal
-            if abs(self.position(m["ticker"])) > .0001:
-                self.message = "Ya hay posición externa en esta ronda; revisar Kalshi"; return
-            if qty * (price + fee_buffer) > bal + 1e-9:
-                self.message = (f"Saldo real insuficiente: nivel {level+1}, "
-                                f"{qty} contratos requieren hasta ${qty*(price+fee_buffer):.2f}; "
-                                f"disponible ${bal:.2f}. No se envió orden.")
-                return
-        intent = {"client_id": str(uuid.uuid4()), "created_at": datetime.now(timezone.utc).isoformat(),
-                  "ticker": m["ticker"], "direction": side, "action": "buy", "quantity": qty,
-                  "price": price, "level": level + 1, "mode": mode, "cfg": cfg,
-                  "note": f'{cfg.get("entry_source","PRESEÑAL")} puntuación {confidence} · {confirmation_note}' + (f" · Nivel ${level_amount:.2f} (comisiones aparte)" if level_amount is not None else "")}
-        self.submit(scope, ledger, intent)
-
-    def run(self):
-        # Exclusión entre procesos sobre la misma carpeta / SQLite.
-        with open(AUTO_DB + ".worker.lock", "a") as handle:
-            try: fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                self.message = "Otro proceso está gestionando este bot"
-                self.status_by_mode = {m: {"message": self.message, "heartbeat": None}
-                                       for m in ("REAL", "SIMULACIÓN")}
-                return
-            while True:
-                with self.lock:
-                    try:
-                        cfg = load_auto_config()
-                        modes = ["SIMULACIÓN"]
-                        if self.key_id and self.pem: modes.append("REAL")
-                        for mode in modes:
-                            self.message = "Procesando ciclo"
-                            try:
-                                self.tick(mode, cfg)
-                            except Exception as e:
-                                self.message = "No se ejecutó otra orden: " + str(e)[:240]
-                            # Publica solo ciclos terminados; SIMULACIÓN no altera el estado de REAL.
-                            self.status_by_mode[mode] = {
-                                "message": self.message,
-                                "heartbeat": datetime.now(timezone.utc).isoformat(),
-                            }
-                        if cfg["mode"] == "REAL" and cfg["enabled"] and not self.key_id:
-                            self.message = "REAL activado: falta conectar Kalshi"
-                            self.status_by_mode["REAL"] = {"message": self.message,
-                                "heartbeat": datetime.now(timezone.utc).isoformat()}
-                    except Exception as e:
-                        self.message = "No se ejecutó otra orden: " + str(e)[:240]
-                        self.status_by_mode = {m: {
-                            "message": self.message, "heartbeat": datetime.now(timezone.utc).isoformat()}
-                            for m in ("REAL", "SIMULACIÓN")}
-                    self.heartbeat = datetime.now(timezone.utc).isoformat()
-                time.sleep(2)
-
-    def snapshot(self):
-        # Lectura sin bloquear la UI durante solicitudes de red.
-        mode = load_auto_config()["mode"]
-        status = self.status_by_mode.get(mode, {
-            "message": "Conecta Kalshi para operar en REAL" if mode == "REAL" and not self.key_id
-                       else "Preparando primer ciclo", "heartbeat": None})
-        return {"message": status["message"], "heartbeat": status["heartbeat"], "connected": bool(self.key_id),
-                "balance": self.balance}
-
-@st.cache_resource
-def execution_worker():
-    return ExecutionWorker()
-
-def current_execution_worker():
-    # Streamlit may retain an instance of the previous class after a source edit.
-    # Upgrade that same instance under its existing lock. Do not create a second
-    # trading thread, clear credentials, or discard the ledger.
-    worker = execution_worker()
-    with worker.lock:
-        if worker.__class__ is not ExecutionWorker:
-            worker.__class__ = ExecutionWorker
-        if not hasattr(worker, "status_by_mode"):
-            worker.status_by_mode = {}
-        if not hasattr(worker, "entry_gates"):
-            worker.entry_gates = {}
-    return worker
-
-def load_execution_orders(limit=100):
-    worker = current_execution_worker()
-    mode = load_auto_config()["mode"]
-    ledger = worker.read_ledger(worker.scope(mode))
-    rows = []
-    for p in reversed(ledger["positions"][-limit:]):
-        rows.append({k: v for k, v in p.items() if k != "cfg"})
-    if ledger["pending"]:
-        it = ledger["pending"]
-        rows.insert(0, {"created_at": it["created_at"], "ticker": it["ticker"],
-                        "mode": it["mode"], "side": it["direction"],
-                        "status": "RECONCILIANDO", "order_id": it["client_id"]})
-    return pd.DataFrame(rows)
-
-@st.fragment(run_every="2s")
-def render_execution_status():
-    status = current_execution_worker().snapshot()
-    cfg = load_auto_config()
-    st.markdown(f'**Auto Trading · {cfg["mode"]} · {"ENCENDIDO" if cfg["enabled"] else "APAGADO"}**')
-    orders = load_execution_orders(20)
-    if not orders.empty:
-        latest = orders.iloc[0]
-        side = str(latest.get("side", ""))
-        trade_status = str(latest.get("status", ""))
-        st.caption(f"Última operación: {side} · {trade_status}")
-    else:
-        st.caption("Todavía no hay operaciones registradas en este modo.")
-    st.caption("Ahora: " + str(status["message"]))
-    if status["heartbeat"]:
-        st.caption("Última revisión: " + status["heartbeat"])
-    with st.expander("Ver operaciones y detalles", expanded=False):
-        st.caption("Entrada directa por preseñal. Los porcentajes son puntuaciones heurísticas, sin calibración estadística.")
-        if not orders.empty:
-            cols = ["created_at", "ticker", "side", "level", "entry_cents", "contracts", "remaining", "status", "pnl", "order_id"]
-            st.dataframe(orders[[c for c in cols if c in orders]], hide_index=True, use_container_width=True)
-
-def _select_value(label, options, current, key, help_text=None, disabled=False):
-    if current not in options: current = options[0]
-    return st.selectbox(label, options, index=options.index(current), key=key,
-                        help=help_text, disabled=disabled)
-
-def render_auto_trading_page():
-    cfg = load_auto_config()
-    st.markdown("""
-    <style>
-    .block-container{max-width:760px!important;padding:18px 22px 120px!important}
-    .auto-head{display:flex;justify-content:space-between;align-items:center;margin:4px 0 24px}
-    .auto-head h2{font-size:27px;margin:0;font-weight:900}.auto-x{font-size:38px;color:#eef2f3;text-decoration:none;line-height:1}
-    .auto-section{font-size:20px;font-weight:950;letter-spacing:1.5px;margin:28px 0 10px;border-top:1px solid #20282a;padding-top:24px}
-    .auto-note{color:#87938f;font-size:13px;font-weight:650;margin:-5px 0 14px}
-    .level-card{border:1px solid #20282a;border-radius:13px;padding:13px 16px;margin:8px 0;background:#050909}
-    .level-title{font-weight:900;font-size:16px}.level-sub{color:#85918d;font-size:13px;font-weight:700;margin-top:3px}
-    .balance-box{border:1px solid #0b693f;background:#06160f;border-radius:10px;padding:14px 16px;color:#89948f;font-weight:750;margin:14px 0}.balance-box b{color:#31d184}
-    div[data-testid="stSelectbox"] label,div[data-testid="stNumberInput"] label{font-weight:850!important;color:#eef2f3!important}
-    div[data-baseweb="select"]>div{background:#080c0c!important;border-color:#303838!important;min-height:58px;border-radius:10px!important}
-    div[data-testid="stNumberInput"] input{background:#080c0c!important;color:#eef2f3!important;min-height:54px}
-    div[data-testid="stToggle"] label{font-weight:800!important}
-    .stButton>button{min-height:52px;border-radius:26px;font-weight:900}
-    .st-key-reset_martingale_cycle button{background:#087f4f!important;color:#ffffff!important;border:2px solid #31d184!important}
-    .st-key-reset_martingale_cycle button p{color:#ffffff!important;font-weight:900!important}
-    </style>
-    <div class="auto-head"><h2>Ajustes del bot</h2><a class="auto-x" href="?page=signal" target="_self">×</a></div>
-    """, unsafe_allow_html=True)
-
-    # Credentials in session are temporary; Streamlit Secrets persist across restarts.
-    for k,v in [("kalshi_key_id",""),("kalshi_private_key",""),("kalshi_balance",None)]:
-        if k not in st.session_state: st.session_state[k]=v
-
-    st.markdown('<div class="auto-section" style="border-top:0;padding-top:0">CONEXIÓN KALSHI</div>', unsafe_allow_html=True)
-    with st.expander("Conectar / cambiar credenciales", expanded=False):
-        stored_id, stored_pem = read_kalshi_secrets()
-        key_id = st.text_input("API Key ID", value=stored_id or st.session_state.kalshi_key_id)
-        private_key = st.text_area("Private Key PEM", value="", help="Pega tu clave privada aquí. Este campo no oculta el texto; evita mostrar la pantalla a otras personas.")
-        if stored_id and stored_pem:
-            st.success("Credenciales guardadas disponibles. Se intentará reconectar automáticamente.")
-        else:
-            st.info("Al conectar, la clave se guarda cifrada en el servidor. Streamlit Cloud puede borrar el archivo al reiniciar o redesplegar.")
-        a,b=st.columns(2)
-        if a.button("CONECTAR", use_container_width=True):
-            kid=key_id.strip(); pk=_normalize_private_key(private_key) or (stored_pem if kid == stored_id else "")
-            if not kid or not pk: st.error("Falta API Key ID o Private Key.")
-            else:
-                try:
-                    balance,_=kalshi_get_balance(kid,pk)
-                    save_local_kalshi_credentials(kid, pk)
-                    current_execution_worker().connect(kid, pk)
-                    st.session_state.kalshi_key_id=kid; st.session_state.kalshi_private_key=pk; st.session_state.kalshi_balance=balance
-                    st.success(f"Conectado · ${balance:,.2f} disponibles")
-                except Exception as e: st.error("No se pudo conectar: "+str(e))
-        if b.button("DESCONECTAR", use_container_width=True):
-            current_execution_worker().disconnect()
-            st.session_state.kalshi_key_id=""; st.session_state.kalshi_private_key=""; st.session_state.kalshi_balance=None
-            if stored_id and stored_pem:
-                st.warning("Las credenciales siguen guardadas localmente. Usa BORRAR CLAVE GUARDADA para eliminarlas.")
-            else:
-                st.rerun()
-
-    if st.button("BORRAR CLAVE GUARDADA"):
-        delete_local_kalshi_credentials()
-        current_execution_worker().disconnect()
-        st.session_state.kalshi_key_id = ""
-        st.session_state.kalshi_private_key = ""
-        st.success("Clave local eliminada.")
-    st.markdown('<div class="auto-section">OPERACIÓN</div>', unsafe_allow_html=True)
-    mode=_select_value("Modo",["SIMULACIÓN","REAL"],cfg["mode"],"a_mode")
-    entry_source = "SEÑAL PRINCIPAL"
-    st.caption("Entradas conectadas al motor principal · lectura temprana del impulso actual.")
-    st.caption("La preseñal es informativa. Las puntuaciones no son probabilidades comprobadas.")
-    enabled=st.toggle("Auto Trading", value=bool(cfg["enabled"]), key="a_enabled")
-    st.caption("Sin límite artificial de capital ni reserva para niveles futuros. Las órdenes usan el saldo real de Kalshi.")
-    min_price=_select_value("Precio mínimo de compra",list(range(5,96,5)),int(round(cfg["min_price"]/5)*5),"a_minp")
-    max_price=_select_value("Precio máximo de compra",list(range(5,100,5)),int(round(cfg["max_price"]/5)*5),"a_maxp")
-    min_conf=cfg["min_conf"]  # No aplica filtro adicional a una señal ya confirmada.
-    st.caption("Compra con señal confirmada y precio dentro del rango configurado, si hay saldo suficiente.")
-    st.caption("Sigue operando al cerrar esta pantalla mientras el servidor esté encendido. Si Streamlit suspende o reinicia el servidor, necesita reconectar; las credenciales locales pueden perderse.")
-
-    st.markdown('<div class="auto-section">FINALIZACIÓN</div>', unsafe_allow_html=True)
-    profit_on=st.toggle("Tomar profit automáticamente",value=bool(cfg["profit_on"]),key="a_profiton")
-    profit_opts=list(range(5,101,5))
-    profit_pct=_select_value("Tomar profit",profit_opts,int(round(cfg["profit_pct"]/5)*5),"a_profit",disabled=not profit_on)
-    stop_on=st.toggle("Stop Loss",value=bool(cfg["stop_on"]),key="a_stopon")
-    stop_pct=_select_value("Stop Loss",list(range(5,101,5)),int(round(cfg["stop_pct"]/5)*5),"a_stop",disabled=not stop_on)
-
-    st.markdown('<div class="auto-section">MARTINGALA</div>', unsafe_allow_html=True)
-    quantity_mode = "DÓLARES"  # Los importes se configuran siempre en dólares.
-    initial_amount = st.number_input("Importe inicial ($)", min_value=0.01, max_value=1000000.0,
-                                    value=max(0.01, min(1000000.0, float(cfg.get("initial_amount", 0.50)))),
-                                    step=0.01, format="%.2f", key="a_initial_amount",
-                                    disabled=quantity_mode != "DÓLARES")
-    st.caption("Cada nivel fija el importe en dólares. Se calcula la cantidad fraccionada en pasos de 0.01 contratos sin superar el importe; el redondeo puede dejar menos de $0.01 sin usar. Comisiones aparte. El rango de precio se comprueba por separado. Los cambios solo se aplican al guardar.")
-    martingale_on=st.toggle("Martingala",value=bool(cfg["martingale_on"]),key="a_marton")
-    levels=_select_value("Máximo de niveles",list(range(1,13)),int(cfg["levels"]),"a_levels",disabled=not martingale_on)
-    multiplier=_select_value("Multiplicador",[1.25,1.5,1.75,2.0,2.25,2.5,3.0],float(cfg["multiplier"]) if float(cfg["multiplier"]) in [1.25,1.5,1.75,2.0,2.25,2.5,3.0] else 2.0,"a_mult",disabled=not martingale_on)
-    st.caption("La progresión vuelve al nivel 1 al completar los niveles; no reserva dinero futuro.")
-    if st.button("REINICIAR CICLO", key="reset_martingale_cycle", use_container_width=True):
-        try:
-            current_execution_worker().reset_cycle(cfg["mode"])
-            st.success("Ciclo reiniciado al nivel 1. Las compras siguen sujetas a tus filtros y al saldo real.")
-        except ValueError as error:
-            st.error(str(error))
-    plan = (dollar_level_plan(initial_amount, int(levels) if martingale_on else 1, float(multiplier) if martingale_on else 1.0)
-            if quantity_mode == "DÓLARES" else
-            [max(1, math.ceil((float(multiplier) if martingale_on else 1.0)**i)) for i in range(int(levels) if martingale_on else 1)])
-    # El trabajador de ejecución es la fuente de verdad de la conexión.
-    # La sesión de Streamlit puede reiniciarse aunque Kalshi siga autenticado.
-    active_worker = current_execution_worker()
-    if active_worker.key_id and active_worker.pem:
-        bal = active_worker.balance
-        if bal is None:
-            try:
-                bal, _ = kalshi_get_balance(active_worker.key_id, active_worker.pem)
-                active_worker.balance = bal
-            except Exception:
-                bal = None
-        st.session_state.kalshi_balance = bal
-        bal_text = f"${bal:,.2f}" if bal is not None else "saldo no disponible"
-    else:
-        bal_text = "sin conectar"
-    st.markdown(f'<div class="balance-box">Saldo disponible: <b>{bal_text}</b></div>',unsafe_allow_html=True)
-
-    st.markdown('<div class="auto-section">ELIGE LA DIRECCIÓN</div><div class="auto-note">Configura cada nivel por separado.</div>',unsafe_allow_html=True)
-    directions=[]
-    visible_levels=int(levels) if martingale_on else 1
-    dir_options=["Seguir señal","Solo UP","Solo DOWN","Contraria a la señal","No operar"]
-    for i in range(visible_levels):
-        amount=plan[i] if i<len(plan) else 1
-        title="Entrada inicial" if i==0 else f"Martingala {i}"
-        amount_text = f"${amount:.2f}" if quantity_mode == "DÓLARES" else f"{amount} contrato(s)"
-        st.markdown(f'<div class="level-card"><div class="level-title">{title}</div><div class="level-sub">Nivel {i+1} · {amount_text}</div></div>',unsafe_allow_html=True)
-        cur=cfg["level_directions"][i]
-        directions.append(_select_value(f"Dirección nivel {i+1}",dir_options,cur,f"a_dir_{i}"))
-    directions += cfg["level_directions"][visible_levels:12]
-
-    st.markdown('<div class="auto-section">SEGURIDAD DE ÓRDENES</div>',unsafe_allow_html=True)
-    st.caption("Una compra por ronda, sin duplicados ni órdenes con saldo insuficiente.")
-    one_per_round=True  # Previene compras duplicadas de la misma ronda.
-    max_trades_day=cfg["max_trades_day"]  # Sin bloqueo diario adicional.
-    new_cfg={"enabled":bool(enabled),"mode":mode,"min_price":int(min_price),"max_price":int(max_price),"min_conf":int(min_conf),"profit_on":bool(profit_on),"profit_pct":int(profit_pct),"stop_on":bool(stop_on),"stop_pct":int(stop_pct),"martingale_on":bool(martingale_on),"levels":int(levels),"multiplier":float(multiplier),"one_per_round":bool(one_per_round),"max_trades_day":int(max_trades_day),"level_directions":directions[:12]}
-
-    st.markdown('<div class="auto-section">GUARDAR</div>',unsafe_allow_html=True)
-    new_cfg["quantity_mode"] = quantity_mode
-    new_cfg["initial_amount"] = float(initial_amount)
-    new_cfg["entry_source"] = entry_source
-    c1,c2,c3=st.columns([1.2,1,1.25])
-    if c1.button("RESTAURAR",use_container_width=True):
-        save_auto_config(_auto_default_config()); st.rerun()
-    if c2.button("CANCELAR",use_container_width=True):
-        st.query_params["page"]="signal"; st.rerun()
-    if c3.button("GUARDAR CAMBIOS",type="primary",use_container_width=True):
-        if new_cfg["min_price"]>new_cfg["max_price"]: st.error("El precio mínimo no puede ser mayor que el máximo.")
-        else:
-            save_auto_config(new_cfg); st.session_state.auto_config=new_cfg
-            st.success("Configuración guardada. Auto Trading conservará estos ajustes al salir de esta pantalla.")
-
-    st.markdown('<div class="auto-section">COMPRAS / ÓRDENES</div>',unsafe_allow_html=True)
-    orders=load_execution_orders(100)
-    if orders.empty: st.caption("Todavía no hay operaciones registradas.")
-    else:
-        cols=["created_at","ticker","mode","side","level","entry_cents","contracts","amount","take_profit_pct","take_profit_cents","status","pnl"]
-        st.dataframe(orders[[c for c in cols if c in orders.columns]],use_container_width=True,hide_index=True)
-
-def render_history_page():
-    # SOLO COLOR/CONTRASTE DEL HISTORIAL. No cambia datos ni lógica.
-    st.markdown(
-        """
-        <style>
-        /* Texto de las cuatro métricas: visible sobre fondo oscuro */
-        div[data-testid="stMetricLabel"] { color:#d7e2ee !important; opacity:1 !important; }
-        div[data-testid="stMetricValue"] { color:#f4f7fb !important; opacity:1 !important; }
-        /* Rondas */
-        div[data-testid="stHorizontalBlock"] > div:nth-child(1) div[data-testid="stMetricValue"] { color:#54c6f5 !important; }
-        /* Ganadas */
-        div[data-testid="stHorizontalBlock"] > div:nth-child(2) div[data-testid="stMetricLabel"],
-        div[data-testid="stHorizontalBlock"] > div:nth-child(2) div[data-testid="stMetricValue"] { color:#34e982 !important; }
-        /* Perdidas */
-        div[data-testid="stHorizontalBlock"] > div:nth-child(3) div[data-testid="stMetricLabel"],
-        div[data-testid="stHorizontalBlock"] > div:nth-child(3) div[data-testid="stMetricValue"] { color:#ff4e5f !important; }
-        /* Acierto */
-        div[data-testid="stHorizontalBlock"] > div:nth-child(4) div[data-testid="stMetricLabel"],
-        div[data-testid="stHorizontalBlock"] > div:nth-child(4) div[data-testid="stMetricValue"] { color:#f7bd4d !important; }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        '<a href="?page=signal" target="_self" style="text-decoration:none;color:#b9c9db;font-size:14px;font-weight:800">← Señal</a>',
-        unsafe_allow_html=True,
-    )
-    st.markdown("### ⚙ Ajustes")
-    st.caption("Historial y rendimiento · registro automático por ronda")
-    df = load_history(250)
-    stats = history_stats(df)
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Rondas", stats["total"])
-    c2.metric("Ganadas", stats["wins"])
-    c3.metric("Perdidas", stats["losses"])
-    c4.metric("Acierto", f'{stats["win_rate"]:.1f}%')
-    st.caption(f'NO TRADE: {stats["no_trade"]} · El % de acierto usa solo GANADA + PERDIDA.')
-
-@st.fragment(run_every="2s")
-def live_dashboard():
-    btc_error = ""
-    live_price_error = ""
-    kalshi_error = ""
-    kalshi_live_error = ""
-
-    try:
-        btc_df = add_indicators(get_btc_data())
-        btc_ok = True
-    except Exception as error:
-        btc_ok = False
-        btc_error = str(error)
-        btc_df = None
-
-    try:
-        market = get_kalshi_btc_market()
-        kalshi_ok = market is not None
-    except Exception as error:
-        kalshi_ok = False
-        kalshi_error = str(error)
-        market = None
-
-    try:
-        coinbase_live_price = get_btc_live_price()
-        coinbase_live_ok = True
-    except Exception as error:
-        coinbase_live_ok = False
-        live_price_error = str(error)
-        coinbase_live_price = (
-            float(btc_df.iloc[-1]["close"]) if btc_ok else None
-        )
-
-    kalshi_live_price = None
-    kalshi_live_ok = False
-
-    if market:
-        try:
-            kalshi_live_price = get_kalshi_live_btc(market)
-            kalshi_live_ok = True
-        except Exception as error:
-            kalshi_live_error = str(error)
-
-    if kalshi_live_price is not None:
-        live_btc_price = kalshi_live_price
-        source = "KALSHI LIVE"
-    else:
-        live_btc_price = coinbase_live_price
-        source = (
-            "COINBASE"
-            if coinbase_live_ok or live_btc_price is not None
-            else "SIN DATOS"
-        )
-
-    if market:
-        ticker = market.get("ticker", "--")
-        target = get_target_from_market(market)
-        seconds_left = get_seconds_remaining(market)
-    else:
-        ticker = "--"
-        target = None
-        seconds_left = None
-
-    if btc_ok:
-        sig = build_signal(
-            btc_df, target, seconds_left, live_btc_price
-        )
-    else:
-        sig = {
-            "price": live_btc_price if live_btc_price is not None else 0,
-            "candle_price": 0,
-            "rsi": 50,
-            "mom3": 0,
-            "mom5": 0,
-            "mom15": 0,
-            "vol_ratio": 0,
-            "ema": "N/A",
-            "technical_score": 0,
-            "target_score": 0,
-            "final_score": 0,
-            "distance": None,
-            "distance_pct": None,
-            "momentum": "NEUTRAL",
-            "up_probability": 50,
-            "down_probability": 50,
-        }
-
-    # Cinta live de segundos para el Lector de Cierre.
-    update_micro_tape(ticker, live_btc_price)
-    micro = micro_reading()
-    ui_gate = st.session_state.setdefault("recent_presignal_gate_v10", RecentEntryConfirmation())
-    if live_btc_price is not None:
-        ui_gate.observe(ticker, source, float(live_btc_price), time.monotonic())
-    sig["recent_moves"] = ui_gate.movement(sig.get("atr", 0), time.monotonic())
-    round_signal = process_round_signal(ticker, sig, market, seconds_left)
-    reader = closing_reader(sig, round_signal, seconds_left, micro)
-
-    # Ballenas: capa visual independiente; NO modifica señales ni probabilidades v4.6.1.
-    try:
-        whale = get_coinbase_whale_flow()
-    except Exception:
-        whale = None
-
-    state = round_signal.get("round_state")
-    active = (
-        state.get("active_direction")
-        if state
-        else None
-    )
-
-    # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
-    whale_html = render_whale_panel(whale, active)
-    early_reversal_html = render_early_reversal_panel(
-        detect_early_reversal(ticker, micro, whale, live_btc_price)
-    )
-
-    if active == "UP":
-        accent = "#34e982"
-        glow = "rgba(52,233,130,.46)"
-        soft = "rgba(52,233,130,.10)"
-        hero = "↑ UP"
-        confidence = sig["up_probability"]
-    elif active == "DOWN":
-        accent = "#ff4e5f"
-        glow = "rgba(255,78,95,.45)"
-        soft = "rgba(255,78,95,.10)"
-        hero = "↓ DOWN"
-        confidence = sig["down_probability"]
-    else:
-        accent = "#38bdf8"
-        glow = "rgba(56,189,248,.30)"
-        soft = "rgba(56,189,248,.09)"
-        hero = None
-        confidence = max(
-            sig["up_probability"], sig["down_probability"]
-        )
-
-    market_live = kalshi_ok and live_btc_price is not None
-    quote_direction = active or (state.get("first_direction") if state else None)
-    kalshi_price_text, kalshi_price_note = kalshi_quote_display(market, quote_direction)
-
-    distance = sig["distance"]
-    distance_pct = sig.get("distance_pct")
-    up = int(sig["up_probability"])
-    down = int(sig["down_probability"])
-    target_text = f"${target:,.0f}" if target is not None else "--"
-    countdown = format_countdown(seconds_left)
-
-    if distance is None:
-        distance_text, distance_sub = "--", "SIN TARGET"
-        distance_color = "#94a3b8"
-    else:
-        distance_text = f"${abs(distance):,.0f}"
-        distance_sub = f"{abs(distance_pct):.2f}%"
-        distance_color = "#34e982" if distance > 0 else "#ff4e5f" if distance < 0 else "#94a3b8"
-    first_signal = (state.get("first_direction") if state else None) or "--"
-    first_time = "--"
-    if state and state.get("first_signal_time"):
-        signal_dt = state["first_signal_time"]
-        if signal_dt.tzinfo is None:
-            signal_dt = signal_dt.replace(tzinfo=timezone.utc)
-        first_time = signal_dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p")
-
-    # Etiqueta visual en español; el motor conserva internamente BULL/BEAR.
-    ema_display = "ALCISTA" if sig.get("ema") == "BULL" else "BAJISTA" if sig.get("ema") == "BEAR" else sig.get("ema", "N/A")
-
-    # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
-    # las probabilidades oficiales.
-    pre = build_presignal(sig, seconds_left)
-    pre_direction = pre["direction"]
-    pre_percent = pre["percent"]
-
-    if pre_direction == "UP":
-        pre_color, pre_bg, pre_glow = "#34e982", "rgba(18,91,57,.26)", "rgba(52,233,130,.20)"
-        pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE UP"
-    elif pre_direction == "DOWN":
-        pre_color, pre_bg, pre_glow = "#ff4e5f", "rgba(104,25,37,.28)", "rgba(255,78,95,.20)"
-        pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE DOWN"
-    else:
-        pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
-        pre_note = pre.get("reason", "Sin inclinación temprana suficiente. La preseñal sigue observando.")
-        pre_label = "NEUTRAL"
-
-    pre_badge = "INFORMATIVA · NO EJECUTA COMPRAS"
-    pre_note += " La compra exige impulso coincidente en 5/10/30 s sostenido 10 s; este porcentaje es una puntuación, no una probabilidad comprobada."
-
-    pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">PRESEÑAL · TENDENCIA EN FORMACIÓN</span><span class="prebadge">{pre_badge}</span></div>
-      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
-      <div class="prebar"><b style="width:{pre_percent}%"></b></div>
-      <div class="prenote">{pre_note}</div>
-    </section>'''
-
-    if active == "UP":
-        hero_arrow, hero_word = "", "UP"
-        btc_delta = f"{sig['mom3']:+.2f}%"
-    elif active == "DOWN":
-        hero_arrow, hero_word = "", "DOWN"
-        btc_delta = f"{sig['mom3']:+.2f}%"
-    else:
-        hero_arrow, hero_word = "•", "ESPERANDO"
-        btc_delta = f"{sig['mom3']:+.2f}%"
-
-    ema_class = "green" if sig["ema"] == "BULL" else "red"
-    rsi_class = "green" if sig["rsi"] >= 55 else "red" if sig["rsi"] <= 45 else ""
-    mom_class = "green" if sig["mom3"] > 0 else "red" if sig["mom3"] < 0 else ""
-    time_pct = max(0, min(100, int((seconds_left or 0) / 900 * 100)))
-
-    # Panel de cierre de últimos segundos — solo lectura; NO cambia la señal principal.
-    c30 = float(micro.get("change_30s", 0.0) or 0.0)
-    c10 = float(micro.get("change_10s", 0.0) or 0.0)
-    c5 = float(micro.get("change_5s", 0.0) or 0.0)
-    speed10 = c10 / 10.0
-    speed_word = "SUBIENDO" if speed10 > 0.15 else "BAJANDO" if speed10 < -0.15 else "ESTABLE"
-    speed_arrow = "↑" if speed10 > 0.15 else "↓" if speed10 < -0.15 else "→"
-    speed_color = "#34e982" if speed10 > 0.15 else "#ff4e5f" if speed10 < -0.15 else "#94a3b8"
-    market_side = "UP" if (distance or 0) > 0 else "DOWN" if (distance or 0) < 0 else "NEUTRAL"
-    abs_final_distance = abs(distance or 0)
-
-    # El cuadro inferior usa EXACTAMENTE la misma lectura adaptativa y el mismo reloj.
-    final_status = reader["headline"]
-    final_note = reader["note"]
-    final_distance = abs(distance) if distance is not None else 0.0
-    final_dist_pct = abs(distance_pct) if distance_pct is not None else 0.0
-    final_panel = f'''<div class="finalclose">
-      <div class="finalgrid">
-        <div class="finalcard motion"><div class="finaltitle">▥ &nbsp; MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motionrow">
-          <div><small>30s</small><b style="color:{'#34e982' if c30>=0 else '#ff4e5f'}">{'↑' if c30>=0 else '↓'}<br>{c30:+.0f}</b></div>
-          <div><small>10s</small><b style="color:{'#34e982' if c10>=0 else '#ff4e5f'}">{'↑' if c10>=0 else '↓'}<br>{c10:+.0f}</b></div>
-          <div><small>5s</small><b style="color:{'#34e982' if c5>=0 else '#ff4e5f'}">{'↑' if c5>=0 else '↓'}<br>{c5:+.0f}</b></div>
-        </div><div class="finalnote">Cambio de precio en los últimos segundos.</div></div>
-        <div class="finalcard distance"><div class="finaltitle">▥ &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">${final_distance:,.0f}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct:.2f}%</div></div>
-        <div class="finalcard speed"><div class="finaltitle">VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed10:+.1f}/s</div><div class="finalnote">En los últimos 10 s.</div></div>
-      </div>
-      <div class="finalanalysis">
-        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)</small><b>{final_status}</b><span>{final_note}</span></div></div>
-        <div class="probbox"><small>PROBABILIDAD</small><b>{reader['percent']}%</b></div>
-      </div>
-    </div>'''
-
-    st.markdown(
-        f"""
-<div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
-  <header class="rhead">
-    <div class="rtitle">BTC Signal</div>
-    <div class="rver">v4.6.1</div>
-    <a class="gear" href="?page=settings" target="_self" aria-label="Ajustes">⚙</a>
-    <div class="rlive"><i></i>{'Mercado en vivo' if market_live else 'Conexión parcial'}</div>
-  </header>
-
-  <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}">
-    <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
-    <div class="rconf">{'CONFIANZA ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
-  </section>
-
-  {pre_html}
-
-  <div class="rgrid">
-    <div class="rcard keycard">
-      <div class="bigicon btcicon">₿</div>
-      <div><div class="rlabel">BTC</div><div class="rvalue">${sig["price"]:,.0f}</div>
-      <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
-    </div>
-    <div class="rcard keycard">
-      <div class="bigicon targeticon">◎</div>
-      <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
-    </div>
-    <div class="rcard keycard">
-      <div class="bars" style="--accent:{distance_color}"><b></b><b></b><b></b></div>
-      <div><div class="rlabel">DISTANCIA AL TARGET</div><div class="rvalue" style="color:{distance_color}">{distance_text}</div>
-      <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
-    </div>
-    <div class="rcard keycard">
-      <div class="clock">◷</div>
-      <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
-      <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
-    </div>
-  </div>
-
-  <section class="rcard probs">
-    <div class="rlabel">PROBABILIDADES</div>
-    <div class="pbar"><div class="pup" style="width:{up}%">{up}%</div><div class="pdown" style="width:{down}%">{down}%</div></div>
-    <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
-  </section>
-
-  <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{reader['note']}</small></div>
-    <div class="rring" style="--p:{reader['percent']}"><span>{reader['percent']}%</span></div></div>
-    {final_panel}
-  </section>
-
-  {whale_html}{early_reversal_html}
-
-  <section class="rcard tech">
-    <div class="techhead"><span>DETALLES TÉCNICOS</span><span>⌃</span></div>
-    <div class="techrow">
-      <div><small>1ª SEÑAL</small><b style="color:var(--accent)">{first_signal}</b><i>{first_time}</i></div>
-      <div><small>KALSHI · PRECIO</small><b>{kalshi_price_text}</b><i>{kalshi_price_note}</i></div>
-      <div><small>EMA</small><b class="{ema_class}">{ema_display}</b><i>9 / 21</i></div>
-      <div><small>RSI</small><b class="{rsi_class}">{sig["rsi"]:.0f}</b><i>14</i></div>
-      <div><small>MOMENTUM</small><b class="{mom_class}">{sig["mom3"]:+.2f}</b><i>3 MIN</i></div>
-    </div>
-  </section>
-
-  <nav class="rnav">
-    <div class="active"><b>⌂</b><span>Señal</span></div>
-    <div><b>⌁</b><span>Gráfico</span></div>
-    <div><b>▣</b><span>Kalshi</span></div>
-    <div><b>⚙</b><span>Ajustes</span></div>
-  </nav>
-
-  <section class="features">
-    <div><b>ϟ</b><p><strong>SEÑAL EN TIEMPO REAL</strong><span>UP o DOWN, sin duda</span></p></div>
-    <div><b>◎</b><p><strong>DATOS CLAVE</strong><span>BTC, target, distancia y countdown</span></p></div>
-    <div><b>▥</b><p><strong>PROBABILIDADES VISUALES</strong><span>Con barra y porcentaje</span></p></div>
-  </section>
-  <footer><span>BTC SIGNAL v4.6.1 &nbsp; | &nbsp; DISEÑADO PARA TRADERS REALES</span><span>MENOS RUIDO. MÁS RESULTADOS.</span></footer>
-</div>
-<div class="ticker">{ticker} • SCORE {sig["final_score"]:+.2f}</div>
-""", unsafe_allow_html=True)
-
-    # Gráfico real BTC/USD de 1 minuto. No modifica ninguna señal del motor.
-    if btc_ok:
-        chart_timeframe = st.radio(
-            "Temporalidad del gráfico",
-            ["1m", "3m", "5m"],
-            horizontal=True,
-            key="chart_timeframe",
-            label_visibility="collapsed",
-        )
-        st.markdown(
-            render_live_candles(
-                btc_df, live_btc_price, target, active, chart_timeframe
-            ),
-            unsafe_allow_html=True,
-        )
-
-    if round_signal["reversal"]:
-        st.markdown(
-            f'<div class="alert">⚠ {round_signal["reversal_text"]}</div>',
-            unsafe_allow_html=True,
-        )
-
-    if target is None and kalshi_ok:
-        st.warning(
-            "Kalshi está conectado, pero esta ronda no entregó un target numérico."
-        )
-    if btc_error:
-        st.error("Error Coinbase velas: " + btc_error)
-    if live_price_error and live_btc_price is None:
-        st.warning("Coinbase live: " + live_price_error)
-    if kalshi_live_error and coinbase_live_price is not None:
-        st.warning(
-            "Kalshi BTC live falló temporalmente; usando Coinbase."
-        )
-    if kalshi_error:
-        st.error("Error Kalshi: " + kalshi_error)
-
-    st.markdown(
-        '<div style="margin-top:12px;text-align:center"><a href="?page=auto" target="_self" style="display:inline-block;padding:10px 16px;border:1px solid #26364a;border-radius:12px;color:#f4f7fb;text-decoration:none;font-weight:900">AUTO TRADING</a></div>',
-        unsafe_allow_html=True,
-    )
-
-
-ALLOW_REAL_TRADING = True  # Permite modo REAL si el usuario lo activa en la configuración.
-LEGACY_ROUND_STATE_DB = "btc_signal_round_state.db"
-ROUND_STATE_DB = "btc_signal_round_state_v2.db"
-_ROUND_TRANSACTION = threading.local()
-LEGACY_HISTORY_DB = "btc_signal_history.db"
-HISTORY_DB = "btc_signal_history_v2.db"
-import zlib
-SIGNAL_TRACE_DB = "btc_signal_decisions.db"
-_TRACE_CONTEXT = threading.local()
-
-
-# ===== FUNCIONES ADICIONALES ORIGINALES v4.6.1 =====
-
-def _decode_round_payload(payload):
-    state = json.loads(payload)
-    for key in ('detected_at','first_signal_time','active_since'):
-        value = state.get(key)
-        if isinstance(value, str) and value:
-            try:
-                state[key] = datetime.fromisoformat(value)
-            except ValueError:
-                state[key] = None
-    state['_restored_from_disk'] = True
-    return state
-
-
-def _load_state_from_connection(conn, ticker):
-    row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
-    if row:
-        return _decode_round_payload(row[0])
-    # La primera lectura conserva la ronda anterior, sin permitir que un trabajador
-    # antiguo escriba en la nueva base coordinada.
-    try:
-        with sqlite3.connect('file:' + LEGACY_ROUND_STATE_DB + '?mode=ro', uri=True, timeout=1) as legacy:
-            row = legacy.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
-        return _decode_round_payload(row[0]) if row else None
-    except Exception:
-        return None
-
-
-def _write_state_to_connection(conn, state):
-    row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (state['ticker'],)).fetchone()
-    saved = json.loads(row[0]) if row else {}
-    if saved.get('first_direction') in ('UP','DOWN'):
-        for key in ('first_direction','first_signal_time','first_signal_seconds','first_signal_price'):
-            value = saved.get(key)
-            if key == 'first_signal_time' and isinstance(value, str) and value:
-                value = datetime.fromisoformat(value)
-            state[key] = value
-    keep = {key:value for key,value in state.items() if key != '_restored_from_disk'}
-    for key in ('detected_at','first_signal_time','active_since'):
-        if isinstance(keep.get(key), datetime):
-            keep[key] = keep[key].isoformat()
-    conn.execute('INSERT INTO round_state(ticker,payload,updated_at) VALUES(?,?,?) '
-                 'ON CONFLICT(ticker) DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at',
-                 (state['ticker'],json.dumps(keep,allow_nan=False),datetime.now(timezone.utc).isoformat()))
-
-
-def _run_round_transaction(action):
-    if getattr(_ROUND_TRANSACTION,'conn',None) is not None:
-        return action()
-    conn = _round_db()
-    try:
-        conn.execute('BEGIN IMMEDIATE')
-        _ROUND_TRANSACTION.conn = conn
-        try:
-            result = action()
-            conn.commit()
-            return result
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            _ROUND_TRANSACTION.conn = None
-    finally:
-        conn.close()
-
-
-def verified_binary_outcome(market, ticker, now=None):
-    """Acepta solamente una liquidación binaria fechada y no provisional."""
-    now = now or datetime.now(timezone.utc)
-    if not isinstance(market, dict) or market.get('ticker') != ticker:
-        return None
-    if not ticker.startswith('KXBTC15M-') or market.get('market_type') != 'binary':
-        return None
-    if market.get('is_provisional') not in (None, False):
-        return None
-    result = str(market.get('result') or '').lower()
-    if result not in ('yes', 'no'):
-        return None
-    try:
-        settled = datetime.fromisoformat(str(market['settlement_ts']).replace('Z', '+00:00'))
-        if settled.tzinfo is None or settled > now:
-            return None
-    except (KeyError, TypeError, ValueError):
-        return None
-    return 'UP' if result == 'yes' else 'DOWN'
-
-
-def reconcile_history_once(limit=4, fetch_market=None):
-    """Consulta resultados públicos fuera del motor de señales."""
-    with _history_db() as conn:
-        tickers = [row[0] for row in conn.execute('''SELECT ticker FROM round_history
-            WHERE verification_status != 'official' AND ticker LIKE 'KXBTC15M-%'
-            ORDER BY COALESCE(last_verification_attempt,''),closed_at DESC LIMIT ?''', (int(limit),))]
-    verified = 0
-    for ticker in tickers:
-        try:
-            with _history_db() as conn:
-                conn.execute('UPDATE round_history SET last_verification_attempt=? WHERE ticker=?',
-                             (datetime.now(timezone.utc).isoformat(), ticker))
-            if fetch_market is None:
-                response = requests.get(
-                    'https://external-api.kalshi.com/trade-api/v2/markets/' + ticker,
-                    headers={'User-Agent': 'MacalyAlphaBot/4.6.1'}, timeout=5)
-                response.raise_for_status()
-                market = response.json().get('market')
-            else:
-                market = fetch_market(ticker)
-            outcome = verified_binary_outcome(market, ticker)
-            if outcome is None:
-                continue
-            expiration = market.get('expiration_value')
-            try:
-                expiration = float(expiration)
-                if not np.isfinite(expiration) or not 10000 < expiration < 1000000:
-                    expiration = None
-            except (ValueError, TypeError):
-                expiration = None
-            with _history_db() as conn:
-                conn.execute('''UPDATE round_history SET final_outcome=?,
-                    final_btc=COALESCE(?,final_btc),
-                    result=CASE WHEN first_signal NOT IN ('UP','DOWN') OR first_signal IS NULL THEN 'NO TRADE'
-                                WHEN first_signal=? THEN 'GANADA' ELSE 'PERDIDA' END,
-                    verification_status='official',official_result=?,settlement_at=?,verified_at=?,verified_expiration_value=?
-                    WHERE ticker=?''',
-                    (outcome, expiration, outcome, market['result'], market['settlement_ts'],
-                     datetime.now(timezone.utc).isoformat(), expiration, ticker))
-            verified += 1
-        except Exception:
-            continue
-    return verified
-
-
-def _history_verification_loop():
-    started = time.monotonic()
-    while time.monotonic() - started < BACKGROUND_RUN_SECONDS:
-        try:
-            reconcile_history_once()
-        except Exception:
-            pass
-        time.sleep(30)
-
-
-@st.cache_resource(validate=lambda worker: worker.is_alive())
-def start_history_verifier():
-    worker = threading.Thread(target=_history_verification_loop, name='btc-history-verification-v2', daemon=True)
-    worker.start()
-    return worker
-
-
-def _fetch_current_btc_candles():
-    """Solicita una ventana explícita y verifica la fecha de las velas recibidas.
-
-    Una respuesta HTTP correcta puede contener velas antiguas. No se sustituye
-    una vela antigua por un precio live para calcular los indicadores.
-    """
-    last_error = None
-    for attempt in range(2):
-        requested_at = datetime.now(timezone.utc)
-        minute_start = requested_at.replace(second=0, microsecond=0)
-        start = minute_start - pd.Timedelta(minutes=299)
-        response = requests.get(
-            "https://api.exchange.coinbase.com/products/BTC-USD/candles",
-            params={
-                "granularity": 60,
-                "start": start.isoformat(),
-                "end": requested_at.isoformat(),
-            },
-            headers={
-                "User-Agent": "MacalyAlphaBot/4.6.1",
-                "Cache-Control": "no-cache, no-store, max-age=0",
-                "Pragma": "no-cache",
-            },
-            timeout=10,
-        )
-        response.raise_for_status()
-        rows = response.json()
-        if not isinstance(rows, list) or len(rows) < 30:
-            raise ValueError("Coinbase no devolvió suficientes velas.")
-        frame = pd.DataFrame(
-            rows, columns=["time", "low", "high", "open", "close", "volume"]
-        )
-        for column in ["time", "low", "high", "open", "close", "volume"]:
-            frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        frame["time"] = pd.to_datetime(frame["time"], unit="s", utc=True, errors="coerce")
-        frame = frame.dropna().drop_duplicates("time").sort_values("time").reset_index(drop=True)
-        if len(frame) < 30:
-            raise ValueError("Coinbase devolvió velas inválidas o insuficientes.")
-        received_at = datetime.now(timezone.utc)
-        latest_start = frame.iloc[-1]["time"]
-        age = (received_at - latest_start.to_pydatetime()).total_seconds()
-        # Una vela de 1m puede estar abierta o ser la última cerrada. Se permite
-        # hasta un minuto adicional de publicación, sin aceptar varios minutos.
-        if -5 <= age <= 120:
-            frame.attrs["received_at"] = received_at.isoformat()
-            frame.attrs["latest_candle_at"] = latest_start.isoformat()
-            frame.attrs["candle_age_seconds"] = age
-            return frame
-        last_error = ValueError(
-            "Velas Coinbase desactualizadas: última vela "
-            f"{latest_start.strftime('%H:%M:%S UTC')} ({age:.0f} s). "
-            "El motor necesita velas actuales."
-        )
-    raise last_error
-
-
-def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
-    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
-    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
-    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
-    def direction(row):
-        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
-        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
-    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
-    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
-    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
-    target_atr=(distance/atr) if distance is not None else 0.0
-    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
-    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
-    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
-    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
-    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
-    candidate=None; quality="SIN CONFIRMACIÓN"
-    if aligned=="UP" and (trend_strong or (rsi3>=52 and rsi5>=50)) and vwap_atr>-0.15:
-        candidate="UP"
-    elif aligned=="DOWN" and (trend_strong or (rsi3<=48 and rsi5<=50)) and vwap_atr<0.15:
-        candidate="DOWN"
-    # Señal temprana: no espera alineación perfecta de 3M/5M cuando 5M no se opone
-    # y el impulso de 1M/3M + VWAP/participación ya apuntan a la misma dirección.
-    elif d5 != "DOWN" and l3["macd_hist"] > 0 and rsi1 >= 53 and rsi3 >= 50 and vwap_atr >= 0.05 and (rvol >= 0.90 or mom3 > 0.025):
-        candidate="UP"
-        quality="TEMPRANA"
-    elif d5 != "UP" and l3["macd_hist"] < 0 and rsi1 <= 47 and rsi3 <= 50 and vwap_atr <= -0.05 and (rvol >= 0.90 or mom3 < -0.025):
-        candidate="DOWN"
-        quality="TEMPRANA"
-    # Near expiry, the contract target can dominate only when BTC has a meaningful ATR cushion.
-    if seconds_left is not None and seconds_left<=180 and distance is not None:
-        if target_atr>=0.35 and d5!="DOWN": candidate="UP"
-        elif target_atr<=-0.35 and d5!="UP": candidate="DOWN"
-    if near_noise and not trend_strong: candidate=None
-    if candidate:
-        confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
-        if quality != "TEMPRANA":
-            quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
-    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
-    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
-    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
-    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr}
-
-
-def _confirmation_without_trace(state, candidate, market, seconds_left, now):
+        mom5 = float(signal["mom5"])
+        distance = float(signal["distance"])
+        if not np.isfinite(mom5) or not np.isfinite(distance):
+            return False
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return False
+    direction = state.get("active_direction")
+    return ((direction == "UP" and signal.get("ema") == "BULL" and mom5 > 0 and distance > 0)
+            or (direction == "DOWN" and signal.get("ema") == "BEAR" and mom5 < 0 and distance < 0))
+
+
+def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
     """Confirmación compartida por la pantalla y el registrador de fondo.
 
     La primera señal queda inmutable. Un cambio UP/DOWN posterior también
-    necesita confirmación. Una lectura neutral cancela la candidatura pendiente.
+    necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
+    la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
     """
+    # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
+    closed = seconds_left is not None and seconds_left <= 0
+    close_time = (market or {}).get("close_time")
+    if close_time:
+        end = pd.to_datetime(close_time, utc=True, errors="coerce")
+        if pd.isna(end):
+            candidate = None
+        else:
+            actual_left = (end - pd.Timestamp(now)).total_seconds()
+            seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
+            closed = seconds_left <= 0
+    if closed:
+        for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
+                    "active_direction", "active_since"):
+            state[key] = None
+        state["pending_count"] = 0
+        return
+    if signal is not None and signal.get("data_valid") is False:
+        # Una interrupción no demuestra neutralidad ni permite confirmar.
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        if seconds_left is not None and seconds_left <= 0:
+            state["active_direction"] = None
+            state["active_since"] = None
+        return
+    source = signal.get("price_source") if signal else None
+    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
+        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
+            # Tres lecturas deben pertenecer a una misma referencia de precio.
+            state["pending_direction"] = None
+            state["pending_count"] = 0
+            state["pending_since"] = None
+            state["pending_last_at"] = None
+        state["pending_price_source"] = source
     if candidate not in ("UP", "DOWN"):
         state["pending_direction"] = None
         state["pending_count"] = 0
         state["pending_since"] = None
         state["pending_last_at"] = None
-        state["active_direction"] = None
-        state["active_since"] = None
+        if not _retention_supported(state, signal, seconds_left):
+            state["active_direction"] = None
+            state["active_since"] = None
         return
 
     if candidate == state.get("active_direction"):
@@ -3575,6 +2042,13 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now):
         except ValueError:
             since = None
 
+    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
+                              or (now - last).total_seconds() < 0)):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        last = since = None
     if state.get("pending_direction") != candidate:
         state["pending_direction"] = candidate
         state["pending_count"] = 1
@@ -3629,6 +2103,15 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
     state = st.session_state.rounds[ticker]
     restored_from_disk = bool(state.pop("_restored_from_disk", False))
+    if sig.get("data_valid") is False:
+        confirm_round_candidate(state, None, market, seconds_left, now, sig)
+        save_round_state(state)
+        return {
+            "decision":"ESPERANDO", "signal":"SIN DATOS ACTUALES",
+            "icon":"•", "color":"#38bdf8", "round_state":state,
+            "reversal":False, "reversal_text":"", "entry_price":None,
+            "entry_quality":"SIN DATOS", "entry_quality_color":"#94a3b8",
+        }
     score = float(sig.get("final_score", 0.0))
     price = float(sig.get("price", 0.0))
     distance_now = sig.get("distance")
@@ -3638,12 +2121,17 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         except Exception:
             pass
 
-    previous_live_price = state.get("last_live_price")
+    # Referencia exclusiva de pantalla: el trabajador no consume este delta.
+    display_previous = st.session_state.setdefault("weakness_previous", {})
+    previous_observation = display_previous.get(ticker, {})
+    previous_live_price = previous_observation.get("price")
     state["previous_live_price"] = previous_live_price
     state["last_live_price"] = price
     price_change = price - previous_live_price if previous_live_price is not None else 0.0
 
-    previous_score = float(state.get("last_score", 0.0))
+    previous_score = float(previous_observation.get("score", score))
+    display_previous.clear()
+    display_previous[ticker] = {"price": price, "score": score}
     state["previous_score"] = previous_score
     state["last_score"] = score
     score_change = score - previous_score
@@ -3653,7 +2141,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     if restored_from_disk and candidate not in ("UP", "DOWN"):
         # No se mantiene una señal antigua ante una lectura neutral actual.
         pass
-    confirm_round_candidate(state, candidate, market, seconds_left, now)
+    confirm_round_candidate(state, candidate, market, seconds_left, now, sig)
 
     active = state.get("active_direction")
     reversal = False
@@ -3662,6 +2150,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     # Aviso informativo solamente; nunca bloquea ni congela la señal.
     if active == "UP":
         weakness_points = 0
+        if sig.get("impulse_internal", {}).get("exhaust_up"): weakness_points += 1
         if score < 0: weakness_points += 1
         if score_change <= -1.25: weakness_points += 1
         if sig.get("mom3",0) < -0.02: weakness_points += 1
@@ -3673,6 +2162,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
     elif active == "DOWN":
         weakness_points = 0
+        if sig.get("impulse_internal", {}).get("exhaust_down"): weakness_points += 1
         if score > 0: weakness_points += 1
         if score_change >= 1.25: weakness_points += 1
         if sig.get("mom3",0) > 0.02: weakness_points += 1
@@ -3686,10 +2176,10 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     state["reversal_text"] = reversal_text
 
     if active == "UP":
-        decision, signal, icon, color = "UP","SEÑAL UP","⬆","#34e982"
+        decision, signal, icon, color = "UP","SEÑAL UP","⬆","#00dfb5"
         current_entry_price = get_yes_ask(market)
     elif active == "DOWN":
-        decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#ff4e5f"
+        decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#e64b4b"
         current_entry_price = get_no_ask(market)
     else:
         decision, signal, icon, color = "ESPERANDO","SIN CONFIRMACIÓN","•","#38bdf8"
@@ -3707,6 +2197,123 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     }
 
 
+# =========================================================
+# REGISTRADOR AUTÓNOMO CONTINUO — SOLO HISTORIAL
+# Sigue leyendo las rondas aunque no haya una sesión de Streamlit abierta,
+# siempre que el proceso del servidor siga encendido.
+# NO modifica el motor, la preseñal, el lector, ballenas ni la interfaz.
+# =========================================================
+
+BACKGROUND_RUN_SECONDS = 12 * 60 * 60
+BACKGROUND_POLL_SECONDS = 2
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v3"
+_BACKGROUND_PRICE_SOURCE = threading.local()
+
+def _background_get_btc_data():
+    # Misma petición y misma comprobación de fechas para pantalla y fondo.
+    return get_btc_data()
+
+def _background_get_market():
+    response = requests.get(
+        "https://external-api.kalshi.com/trade-api/v2/markets",
+        params={"limit": 100, "status": "open", "series_ticker": "KXBTC15M"},
+        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
+        timeout=10,
+    )
+    response.raise_for_status()
+    markets = response.json().get("markets", [])
+    if not markets:
+        return None
+    markets.sort(key=lambda m: str(m.get("close_time") or "9999"))
+    return markets[0]
+
+def _background_get_live_price(market):
+    _BACKGROUND_PRICE_SOURCE.value = None
+    try:
+        event_ticker = get_event_ticker_from_market(market)
+        if event_ticker:
+            response = requests.get(
+                "https://external-api.kalshi.com/trade-api/v2/live_data/events/" + str(event_ticker),
+                params={"range": "15min", "_": int(datetime.now(timezone.utc).timestamp())},
+                headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
+                timeout=6,
+            )
+            response.raise_for_status()
+            price = extract_kalshi_btc_price(response.json())
+            if price is not None:
+                _BACKGROUND_PRICE_SOURCE.value = "KALSHI LIVE"
+                return float(price)
+    except Exception:
+        pass
+    response = requests.get(
+        "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
+        headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
+        params={"_": int(datetime.now(timezone.utc).timestamp())},
+        timeout=6,
+    )
+    response.raise_for_status()
+    data = response.json()
+    price = _valid_live_observation(data.get("price"), data.get("time"), "COINBASE")
+    _BACKGROUND_PRICE_SOURCE.value = "COINBASE"
+    return price
+
+# =========================================================
+# ALPHA AI SHADOW — observational only; NEVER alters UP/DOWN
+# Stores one immutable decision-time snapshot per ticker.
+# Training labels must come from official Kalshi settlement.
+# =========================================================
+SHADOW_AI_DB = "alpha_ai_shadow.db"
+SHADOW_FEATURES = ("rsi", "rsi3", "rsi5", "mom3", "mom5", "mom15", "vol_ratio",
+                   "technical_score", "target_score", "adx", "macd3", "macd5",
+                   "atr", "vwap_atr", "target_atr", "distance_pct")
+
+def _shadow_capture(ticker, sig, state, seconds_left):
+    """Read-only capture of existing engine output; no signal writes or model inference."""
+    if not ticker or not isinstance(sig, dict) or seconds_left is None:
+        return
+    try:
+        remaining = float(seconds_left)
+        if not 0 < remaining <= 900:
+            return
+        price = float(sig.get("price"))
+        target = float(state.get("last_target"))
+        if not np.isfinite(price) or not np.isfinite(target) or target <= 0:
+            return
+        def safe_float(value):
+            try:
+                number = float(value)
+                return number if np.isfinite(number) else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+        features = {name: safe_float(sig.get(name)) for name in SHADOW_FEATURES}
+        # Store the engine's original proposal so the training label evaluates
+        # the proposal, not the AI-filtered display result.
+        signal = sig.get("candidate_raw", sig.get("candidate"))
+        if signal not in ("UP", "DOWN"):
+            # Wait for the first actual proposal; otherwise a neutral first poll
+            # would permanently occupy this ticker's one-snapshot slot.
+            return
+        with sqlite3.connect(SHADOW_AI_DB, timeout=3) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS snapshots (
+                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
+                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
+                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
+            conn.execute("""INSERT INTO snapshots
+                (ticker, observed_at, seconds_left, btc_price, target, candidate, features_json)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    observed_at=excluded.observed_at,
+                    seconds_left=excluded.seconds_left,
+                    btc_price=excluded.btc_price,
+                    target=excluded.target,
+                    candidate=excluded.candidate,
+                    features_json=excluded.features_json
+                WHERE snapshots.candidate IS NULL AND excluded.candidate IS NOT NULL""",
+                (str(ticker), datetime.now(timezone.utc).isoformat(), remaining,
+                 price, target, signal, json.dumps(features, allow_nan=False)))
+    except (sqlite3.Error, TypeError, ValueError, OverflowError):
+        return
+
 def _background_update_state_without_coordinator(state, sig, market, seconds_left):
     now = datetime.now(timezone.utc)
     price = float(sig.get("price", 0.0))
@@ -3718,10 +2325,686 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     state["last_seconds_left"] = seconds_left
     state["previous_score"] = float(state.get("last_score", 0.0))
     state["last_score"] = float(sig.get("final_score", 0.0))
-    confirm_round_candidate(state, sig.get("candidate"), market, seconds_left, now)
+    confirm_round_candidate(state, sig.get("candidate"), market, seconds_left, now, sig)
     save_round_state(state)
+    _shadow_capture(state.get("ticker"), sig, state, seconds_left)
     return state
 
+def _background_history_loop(stop_event=None):
+    started = time.monotonic()
+    active_ticker = None
+    active_state = None
+    while not (stop_event and stop_event.is_set()):
+        try:
+            market = _background_get_market()
+            if not market:
+                time.sleep(BACKGROUND_POLL_SECONDS); continue
+            ticker = str(market.get("ticker") or "--")
+            if ticker == "--":
+                time.sleep(BACKGROUND_POLL_SECONDS); continue
+            if active_ticker and ticker != active_ticker and active_state:
+                save_round_history(active_state)
+                active_state = None
+            if ticker != active_ticker:
+                active_ticker = ticker
+                restored = load_round_state(ticker)
+                if restored:
+                    restored.pop("_restored_from_disk", None)
+                active_state = restored or new_round_state(ticker, get_seconds_remaining(market))
+            seconds_left = get_seconds_remaining(market)
+            target = get_target_from_market(market)
+            live_price = _background_get_live_price(market)
+            btc_df = _background_get_btc_data()
+            sig = build_signal(btc_df, target, seconds_left, live_price,
+                               getattr(_BACKGROUND_PRICE_SOURCE, "value", None))
+            if stop_event and stop_event.is_set():
+                break
+            active_state = _background_update_state(active_state, sig, market, seconds_left)
+            _shadow_capture(ticker, sig, active_state, seconds_left)
+            if seconds_left is not None and seconds_left <= 0:
+                save_round_history(active_state)
+        except Exception as exc:
+            print(f"[ALPHA HISTORY WORKER] {type(exc).__name__}: {exc}")
+        if stop_event:
+            stop_event.wait(BACKGROUND_POLL_SECONDS)
+        else:
+            time.sleep(BACKGROUND_POLL_SECONDS)
+
+def _retire_history_workers():
+    """Retira solo registradores propios; las versiones antiguas no tenían Event."""
+    current = None
+    retiring = []
+    restore = []
+    for worker in threading.enumerate():
+        if worker.name not in ("btc-history-canonical-v2", "btc-history-source-v1"):
+            continue
+        if worker is threading.current_thread() or not worker.is_alive():
+            continue
+        if getattr(worker, "_btc_data_revision", None) == BACKGROUND_DATA_REVISION and current is None:
+            current = worker
+            continue
+        stop = getattr(worker, "_btc_stop_event", None)
+        if stop is not None:
+            stop.set()
+        else:
+            target = getattr(worker, "_target", None)
+            context = getattr(target, "__globals__", None)
+            if getattr(target, "__name__", None) != "_background_history_loop" or not isinstance(context, dict) or "BACKGROUND_RUN_SECONDS" not in context:
+                raise RuntimeError("No se puede retirar el registrador anterior con seguridad. Reinicia la app en Streamlit.")
+            if context is globals():
+                restore.append((context, context["BACKGROUND_RUN_SECONDS"]))
+            context["BACKGROUND_RUN_SECONDS"] = 0
+        retiring.append(worker)
+    deadline = time.monotonic() + 45
+    for worker in retiring:
+        worker.join(max(0, deadline - time.monotonic()))
+    if any(worker.is_alive() for worker in retiring):
+        raise RuntimeError("El registrador anterior sigue ocupado. Reinicia la app en Streamlit antes de continuar.")
+    for context, value in restore:
+        context["BACKGROUND_RUN_SECONDS"] = value
+    return current
+
+@st.cache_resource(validate=lambda worker: worker.is_alive() and getattr(worker, "_btc_data_revision", None) == BACKGROUND_DATA_REVISION)
+def start_continuous_history_worker():
+    current = _retire_history_workers()
+    if current is not None:
+        return current
+    stop_event = threading.Event()
+    worker = threading.Thread(target=_background_history_loop, args=(stop_event,), name="btc-history-source-v1", daemon=True)
+    worker._btc_stop_event = stop_event
+    worker._btc_data_revision = BACKGROUND_DATA_REVISION
+    worker.start()
+    return worker
+
+# =========================================================
+# LECTOR DE CIERRE PRO — MICRO LECTURA ~2 SEGUNDOS
+# Mantiene intacto el motor v4.6.1 y sus señales.
+# No inventa velas REST de 1 segundo: construye una cinta
+# de muestras del BTC live que ya recibe el dashboard.
+# =========================================================
+
+def update_micro_tape(ticker, live_price, price_source=None):
+    if not ticker or ticker == "--" or live_price is None:
+        return
+
+    # Cada ronda empieza con su propia cinta.
+    if (st.session_state.micro_ticker != ticker
+            or st.session_state.get("micro_price_source") != price_source):
+        st.session_state.micro_ticker = ticker
+        st.session_state.micro_price_source = price_source
+        st.session_state.micro_prices = []
+
+    now_ts = datetime.now(timezone.utc).timestamp()
+    observed_ts = getattr(_PRICE_OBSERVATIONS, "values", {}).get(price_source)
+    if (observed_ts is None or not np.isfinite(float(live_price))
+            or not -5 <= now_ts - observed_ts <= LIVE_PRICE_MAX_AGE):
+        st.session_state.micro_prices = []
+        return
+    tape = st.session_state.micro_prices
+
+    # Una pausa rompe la ventana micro; volver a reunir datos continuos.
+    if tape and observed_ts - tape[-1]["t"] > SIGNAL_CONFIRM_MAX_GAP:
+        tape.clear()
+    # Evita duplicar muestras dentro del mismo refresco.
+    if not tape or observed_ts - tape[-1]["t"] >= 1.0:
+        tape.append({"t": observed_ts, "p": float(live_price)})
+
+    # Conserva aproximadamente los últimos 90 segundos.
+    cutoff = now_ts - 90
+    st.session_state.micro_prices = [
+        x for x in tape if x["t"] >= cutoff
+    ]
+
+
+def micro_reading():
+    tape = st.session_state.micro_prices
+    if (tape and (datetime.now(timezone.utc).timestamp() - tape[-1]["t"] > 6
+                  or any(b["t"] - a["t"] > SIGNAL_CONFIRM_MAX_GAP
+                         for a, b in zip(tape, tape[1:])))):
+        tape = []
+
+    if len(tape) < 4:
+        return {
+            "ready": False,
+            "change_5s": None,
+            "change_10s": None,
+            "change_30s": None,
+            "slope": 0.0,
+            "up_ratio": 0.5,
+            "pressure": "NEUTRAL",
+        }
+
+    now_t = tape[-1]["t"]
+    current = tape[-1]["p"]
+
+    def price_ago(seconds):
+        target_t = now_t - seconds
+        candidates = [x for x in tape if x["t"] <= target_t]
+        if candidates and target_t - candidates[-1]["t"] <= SIGNAL_CONFIRM_INTERVAL:
+            return candidates[-1]["p"]
+        return None
+
+    p5 = price_ago(5)
+    p10 = price_ago(10)
+    p30 = price_ago(30)
+
+    changes = [
+        tape[i]["p"] - tape[i - 1]["p"]
+        for i in range(1, len(tape))
+    ]
+    nonzero = [x for x in changes if x != 0]
+    up_ratio = (
+        sum(1 for x in nonzero if x > 0) / len(nonzero)
+        if nonzero else 0.5
+    )
+
+    # Regresión simple precio/tiempo para medir dirección micro.
+    xs = np.array([x["t"] - tape[0]["t"] for x in tape], dtype=float)
+    ys = np.array([x["p"] for x in tape], dtype=float)
+    slope = float(np.polyfit(xs, ys, 1)[0]) if len(xs) >= 3 and xs[-1] > 0 else 0.0
+
+    c5 = current - p5 if p5 is not None else None
+    c10 = current - p10 if p10 is not None else None
+    c30 = current - p30 if p30 is not None else None
+
+    if slope > 0.35 and up_ratio >= 0.58:
+        pressure = "ALCISTA"
+    elif slope < -0.35 and up_ratio <= 0.42:
+        pressure = "BAJISTA"
+    else:
+        pressure = "NEUTRAL"
+
+    return {
+        "ready": p10 is not None and p30 is not None,
+        "change_5s": c5,
+        "change_10s": c10,
+        "change_30s": c30,
+        "slope": slope,
+        "up_ratio": up_ratio,
+        "pressure": pressure,
+    }
+
+
+def closing_reader(sig, round_signal, seconds_left, micro):
+    """
+    Lector independiente de cierre.
+    - La señal principal v4.6.1 NO se modifica.
+    - En los últimos segundos, tiempo + distancia al target dominan sobre
+      una pequeña contradicción de momentum/microlectura.
+    - Nunca llama "confirmado" a un resultado antes del cierre.
+    """
+    state = round_signal.get("round_state")
+    active_direction = state.get("active_direction") if state else None
+
+    if seconds_left is not None and seconds_left <= 0:
+        distance = sig.get("distance")
+        if distance is None or abs(distance) < 1:
+            headline, color = "RONDA FINALIZADA", "#94a3b8"
+        elif distance > 0:
+            headline, color = "RONDA FINALIZADA • UP", "#00dfb5"
+        else:
+            headline, color = "RONDA FINALIZADA • DOWN", "#e64b4b"
+        return {
+            "percent":100, "headline":headline,
+            "note":"La ronda terminó. Ya no se muestra una predicción de cierre.",
+            "micro":"RONDA CERRADA","color":color,
+            "border":"rgba(148,163,184,.45)",
+            "bg":"linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))",
+        }
+
+    if active_direction not in ("UP", "DOWN"):
+        first_direction = state.get("first_direction") if state else None
+        withdrawn = first_direction in ("UP", "DOWN")
+        return {
+            "percent": 50,
+            "headline": "SIN SEÑAL ACTIVA" if withdrawn else "ESPERANDO SEÑAL",
+            "note": (f"La señal activa fue retirada. Primera señal de la ronda: {first_direction}. "
+                     "Esperando nueva confirmación." if withdrawn else
+                     "El motor todavía no confirmó una dirección."),
+            "micro": "MICROLECTURA PREPARÁNDOSE",
+            "color": "#38bdf8",
+            "border": "rgba(56,189,248,.45)",
+            "bg": "linear-gradient(135deg,rgba(11,64,91,.30),rgba(9,23,34,.72))",
+        }
+
+    distance = sig.get("distance")
+    close_direction = active_direction
+    terminal_override = False
+    terminal_too_close = False
+
+    # En cierre extremo, la posición REAL respecto al target manda.
+    # Umbrales deliberadamente conservadores para no llamar un flip por $2-$10.
+    if seconds_left is not None and distance is not None:
+        abs_d = abs(distance)
+        market_side = "UP" if distance > 0 else "DOWN"
+
+        if seconds_left <= 15:
+            strong_distance = abs_d >= 30
+            too_close = not strong_distance
+        elif seconds_left <= 30:
+            strong_distance = abs_d >= 45
+            too_close = not strong_distance
+        elif seconds_left <= 60:
+            strong_distance = abs_d >= 70
+            too_close = abs_d < 25
+        else:
+            strong_distance = False
+            too_close = False
+
+        if strong_distance:
+            close_direction = market_side
+            terminal_override = True
+        elif too_close and seconds_left <= 30:
+            terminal_too_close = True
+
+    direction = close_direction
+    base = sig["up_probability"] if direction == "UP" else sig["down_probability"]
+    confidence = float(base)
+
+    if distance is not None:
+        aligned = distance > 0 if direction == "UP" else distance < 0
+        confidence += 6 if aligned else -9
+
+    aligned_momentum = sig["mom3"] > 0 if direction == "UP" else sig["mom3"] < 0
+    confidence += 3 if aligned_momentum else -5
+
+    if round_signal.get("reversal") and not terminal_override:
+        confidence -= 12
+
+    micro_text = "MICROLECTURA REUNIENDO DATOS"
+    strong_contradiction = False
+
+    if micro.get("ready"):
+        wanted = 1 if direction == "UP" else -1
+        c10 = micro["change_10s"] * wanted
+        c30 = micro["change_30s"] * wanted
+        slope = micro["slope"] * wanted
+        ratio = micro["up_ratio"] if direction == "UP" else 1 - micro["up_ratio"]
+
+        micro_score = 0
+        micro_score += 6 if c10 > 8 else (3 if c10 > 2 else (-7 if c10 < -8 else (-4 if c10 < -2 else 0)))
+        micro_score += 7 if c30 > 15 else (4 if c30 > 5 else (-9 if c30 < -15 else (-5 if c30 < -5 else 0)))
+        micro_score += 4 if slope > 0.45 else (-5 if slope < -0.45 else 0)
+        micro_score += 4 if ratio >= 0.62 else (-5 if ratio <= 0.38 else 0)
+
+        # La microlectura pesa menos cuando quedan segundos y la distancia es amplia.
+        weight = 1.0
+        if seconds_left is not None:
+            if seconds_left <= 30:
+                weight = 0.45 if terminal_override else 1.20
+            elif seconds_left <= 60:
+                weight = 0.70 if terminal_override else 1.35
+            elif seconds_left <= 120:
+                weight = 1.35
+            elif seconds_left <= 180:
+                weight = 1.20
+
+        confidence += float(np.clip(micro_score * weight, -28, 20))
+        strong_contradiction = (c10 < -5 and c30 < -10)
+
+        # Solo limitar por contradicción si tiempo/distancia NO hacen el cierre dominante.
+        if strong_contradiction and not terminal_override:
+            confidence = min(confidence, 69)
+
+        micro_text = (
+            f"MICRO {micro['pressure']} • "
+            f"10s {micro['change_10s']:+.1f} • "
+            f"30s {micro['change_30s']:+.1f}"
+        )
+
+    if seconds_left is not None and seconds_left <= 180:
+        confidence += 2
+
+    # Refuerzo específico de tiempo + distancia.
+    if terminal_override and distance is not None:
+        abs_d = abs(distance)
+        if seconds_left <= 15:
+            confidence = max(confidence, 90 if abs_d >= 75 else 82)
+        elif seconds_left <= 30:
+            confidence = max(confidence, 86 if abs_d >= 100 else 78)
+        elif seconds_left <= 60:
+            confidence = max(confidence, 80 if abs_d >= 120 else 74)
+
+    confidence = int(round(np.clip(confidence, 5, 95)))
+
+    if terminal_too_close:
+        # En los últimos segundos NO lo llama simplemente "disputado":
+        # muestra qué lado del target está ganando AHORA y la distancia exacta.
+        # La confianza se mantiene moderada porque una diferencia pequeña aún puede cruzarse.
+        if distance == 0:
+            confidence = 50
+            headline = "PRECIO EN EL TARGET"
+            note = f"Quedan {seconds_left}s y el precio está en el target, sin margen a favor de una dirección."
+        else:
+            market_side = "UP" if distance > 0 else "DOWN"
+            confidence = int(np.clip(confidence, 52, 64))
+            headline = f"POSICIÓN ACTUAL {market_side}"
+            note = (
+                f"Quedan {seconds_left}s y BTC está ${abs(distance):,.0f} "
+                f"{'arriba' if distance > 0 else 'abajo'} del target. "
+                "El margen es pequeño; no se muestra un apoyo direccional."
+            )
+    elif terminal_override:
+        headline = f"CIERRE MUY FAVORECIDO PARA {direction}"
+        note = (
+            f"Quedan {seconds_left}s y BTC está ${abs(distance):,.0f} "
+            f"{'arriba' if distance > 0 else 'abajo'} del target."
+        )
+    elif round_signal.get("reversal"):
+        headline = "SEÑAL PERDIENDO FUERZA"
+        note = round_signal.get("reversal_text") or "Posible cambio de dirección."
+    elif strong_contradiction:
+        headline = f"{direction} PERDIENDO FUERZA"
+        note = "La presión live de 10s y 30s va contra la señal activa."
+    elif confidence >= 75:
+        headline = ("APOYO FUERTE AL CIERRE UP" if direction == "UP"
+                    else "APOYO FUERTE AL CIERRE DOWN")
+        note = "Índice de apoyo basado en momentum, volatilidad, presión y distancia. No es una probabilidad de acierto."
+    elif confidence >= 60:
+        headline = f"VENTAJA MODERADA PARA {direction}"
+        note = "La dirección sigue activa, pero la presión inmediata aún puede cambiar."
+    else:
+        headline = f"CIERRE {direction} SIN VENTAJA CLARA"
+        note = "La microlectura no confirma con fuerza la dirección."
+
+    if direction == "UP":
+        color = "#00dfb5"
+        border = "rgba(0,223,181,.48)"
+        bg = "linear-gradient(135deg,rgba(4,86,43,.46),rgba(7,36,25,.78))"
+    else:
+        color = "#e64b4b"
+        border = "rgba(230,75,75,.48)"
+        bg = "linear-gradient(135deg,rgba(102,20,31,.48),rgba(43,10,17,.80))"
+
+    return {
+        "percent": 0 if terminal_too_close else confidence,
+        "direction": None if terminal_too_close else direction,
+        "headline": headline,
+        "note": note,
+        "micro": micro_text,
+        "color": color,
+        "border": border,
+        "bg": bg,
+    }
+
+
+
+
+def render_live_candles(df, live_price, target, active, timeframe="1m"):
+    # Renderiza velas BTC/USD para visualización sin cambiar el motor v4.6.1.
+    # 3m y 5m se construyen agrupando las velas reales de Coinbase de 1 minuto.
+    if df is None or len(df) < 5:
+        return f'<div class="chartbox"><div class="charttitle">BTC/USD · {timeframe}</div><div class="chartempty">Esperando velas…</div></div>'
+
+    tf_minutes = {"1m": 1, "3m": 3, "5m": 5}.get(timeframe, 1)
+    source_df = df.copy().sort_values("time")
+    if tf_minutes > 1:
+        d = (
+            source_df.set_index("time")
+            .resample(f"{tf_minutes}min", label="left", closed="left")
+            .agg({
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            })
+            .dropna()
+            .reset_index()
+        )
+    else:
+        d = source_df[["time", "open", "high", "low", "close", "volume"]].copy()
+
+    # Solo actualiza una vela abierta con un precio de la misma fuente.
+    bucket_start = pd.Timestamp(datetime.now(timezone.utc)).floor(f"{tf_minutes}min")
+    if live_price is not None and len(d) and pd.Timestamp(d.iloc[-1]["time"]) == bucket_start:
+        i = d.index[-1]
+        d.loc[i, "close"] = float(live_price)
+        d.loc[i, "high"] = max(float(d.loc[i, "high"]), float(live_price))
+        d.loc[i, "low"] = min(float(d.loc[i, "low"]), float(live_price))
+
+    close = d["close"].astype(float)
+    ema9 = close.ewm(span=9, adjust=False).mean()
+    ema21 = close.ewm(span=21, adjust=False).mean()
+    d = d.tail(42).reset_index(drop=True)
+    ema9 = ema9.tail(len(d)).reset_index(drop=True)
+    ema21 = ema21.tail(len(d)).reset_index(drop=True)
+
+    W, H = 760, 430
+    left, right, top, bottom = 18, 142, 54, 82
+    pw, ph = W-left-right, H-top-bottom
+    vals = list(d["low"].astype(float)) + list(d["high"].astype(float))
+    if target is not None: vals.append(float(target))
+    if live_price is not None: vals.append(float(live_price))
+    lo, hi = min(vals), max(vals)
+    pad = max((hi-lo)*0.10, 8)
+    lo, hi = lo-pad, hi+pad
+    def y(v): return top + (hi-float(v))/(hi-lo)*ph
+    n=len(d); step=pw/max(n,1); body=max(3.2, min(8, step*.58))
+
+    svg=[]
+    # horizontal grid + prices
+    for k in range(5):
+        yy=top+ph*k/4; price=hi-(hi-lo)*k/4
+        svg.append(f'<line x1="{left}" y1="{yy:.1f}" x2="{W-right}" y2="{yy:.1f}" stroke="#182536" stroke-width="1"/>')
+        svg.append(f'<text x="{W-right+8}" y="{yy+4:.1f}" fill="#8392a7" font-size="12">{price:,.0f}</text>')
+    # vertical grid
+    for k in range(5):
+        xx=left+pw*k/4
+        svg.append(f'<line x1="{xx:.1f}" y1="{top}" x2="{xx:.1f}" y2="{top+ph}" stroke="#121e2d" stroke-width="1"/>')
+
+    # volume scaled into bottom 52 px of plot
+    vmax=max(float(d["volume"].max()),1)
+    vbase=top+ph
+    for i,row in d.iterrows():
+        x=left+(i+.5)*step; vh=float(row["volume"])/vmax*48
+        col='#16b97a' if float(row['close'])>=float(row['open']) else '#c43d59'
+        svg.append(f'<rect x="{x-body/2:.1f}" y="{vbase-vh:.1f}" width="{body:.1f}" height="{vh:.1f}" fill="{col}" opacity=".55"/>')
+
+    # candles
+    for i,row in d.iterrows():
+        x=left+(i+.5)*step
+        o,c,h,l=map(float,[row['open'],row['close'],row['high'],row['low']])
+        col='#00dfb5' if c>=o else '#e64b4b'
+        svg.append(f'<line x1="{x:.1f}" y1="{y(h):.1f}" x2="{x:.1f}" y2="{y(l):.1f}" stroke="{col}" stroke-width="1.4"/>')
+        yy=min(y(o),y(c)); hh=max(2.0,abs(y(o)-y(c)))
+        svg.append(f'<rect x="{x-body/2:.1f}" y="{yy:.1f}" width="{body:.1f}" height="{hh:.1f}" rx=".7" fill="{col}"/>')
+
+    # EMA paths
+    def path(series,color):
+        pts=' '.join(f'{left+(i+.5)*step:.1f},{y(v):.1f}' for i,v in enumerate(series))
+        return f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
+    svg.append(path(ema9,'#df42e7'))
+    svg.append(path(ema21,'#32d7ef'))
+
+    # target line
+    if target is not None and lo <= float(target) <= hi:
+        ty=y(target)
+        svg.append(f'<line x1="{left}" y1="{ty:.1f}" x2="{W-right}" y2="{ty:.1f}" stroke="#23e7c1" stroke-width="1.8" stroke-dasharray="7 6"/>')
+        # La etiqueta queda en el margen derecho, fuera del área de velas.
+        svg.append(f'<rect x="{W-right+18}" y="{ty-12:.1f}" width="96" height="23" rx="3" fill="#20e7bd"/>')
+        svg.append(f'<text x="{W-right+25}" y="{ty+4:.1f}" fill="#061510" font-size="10" font-weight="800">TARGET</text>')
+    # live price line + label
+    if live_price is not None and lo <= float(live_price) <= hi:
+        ly=y(live_price); lc='#00dfb5' if active=='UP' else '#e64b4b' if active=='DOWN' else '#38bdf8'
+        svg.append(f'<line x1="{left}" y1="{ly:.1f}" x2="{W-right}" y2="{ly:.1f}" stroke="{lc}" stroke-width="1.3" stroke-dasharray="3 4"/>')
+        svg.append(f'<rect x="{W-right+18}" y="{ly-12:.1f}" width="96" height="23" rx="3" fill="{lc}"/>')
+        svg.append(f'<text x="{W-right+25}" y="{ly+4:.1f}" fill="#061510" font-size="11" font-weight="900">{float(live_price):,.0f}</text>')
+
+    # time labels
+    picks=[0, max(0,n//3), max(0,2*n//3), n-1]
+    for idx in picks:
+        tm=d.iloc[idx]['time'].to_pydatetime().astimezone(ZoneInfo("America/New_York")).strftime('%-I:%M %p')
+        xx=left+(idx+.5)*step
+        svg.append(f'<text x="{xx:.1f}" y="{H-52}" text-anchor="middle" fill="#8392a7" font-size="11">{tm}</text>')
+
+    last=d.iloc[-1]
+    change=float(last['close'])-float(last['open'])
+    pct=(change/float(last['open'])*100) if float(last['open']) else 0
+    direction_color='#00dfb5' if change>=0 else '#e64b4b'
+    target_label=f'${float(target):,.0f}' if target is not None else '--'
+    return f'''<section class="chartbox">
+      <div class="charttop"><div><b>BTC/USD · {timeframe}</b><span class="chartlive">● LIVE</span></div><div class="charttf">{timeframe}</div></div>
+      <div class="ohlc">O {float(last['open']):,.0f} &nbsp; H {float(last['high']):,.0f} &nbsp; L {float(last['low']):,.0f} &nbsp; C {float(last['close']):,.0f} &nbsp; <strong style="color:{direction_color}">{change:+,.0f} ({pct:+.2f}%)</strong></div>
+      <div class="indicators"><span class="ema9dot">●</span> EMA9 {float(ema9.iloc[-1]):,.0f} &nbsp;&nbsp; <span class="ema21dot">●</span> EMA21 {float(ema21.iloc[-1]):,.0f} &nbsp;&nbsp; <span class="targetdot">━</span> TARGET {target_label}</div>
+      <svg class="candlesvg" viewBox="0 0 {W} {H}" preserveAspectRatio="none">{''.join(svg)}</svg>
+      <div class="chartfoot"><span class="selected">{timeframe}</span><span>VELAS REALES COINBASE</span><span>ACTUALIZACIÓN LIVE</span></div>
+    </section>'''
+
+
+# =========================================================
+# NAVEGACIÓN REAL — EL ENGRANAJE ABRE AJUSTES
+# No muestra botones extra en la pantalla principal.
+# =========================================================
+
+def render_history_page():
+    st.markdown("""
+    <style>
+    .settings-back{color:#d7e1ee!important;text-decoration:none!important;font-size:14px;font-weight:900}
+    .settings-title{font-size:30px;font-weight:1000;color:#fff;margin:22px 0 4px}
+    .settings-sub{font-size:14px;color:#c7d0dc;margin-bottom:20px}
+    .history-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
+    .history-stat{background:#0d141d;border:1px solid #1d2b3a;border-radius:10px;padding:10px 5px;text-align:center}
+    .history-label{font-size:9px;font-weight:1000;color:#fff!important;opacity:1!important;margin-bottom:7px}
+    .history-value{font-size:22px;font-weight:1000;line-height:1}
+    .history-note{margin-top:14px;color:#fff!important;opacity:1!important;font-size:10px;font-weight:900}
+    
+/* Strong neon and readable labels across both visual surfaces. */
+.green{color:#00dfb5!important;text-shadow:0 0 5px #00dfb588,0 0 14px #00dfb555!important}
+.red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
+.pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
+.pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
+.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
+.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
+.rhero{filter:drop-shadow(0 0 9px var(--accent))}
+.note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
+.floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
+.canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
+@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
+
+
+/* Purple neon outlines, consistent across dashboard and chart cards. */
+.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
+.finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
+.panel,.card,.metric,details,.floatcounts div{
+ border-color:#23685e!important;
+ box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
+}
+.panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
+.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
+.techrow,.rnav,.chartnav{border-color:#23685e!important}
+
+
+/* Uniform turquoise presentation. Signal values and timing are unchanged. */
+.stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
+.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
+.panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
+ background:linear-gradient(125deg,#0c2026,#0a151e)!important;
+ border-color:#23685e!important;box-shadow:none!important;
+}
+.refapp .techrow,.refapp .techrow>div,.refapp .rnav,.panel .chartnav{border-color:#244047!important}
+.refapp .gear,.panel summary:after{color:#00dfb5!important;text-shadow:none!important}
+.refapp .finalcard,.refapp .finalclose,.refapp .analysisbox,.refapp .probbox{border-color:#244047!important}
+.stRadio label,[data-testid="stButton"] button,.panel .toggle,.panel .chartnav button{
+ background:#0a151e!important;border-color:#23685e!important;color:#e3f0ee!important;
+}
+.panel{background:#06121a!important}
+
+</style>""", unsafe_allow_html=True)
+    df=load_history(2000); stats=history_stats(df)
+    st.markdown(f"""
+    <a class="settings-back" href="?page=signal" target="_self">← Señal</a>
+    <div class="settings-title">⚙ Ajustes</div>
+    <div class="settings-sub">Historial y rendimiento · registro automático por ronda</div>
+    <div class="history-stats">
+      <div class="history-stat"><div class="history-label">Rondas</div><div class="history-value" style="color:#54c6f5">{stats["total"]}</div></div>
+      <div class="history-stat"><div class="history-label">Ganadas</div><div class="history-value" style="color:#00dfb5">{stats["wins"]}</div></div>
+      <div class="history-stat"><div class="history-label">Perdidas</div><div class="history-value" style="color:#e64b4b">{stats["losses"]}</div></div>
+      <div class="history-stat"><div class="history-label">Acierto</div><div class="history-value" style="color:#f7bd4d">{f"{stats['win_rate']:.1f}%" if stats['decided'] else "—"}</div></div>
+    </div>
+    <div class="history-note">Pendientes: {stats["pending"]} · NO TRADE: {stats["no_trade"]} · Acierto basado solo en resultados oficiales verificados.</div>
+    """, unsafe_allow_html=True)
+
+
+
+# =========================================================
+
+# ORDER BOOK + ORDER FLOW: panel independiente, solo informativo.
+@st.cache_data(ttl=5, show_spinner=False)
+def get_coinbase_order_book():
+    r = requests.get("https://api.exchange.coinbase.com/products/BTC-USD/book",
+                     params={"level": 2}, timeout=6,
+                     headers={"User-Agent": "MacalyAlphaBot/4.6.1"})
+    r.raise_for_status()
+    data = r.json()
+    def notional(rows):
+        value = 0.0
+        for row in rows[:15]:
+            price, size = float(row[0]), float(row[1])
+            if not np.isfinite(price) or not np.isfinite(size) or price <= 0 or size < 0:
+                raise ValueError("Nivel inválido")
+            value += price * size
+        return value
+    bids, asks = data.get("bids", []), data.get("asks", [])
+    if not bids or not asks:
+        raise ValueError("Libro vacío")
+    buy, sell = notional(bids), notional(asks)
+    if buy + sell <= 0:
+        raise ValueError("Sin liquidez")
+    imbalance = (buy - sell) / (buy + sell)
+    return {"direction": "UP" if imbalance >= .15 else "DOWN" if imbalance <= -.15 else None,
+            "imbalance": imbalance, "reliable": True}
+
+
+def get_order_flow_advisory(whale):
+    if not whale:
+        return {"direction": None, "imbalance": 0, "reliable": False}
+    buy, sell = float(whale.get("buy30", 0) or 0), float(whale.get("sell30", 0) or 0)
+    if buy + sell < 100_000:
+        return {"direction": None, "imbalance": 0, "reliable": False}
+    imbalance = (buy - sell) / (buy + sell)
+    return {"direction": "UP" if imbalance >= .18 else "DOWN" if imbalance <= -.18 else None,
+            "imbalance": imbalance, "reliable": True}
+
+
+def render_intelligent_market_panel(book, flow, active):
+    def describe(item):
+        if not item or not item.get("reliable"):
+            return "SIN DATOS", "—"
+        d = item.get("direction")
+        return ("PRESIÓN " + d if d else "EQUILIBRADO"), f"{abs(item['imbalance'])*100:.0f}%"
+    book_label, book_pct = describe(book)
+    flow_label, flow_pct = describe(flow)
+    if not book or not flow.get("reliable"):
+        headline, color, detail = "DATOS INSUFICIENTES", "#94a3b8", "Esperando lecturas válidas de Coinbase."
+    elif book["direction"] and book["direction"] == flow["direction"]:
+        direction = book["direction"]
+        if active in ("UP", "DOWN"):
+            contrary = active != direction
+            headline = f"{active} EN RIESGO" if contrary else f"APOYO A {active}"
+            color = "#ffb347" if contrary else ("#ef4444" if active == "DOWN" else "#00dfb5")
+        else:
+            headline, color = f"PRESIÓN CONJUNTA {direction}", ("#ef4444" if direction == "DOWN" else "#00dfb5")
+        detail = "Order Book y Order Flow coinciden."
+    else:
+        headline, color, detail = "LECTURAS MIXTAS", "#e9bb66", "Sin confirmación conjunta entre indicadores."
+    def pressure_color(label):
+        return "#ef4444" if "DOWN" in label else "#00dfb5" if "UP" in label else "#cbd5e1"
+    book_color = pressure_color(book_label)
+    flow_color = pressure_color(flow_label)
+    return f'''<section style="margin:12px 0;padding:18px;min-height:300px;display:flex;flex-direction:column;justify-content:center;border:1px solid {color};border-radius:18px;background:#0b1520;box-shadow:0 0 18px {color}20">
+      <div style="font-size:13px;font-weight:900;color:#dce7f3">ANÁLISIS INTELIGENTE · BTC · COINBASE</div>
+      <div style="margin-top:14px;font-size:clamp(25px,5vw,34px);font-weight:950;color:{color};text-shadow:0 0 16px {color}55">{headline}</div>
+      <div style="margin-top:12px;font-size:14px;color:#cbd5e1"><b>ORDER BOOK:</b> <span style="color:{book_color};font-weight:900">{book_label} · {book_pct}</span></div>
+      <div style="margin-top:9px;font-size:14px;color:#cbd5e1"><b>ORDER FLOW (30 s):</b> <span style="color:{flow_color};font-weight:900">{flow_label} · {flow_pct}</span></div>
+      <div style="margin-top:14px;font-size:13px;color:#cbd5e1">{detail}</div>
+      <div style="margin-top:15px;font-size:12px;color:#94a3b8">Solo informativo. No predice aciertos ni cambia la señal oficial. Las órdenes pueden cancelarse y el flujo puede ser incompleto.</div>
+    </section>'''
+
+# DETECTOR TEMPRANO DE REVERSIÓN (SOLO OBSERVACIÓN)
+# Independiente: NO modifica build_signal, preseñal, ni señales oficiales.
+# =========================================================
 
 def detect_early_reversal(ticker, micro, whale, price):
     """Detector observacional autónomo: no consulta señal ni estado del cerebro.
@@ -3746,7 +3029,8 @@ def detect_early_reversal(ticker, micro, whale, price):
     def at_or_before(age):
         cutoff = last_t - age
         earlier = [x for x in tape if float(x["t"]) <= cutoff]
-        return float(earlier[-1]["p"]) if earlier else None
+        return (float(earlier[-1]["p"])
+                if earlier and cutoff - float(earlier[-1]["t"]) <= SIGNAL_CONFIRM_INTERVAL else None)
 
     p10 = at_or_before(10)
     p30 = at_or_before(30)
@@ -3782,15 +3066,801 @@ def detect_early_reversal(ticker, micro, whale, price):
 
 def render_early_reversal_panel(result):
     direction = result.get("direction")
-    color = "#ff5367" if direction == "DOWN" else "#34e982" if direction == "UP" else "#8fa3b8"
+    color = "#e64b4b" if direction == "DOWN" else "#00dfb5" if direction == "UP" else "#8fa3b8"
     title = result.get("status", "OBSERVANDO")
     detail = result.get("detail", "")
-    return f'''<section style="margin:7px 0;padding:10px;border:1px solid {color};border-radius:10px;background:#0b1520">
-      <div style="font-size:9px;font-weight:900;color:#dce7f3">DETECTOR DE REVERSIÓN · EXPERIMENTAL</div>
-      <div style="margin-top:6px;font-size:13px;font-weight:950;color:{color}">{title}{' → ' + direction if direction else ''}</div>
-      <div style="margin-top:5px;font-size:9px;color:#b5c4d4">{detail}</div>
-      <div style="margin-top:4px;font-size:8px;color:#8495aa">Alerta informativa, no orden de compra ni predicción garantizada. No cambia la señal oficial.</div>
+    return f'''<section style="margin:12px 0;padding:18px;min-height:300px;display:flex;flex-direction:column;justify-content:center;border:1px solid {color};border-radius:18px;background:#0b1520">
+      <div style="font-size:13px;font-weight:900;color:#dce7f3">DETECTOR DE REVERSIÓN · EXPERIMENTAL</div>
+      <div style="margin-top:14px;font-size:24px;line-height:1.3;font-weight:950;color:{color}">{title}{' → ' + direction if direction else ''}</div>
+      <div style="margin-top:14px;font-size:14px;line-height:1.5;color:#cbd5e1">{detail}</div>
+      <div style="margin-top:18px;font-size:12px;line-height:1.5;color:#94a3b8">Alerta informativa, no orden de compra ni predicción garantizada. No cambia la señal oficial.</div>
     </section>'''
+
+# Panel visual independiente del motor. Sin envío de órdenes.
+import html as _nh
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _neon_chart_history(timeframe):
+    granularity = {"15m": 900, "1h": 3600, "4h": 3600, "1D": 86400}[timeframe]
+    response = requests.get(
+        "https://api.exchange.coinbase.com/products/BTC-USD/candles",
+        params={"granularity": granularity}, timeout=8,
+        headers={"User-Agent": "BTCSignal/4.6.1-chart"},
+    )
+    response.raise_for_status()
+    rows = response.json()
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("Sin velas para esta temporalidad")
+    frame = pd.DataFrame(rows, columns=["time", "low", "high", "open", "close", "volume"])
+    frame["time"] = pd.to_datetime(frame["time"], unit="s", utc=True)
+    return frame.sort_values("time").drop_duplicates("time")
+
+def _neon_round_pivots(df, market, now):
+    # Cada ronda usa sus propias velas 1m cerradas; no mezcla rondas ni temporalidades.
+    if not market or not market.get("close_time"):
+        return [], None, None
+    end = pd.to_datetime(market["close_time"], utc=True, errors="coerce")
+    if pd.isna(end):
+        return [], None, None
+    start = end - pd.Timedelta(minutes=15)
+    frame = df.copy()
+    frame["time"] = pd.to_datetime(frame["time"], utc=True)
+    frame = frame.sort_values("time").drop_duplicates("time")
+    frame = frame[(frame["time"] >= start) & (frame["time"] < end)
+                  & (frame["time"] + pd.Timedelta(minutes=1) <= now)]
+    candles = frame.to_dict("records")
+    pivots = []
+    for i in range(2, len(candles)-2):
+        window = candles[i-2:i+3]
+        row = candles[i]
+        kind = "H" if row["high"] > max(r["high"] for j, r in enumerate(window) if j != 2) else "L" if row["low"] < min(r["low"] for j, r in enumerate(window) if j != 2) else None
+        if kind:
+            pivot = {"t": int(row["time"].timestamp()), "v": float(row["high" if kind == "H" else "low"]), "kind": kind}
+            if pivots and pivots[-1]["kind"] == kind:
+                if (kind == "H" and pivot["v"] > pivots[-1]["v"]) or (kind == "L" and pivot["v"] < pivots[-1]["v"]):
+                    pivots[-1] = pivot
+            else:
+                pivots.append(pivot)
+    return pivots, int(start.timestamp()), int(end.timestamp())
+
+def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=None, round_df=None):
+    intervals = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1D": 1440}
+    minutes = intervals[timeframe]
+    frame = df.copy().sort_values("time").drop_duplicates("time")
+    frame["time"] = pd.to_datetime(frame["time"], utc=True)
+    if timeframe in ("3m", "5m", "4h"):
+        frame = frame.set_index("time").resample(f"{minutes}min").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+        ).dropna().reset_index()
+    now = pd.Timestamp.now(tz="UTC")
+    bucket = now.floor(f"{minutes}min")
+    price = float(live_price) if live_price is not None else None
+    if price is not None and len(frame) and frame.iloc[-1]["time"] == bucket:
+        idx = frame.index[-1]
+        frame.loc[idx, "close"] = price
+        frame.loc[idx, "high"] = max(float(frame.loc[idx, "high"]), price)
+        frame.loc[idx, "low"] = min(float(frame.loc[idx, "low"]), price)
+    close = frame["close"].astype(float)
+    frame["ema9"] = close.ewm(span=9, adjust=False).mean()
+    frame["ema21"] = close.ewm(span=21, adjust=False).mean()
+    delta = close.diff()
+    gains = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    losses = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    frame["rsi"] = 100 - 100/(1 + gains/losses.replace(0, np.nan))
+    frame.loc[(losses == 0) & (gains > 0), "rsi"] = 100
+    frame.loc[(losses == 0) & (gains == 0), "rsi"] = 50
+    # VWAP diario UTC de la historia disponible; nunca inventa volumen histórico.
+    typical = (frame["high"] + frame["low"] + close)/3
+    day = frame["time"].dt.floor("D")
+    vol = frame["volume"].astype(float)
+    frame["vwap"] = (typical*vol).groupby(day).cumsum()/vol.groupby(day).cumsum().replace(0, np.nan)
+    frame = frame.tail(180).reset_index(drop=True)
+    rows = []
+    for _, row in frame.iterrows():
+        item = {k: (float(row[k]) if pd.notna(row[k]) and np.isfinite(float(row[k])) else None)
+                for k in ["open", "high", "low", "close", "volume", "ema9", "ema21", "rsi", "vwap"]}
+        item["t"] = int(row["time"].timestamp())
+        rows.append(item)
+    tape = st.session_state.get("whale_flow_tape", []) if whale is not None else []
+    stamp = now.timestamp()
+    recent = [r for r in tape if 0 <= stamp-float(r["t"]) <= 30]
+    buy = sum(float(r["notional"]) for r in recent if r["side"] == "COMPRA")
+    sell = sum(float(r["notional"]) for r in recent if r["side"] == "VENTA")
+    threshold = 10000
+    buys = sum(r["side"] == "COMPRA" and r["notional"] >= threshold for r in recent)
+    sells = sum(r["side"] == "VENTA" and r["notional"] >= threshold for r in recent)
+    last10 = sum(r["notional"] for r in recent if stamp-r["t"] <= 10)
+    prior20 = sum(r["notional"] for r in recent if 10 < stamp-r["t"] <= 30)
+    activity = (last10/10)/(prior20/20) if prior20 > 0 else None
+    imbalance = abs(buy-sell)/(buy+sell) if buy+sell else 0
+    direction = "UP" if buy > sell else "DOWN" if sell > buy else "NEUTRAL"
+    round_pivots, round_start, round_end = _neon_round_pivots(
+        round_df if round_df is not None else df, market, now)
+    # A/B/C/D corresponden a los últimos giros confirmados de esta ronda.
+    pivots = []
+    for pivot in round_pivots[-4:]:
+        index = next((i for i, row in enumerate(rows)
+                      if row["t"] <= pivot["t"] < row["t"] + minutes*60), None)
+        if index is not None:
+            pivots.append({"i": index, "v": pivot["v"], "kind": pivot["kind"]})
+    latest = rows[-1]["close"] if rows else None
+    recent_levels = rows[-21:-1]
+    support = min((r["low"] for r in recent_levels), default=None)
+    resistance = max((r["high"] for r in recent_levels), default=None)
+    return {"rows": rows, "timeframe": timeframe, "price": price or latest,
+            "target": float(target) if target is not None else None,
+            "signal": active if active in ("UP", "DOWN") else "ESPERANDO",
+            "up": float(sig.get("up_probability", 50)),
+            "down": float(sig.get("down_probability", 50)),
+            "support": support, "resistance": resistance, "pivots": pivots[-4:], "pivot_count": len(round_pivots), "round_start": round_start, "round_end": round_end,
+            "flow": {"ok": whale is not None, "buy": buy, "sell": sell,
+                     "buys": buys, "sells": sells, "direction": direction,
+                     "strength": "ALTA" if imbalance >= .6 else "MEDIA" if imbalance >= .3 else "BAJA",
+                     "activity": activity, "threshold": threshold},
+            "mom3": sig.get("mom3"), "mom5": sig.get("mom5"), "mom15": sig.get("mom15"),
+            "updated": now.strftime("%H:%M:%S UTC"),
+            "age": max(0, stamp-rows[-1]["t"]) if rows else None}
+
+def render_neon_chart(df, live_price, target, active, timeframe, sig, whale, market=None, round_df=None):
+    payload = _neon_payload(df, live_price, target, active, timeframe, sig, whale, market, round_df)
+    return _NEON_HTML.replace("__PAYLOAD__", json.dumps(payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c"))
+
+_NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}body{margin:0;background:#06121a;color:#e8edf6;font-family:Inter,system-ui,sans-serif}button,summary{-webkit-tap-highlight-color:transparent}button{font:inherit;cursor:pointer}.panel{box-shadow:0 0 18px #00dfb555,inset 0 0 16px #00dfb518;border:1px solid #00dfb5;border-radius:27px;overflow:hidden;background:radial-gradient(ellipse at 95% 0,rgba(0,100,85,.12),transparent 40%),#06121a;box-shadow:inset 0 0 18px #7b3de31c,0 0 12px #9b54ff20;margin:4px 3px}.header{padding:24px 21px 17px;display:flex;align-items:start;justify-content:space-between;gap:8px}.header h2{margin:0;font-size:25px;letter-spacing:-.8px}.sub{color:#949bb6;font-size:11px;font-weight:700;letter-spacing:1px;margin-top:8px}.price{font-size:25px;letter-spacing:-1px;font-weight:900;color:#00dfb5;text-shadow:0 0 19px #00e4ba40}.live{font-size:10px;color:#00dfb5;text-align:right;margin-top:7px}.cards{padding:0 20px 20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{min-height:104px;padding:17px;border:1px solid #35324d;border-radius:19px;background:linear-gradient(130deg,#0c1421,#080a14)}.card .label{font-size:10px;letter-spacing:1.8px;font-weight:800;color:#7c879d}.card strong{font-size:24px;display:block;margin-top:10px;line-height:1.2}.card small{color:#7e8b9f;font-size:10px;display:block;margin-top:8px}.purple{color:#c080ff}.cyan{color:#54d5f7}.green{color:#00dfb5}.red{color:#e64b4b}.status{font-size:17px!important}.signal{border-color:#9e355b;background:linear-gradient(120deg,#21101e55,#0b0a15)}details{border-top:1px solid #26303c;border-bottom:1px solid #26303c;border-radius:20px;margin:0 0 12px;background:#070c14}summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:22px 20px;font-size:14px;font-weight:850;letter-spacing:.5px}summary::-webkit-details-marker{display:none}summary small{font-size:9px;color:#758894;margin-left:auto;max-width:170px;letter-spacing:1px}summary:after{content:'+';color:#00dfb5;font-size:24px}details[open]>summary:after{content:'−'}.detail{padding:18px 20px 20px;border-top:1px solid #19232e}.detail h3{font-size:13px;margin:0 0 5px}.note{font-size:10px;color:#7e8b9f;line-height:1.7}.watch{font-size:14px;font-weight:800;color:#ffd057;padding:15px 0}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:9px}.metric{border:1px solid #1c2733;background:#080d17;padding:15px;border-radius:13px}.metric small{display:block;color:#8692a9;font-size:10px;font-weight:750;letter-spacing:.4px}.metric b{display:block;font-size:20px;margin-top:9px}.bars{margin:20px 0}.bar{display:flex;gap:12px;align-items:center;font-size:10px;color:#8b96ac;margin:12px 0}.track{height:7px;background:#19202c;border-radius:8px;flex:1}.track i{height:100%;display:block;border-radius:8px}.bar b{width:65px;text-align:right}.count{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}.count .metric{display:flex;align-items:center;justify-content:space-between;gap:6px}.count b{font-size:29px}.difference{margin-top:10px;display:flex;justify-content:space-between;align-items:center}.difference b{font-size:24px}.tools{padding:0 20px}.tools h3{font-size:12px;color:#7f8ca6;letter-spacing:2px;margin:15px 0 12px}.toggles{display:flex;flex-wrap:wrap;gap:9px}.toggle{padding:11px 13px;border:1px solid #23685e;border-radius:30px;background:#130f24;color:#e3e3f5;font-size:11px;font-weight:750}.toggle:before{content:'●';color:var(--c);margin-right:8px;text-shadow:0 0 11px var(--c)}.toggle span{font-size:9px;color:#9390a7;margin-left:6px}.toggle.off{opacity:.4}.legend{font-size:10px;color:#99a4bd;margin:16px 0 10px;display:flex;gap:10px;flex-wrap:wrap;font-weight:700}.canvas{position:relative;width:100%;touch-action:none;cursor:grab}.canvas svg{display:block;width:100%;height:auto;user-select:none}.floatcounts{display:flex;gap:10px;padding:0 20px;margin-top:4px}.floatcounts div{flex:1;border:1px solid #00dfb5;border-radius:14px;padding:10px;color:#00dfb5;font-size:11px;font-weight:800}.floatcounts div:last-child{border-color:#e64b4b;color:#e64b4b}.floatcounts b{font-size:22px;margin-left:8px}.chartnav{display:flex;align-items:center;gap:8px;padding:10px 20px;border-top:1px solid #202738;flex-wrap:wrap}.chartnav button{border:1px solid #393254;border-radius:8px;color:#bec2d6;background:#0e1421;padding:6px 11px;font-size:11px}.chartnav span{font-size:10px;color:#7b879d;margin-left:auto}.tooltip{min-height:33px;padding:6px 20px;color:#aab6cc;font-size:10px;line-height:1.6}.footer{font-size:9px;line-height:1.6;color:#7c889e;padding:10px 20px 18px}.empty{padding:80px 20px;text-align:center;color:#95a0b6}@media(max-width:460px){.header{padding:20px 16px 16px}.header h2,.price{font-size:22px}.cards{grid-template-columns:1fr;padding:0 16px 18px}.card{min-height:106px}.card strong{font-size:25px}.tools,.detail{padding-left:16px;padding-right:16px}summary{padding:20px 16px;font-size:13px}summary small{max-width:135px;font-size:8px}.toggle{padding:10px 12px}.count .metric{padding:10px}.count small{font-size:8px}.count b{font-size:25px}.metric b{font-size:20px}}
+
+/* Strong neon and readable labels across both visual surfaces. */
+.green{color:#00dfb5!important;text-shadow:0 0 5px #00dfb588,0 0 14px #00dfb555!important}
+.red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
+.pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
+.pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
+.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
+.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
+.rhero{filter:drop-shadow(0 0 9px var(--accent))}
+.note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
+.floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
+.canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
+@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
+
+
+/* Purple neon outlines, consistent across dashboard and chart cards. */
+.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
+.finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
+.panel,.card,.metric,details,.floatcounts div{
+ border-color:#23685e!important;
+ box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
+}
+.panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
+.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
+.techrow,.rnav,.chartnav{border-color:#23685e!important}
+
+
+/* Uniform turquoise presentation. Signal values and timing are unchanged. */
+.stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
+.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
+.panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
+ background:linear-gradient(125deg,#0c2026,#0a151e)!important;
+ border-color:#23685e!important;box-shadow:none!important;
+}
+.refapp .techrow,.refapp .techrow>div,.refapp .rnav,.panel .chartnav{border-color:#244047!important}
+.refapp .gear,.panel summary:after{color:#00dfb5!important;text-shadow:none!important}
+.refapp .finalcard,.refapp .finalclose,.refapp .analysisbox,.refapp .probbox{border-color:#244047!important}
+.stRadio label,[data-testid="stButton"] button,.panel .toggle,.panel .chartnav button{
+ background:#0a151e!important;border-color:#23685e!important;color:#e3f0ee!important;
+}
+.panel{background:#06121a!important}
+
+</style>
+<section class="panel">
+<header class="header"><div><h2>BTC / USD</h2><div class="sub" id="subtitle"></div></div><div><div class="price" id="price"></div><div class="live" id="live"></div></div></header>
+<div class="cards"><div class="card signal"><div class="label">SEÑAL OFICIAL DEL BOT</div><strong id="signal"></strong><small>Motor BTC Signal v4.6.1</small></div><div class="card"><div class="label">APOYO DEL MODELO</div><strong class="cyan" id="model"></strong><small>Apoyo calculado · no probabilidad de acierto</small></div><div class="card"><div class="label">PATTERN VIEW</div><strong class="purple" id="pattern"></strong><small>Giros en historia cargada · gráfica: últimos 4</small></div><div class="card"><div class="label">ESTADO DE LA GRÁFICA</div><strong class="status" id="status"></strong><small id="updated"></small></div></div>
+<details id="whale"><summary>🐋 WHALE FLOW <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>🐋 WHALE FLOW — LIVE</h3><div class="note">Operaciones observadas de Coinbase · últimos 30 s</div><div class="watch" id="watch"></div><div class="metrics"><div class="metric"><small>BUY FLOW</small><b class="green" id="buy"></b></div><div class="metric"><small>SELL FLOW</small><b class="red" id="sell"></b></div><div class="metric"><small>DIFERENCIA</small><b id="diff"></b></div><div class="metric"><small>ACTIVIDAD</small><b id="activity"></b></div><div class="metric"><small>FUERZA DEL DESEQUILIBRIO</small><b id="strength"></b></div></div><div class="bars"><div class="bar">BUY<div class="track"><i id="buybar" style="background:#00dfb5"></i></div><b id="buytotal"></b></div><div class="bar">SELL<div class="track"><i id="sellbar" style="background:#e64b4b"></i></div><b id="selltotal"></b></div></div><div class="count"><div class="metric"><small>🐋 BUY WHALES</small><b class="green" id="buys"></b></div><div class="metric"><small>🐋 SELL WHALES</small><b class="red" id="sells"></b></div></div><div class="metric difference"><small>DIFERENCIA DE OPERACIONES</small><b id="countdiff"></b></div><p class="note">«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. Es información de flujo, independiente de la señal oficial.</p></div></details>
+<details id="momentum"><summary>⚡ SHORT-TERM MOMENTUM <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>MOVIMIENTO RECIENTE DE BTC</h3><div class="metrics" id="momrows"></div><p class="note">Cambio porcentual calculado por el motor en 3, 5 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.</p></div></details>
+<div class="tools"><h3>INDICADORES</h3><div class="toggles" id="toggles"></div><div class="legend" id="legend"></div></div>
+<div class="floatcounts"><div>🐋 BUY WHALES <b id="floatbuy"></b></div><div>🐋 SELL WHALES <b id="floatsell"></b></div></div>
+<div class="tooltip" id="tooltip">Arrastra con un dedo · amplía con dos · AHORA vuelve al precio actual.</div><div class="canvas" id="canvas"></div>
+<div class="chartnav"><button id="older" aria-label="Velas anteriores">←</button><button id="newer" aria-label="Velas siguientes">→</button><button id="zoomin" aria-label="Acercar">＋</button><button id="zoomout" aria-label="Alejar">−</button><button id="reset">AHORA</button><span id="viewtf"></span></div>
+<div class="footer">COINBASE · BTC/USD · Objetivo de la ronda Kalshi. Soporte/resistencia: extremos de las últimas 20 velas anteriores. VWAP: sesión UTC, con las velas disponibles. Actualización al recibir nuevos datos; intervalo solicitado 2 s.</div></section>
+<script>
+let D=__PAYLOAD__; const $=id=>document.getElementById(id), fmt=(v,n=2)=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:n,maximumFractionDigits:n}), usd=v=>v==null?'—':'$'+fmt(v), compact=v=>v==null?'—':v>=1e6?'$'+(v/1e6).toFixed(2)+'M':v>=1000?'$'+(v/1000).toFixed(0)+'K':'$'+fmt(v,0);
+let saved={};try{saved=JSON.parse(localStorage.getItem('btc-neon-panel-v1')||'{}')}catch(e){}
+let toggles=Object.assign({ema9:true,ema21:true,vwap:true,volume:true,rsi:true,patterns:true},saved.toggles),visible=saved.visible||48,offset=saved.offset||0,pricePan=Number.isFinite(saved.pricePan)?saved.pricePan:0;
+function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
+for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
+function refreshLabels(){
+$('subtitle').textContent=D.timeframe.toUpperCase()+' · COINBASE · BTC SIGNAL';$('price').textContent=usd(D.price);$('live').textContent=D.price==null?'● SIN COTIZACIÓN':'● PRECIO RECIBIDO';$('signal').textContent=(D.signal==='UP'?'▲ ':D.signal==='DOWN'?'▼ ':'')+D.signal;$('signal').className=D.signal==='UP'?'green':D.signal==='DOWN'?'red':'cyan';$('model').textContent=fmt(D.signal==='UP'?D.up:D.signal==='DOWN'?D.down:Math.max(D.up,D.down),1)+'%';$('pattern').textContent=D.round_start==null?'SIN RONDA ACTIVA':D.pivot_count+' EXTREMOS CONFIRMADOS EN ESTA RONDA';$('status').textContent=D.rows.length?'DATOS RECIBIDOS':'SIN VELAS';$('updated').textContent='Actualizado '+D.updated;$('viewtf').textContent=D.timeframe+' · VELAS REALES';
+const F=D.flow,total=F.buy+F.sell,known=F.ok;
+$('watch').textContent=!known?'SIN DATOS DE FLUJO':total===0?'ESPERANDO OPERACIONES':F.direction==='NEUTRAL'?'FLUJO EQUILIBRADO':'WATCH '+F.direction;
+for(const [id,value] of [['buy',F.buy],['sell',F.sell],['buytotal',F.buy],['selltotal',F.sell]])$(id).textContent=known?compact(value):'—';
+$('diff').textContent=known?compact(Math.abs(F.buy-F.sell))+' '+(F.buy>F.sell?'BUY':F.sell>F.buy?'SELL':'NEUTRAL'):'—';$('diff').className=F.buy>F.sell?'green':'red';$('activity').textContent=known&&F.activity!=null?fmt(F.activity,1)+'×':'—';$('strength').textContent=known&&total?F.strength:'—';
+for(const [id,v] of [['buys',F.buys],['sells',F.sells],['floatbuy',F.buys],['floatsell',F.sells]])$(id).textContent=known?v:'—';
+$('countdiff').textContent=known?Math.abs(F.buys-F.sells)+' '+(F.buys>F.sells?'BUY':F.sells>F.buys?'SELL':'NEUTRAL'):'—';$('buybar').style.width=(total?100*F.buy/total:0)+'%';$('sellbar').style.width=(total?100*F.sell/total:0)+'%';
+$('momrows').replaceChildren();
+for(const key of ['mom3','mom5','mom15']){const v=D[key],box=document.createElement('div');box.className='metric';box.innerHTML='<small>'+key.slice(3)+' MINUTOS</small><b class="'+(v>=0?'green':'red')+'">'+(v==null?'—':(v>0?'+':'')+fmt(v,2)+'%')+'</b>';$('momrows').append(box)}
+}
+refreshLabels();
+const colors={ema9:'#f000ff',ema21:'#00eaff',vwap:'#6261ff',volume:'#00d7b0',rsi:'#f000ff',patterns:'#b668f5'};
+for(const [key,label] of Object.entries({ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',volume:'VOLUME',rsi:'RSI',patterns:'PATTERNS'})){const b=document.createElement('button');b.style.setProperty('--c',colors[key]);b.dataset.key=key;b.onclick=()=>{toggles[key]=!toggles[key];persist();draw()};$('toggles').append(b);b.dataset.label=label}
+let geometry=null;
+function draw(){
+document.querySelectorAll('.toggle').forEach(x=>x.removeAttribute('data-unused'));
+for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
+const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(0,Math.min(offset,Math.max(0,n-visible)));const end=n-Math.round(offset),start=Math.max(0,end-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$('canvas').innerHTML='<div class="empty">Esperando velas actuales…</div>';return}
+const last=all[n-1];$('legend').innerHTML=['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join('');
+const W=720,H=toggles.rsi?780:615,L=10,R=126,T=28,B=580,plot=W-L-R,step=plot/rows.length,body=Math.max(2,Math.min(11,step*.65));
+let vals=rows.flatMap(r=>[r.low,r.high]);for(const k of ['ema9','ema21','vwap'])if(toggles[k])vals.push(...rows.map(r=>r[k]).filter(v=>v!=null));for(const v of [D.target,D.support,D.resistance,D.price])if(v!=null)vals.push(v);let lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,5);lo-=pad;hi+=pad;lo+=pricePan;hi+=pricePan;const y=v=>T+(hi-v)/(hi-lo)*(B-T),x=i=>L+(i+.5)*step;
+let s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Gráfica BTC con velas, indicadores y RSI"><defs><clipPath id="plot"><rect x="0" y="0" width="'+(W-R)+'" height="'+B+'"/></clipPath></defs>';
+for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="14">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
+for(let k=0;k<=4;k++){const xx=L+plot*k/4;s+='<line x1="'+xx+'" y1="'+T+'" x2="'+xx+'" y2="'+(toggles.rsi?H-30:B)+'" stroke="#191c34"/>'}
+s+='<g clip-path="url(#plot)">';if(toggles.volume){const max=Math.max(...rows.map(r=>r.volume),1);rows.forEach((r,i)=>{let h=r.volume/max*105;s+='<rect x="'+(x(i)-body/2)+'" y="'+(B-h)+'" width="'+body+'" height="'+h+'" fill="'+(r.close>=r.open?'#00dfb5':'#e64b4b')+'" opacity=".9"/>'})}
+rows.forEach((r,i)=>{const c=r.close>=r.open?'#00dfb5':'#e64b4b';s+='<line x1="'+x(i)+'" x2="'+x(i)+'" y1="'+y(r.high)+'" y2="'+y(r.low)+'" stroke="'+c+'" stroke-width="1.7"/><rect x="'+(x(i)-body/2)+'" y="'+Math.min(y(r.open),y(r.close))+'" width="'+body+'" height="'+Math.max(1.8,Math.abs(y(r.open)-y(r.close)))+'" fill="'+c+'"/>'});
+for(const k of ['ema9','ema21','vwap'])if(toggles[k]){let points=rows.map((r,i)=>r[k]==null?'':x(i)+','+y(r[k])).filter(Boolean).join(' ');s+='<polyline points="'+points+'" fill="none" stroke="'+colors[k]+'" stroke-width="3" '+(k==='vwap'?'stroke-dasharray="8 6"':'')+'/>'}
+if(toggles.patterns){const piv=D.pivots.filter(p=>p.i>=start&&p.i<end);s+='<polyline points="'+piv.map(p=>x(p.i-start)+','+y(p.v)).join(' ')+'" fill="none" stroke="#bc75ff" stroke-width="3"/>';piv.forEach(p=>{const letter='ABCD'[D.pivots.indexOf(p)];s+='<circle cx="'+x(p.i-start)+'" cy="'+y(p.v)+'" r="5" fill="#bb76ff"/><text x="'+x(p.i-start)+'" y="'+(y(p.v)+(p.kind==='H'?-14:24))+'" fill="#c487ff" font-size="18" text-anchor="middle">'+letter+'</text>'})}
+s+='</g>';let levels=[[D.resistance,'RESISTANCE','#e64b4b'],[D.target,'TARGET','#00dfb5'],[D.price,'BTC','#00dfb5'],[D.support,'SUPPORT','#00dfb5']].filter(r=>r[0]!=null).map(r=>({v:r[0],label:r[1],c:r[2],yy:y(r[0]),labelY:y(r[0])})).filter(l=>l.yy>=T&&l.yy<=B).sort((a,b)=>a.yy-b.yy);
+let previous=-100;for(const l of levels){l.labelY=Math.max(T+12,previous+42,l.yy);previous=l.labelY}let excess=previous-(B-10);if(excess>0)for(const l of levels)l.labelY-=excess;
+for(const l of levels){s+='<line x1="0" y1="'+l.yy+'" x2="'+(W-R)+'" y2="'+l.yy+'" stroke="'+l.c+'" stroke-dasharray="4 5" opacity=".8"/><path d="M '+(W-R-6)+' '+l.yy+' L '+(W-R+5)+' '+l.labelY+'" stroke="'+l.c+'" fill="none"/><rect x="'+(W-R+4)+'" y="'+(l.labelY-17)+'" width="118" height="36" rx="4" fill="'+l.c+'"/><text x="'+(W-R+11)+'" y="'+(l.labelY-3)+'" fill="#06101b" font-size="10" font-weight="850">'+l.label+'</text><text x="'+(W-R+11)+'" y="'+(l.labelY+12)+'" fill="#06101b" font-size="14" font-weight="750">'+fmt(l.v)+'</text>'}
+if(toggles.rsi){const rt=620,rh=120,ry=v=>rt+(100-v)/100*rh;s+='<text x="14" y="610" fill="#aa8dc5" font-size="12">RSI 14</text>';for(const v of [30,70])s+='<line x1="0" y1="'+ry(v)+'" x2="'+(W-R)+'" y2="'+ry(v)+'" stroke="#3c284c" stroke-dasharray="5 5"/>';s+='<polyline points="'+rows.map((r,i)=>r.rsi==null?'':x(i)+','+ry(r.rsi)).filter(Boolean).join(' ')+'" fill="none" stroke="#f000ff" stroke-width="3"/>';if(last.rsi!=null)s+='<rect x="'+(W-R+4)+'" y="'+(ry(last.rsi)-12)+'" width="65" height="25" rx="3" fill="#f000ff"/><text x="'+(W-R+11)+'" y="'+(ry(last.rsi)+6)+'" fill="white" font-size="15">'+fmt(last.rsi)+'</text>'}
+for(let k=0;k<4;k++){const i=Math.round((rows.length-1)*k/3),tm=new Date(rows[i].t*1000).toLocaleString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',...(D.timeframe==='1D'?{month:'short',day:'numeric'}:{})});s+='<text x="'+x(i)+'" y="'+(H-7)+'" fill="#95a1bc" font-size="11" text-anchor="middle">'+tm+'</text>'}
+s+='<g id="crosshair"></g></svg>';$('canvas').innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end};
+}
+$('zoomin').onclick=()=>{visible=Math.max(12,Math.round(visible*.75));persist();draw()};$('zoomout').onclick=()=>{visible=Math.round(visible*1.3);persist();draw()};$('older').onclick=()=>{offset+=Math.max(5,Math.floor(visible/4));persist();draw()};$('newer').onclick=()=>{offset-=Math.max(5,Math.floor(visible/4));persist();draw()};$('reset').onclick=()=>{offset=0;visible=48;pricePan=0;draw();persist()};
+const touchPoints=new Map();let gesture=null;
+function chartPoint(e){const r=$('canvas').getBoundingClientRect();return {x:(e.clientX-r.left)/r.width*geometry.W,y:(e.clientY-r.top)/r.height*geometry.H}}
+function beginGesture(){
+ if(!geometry||!touchPoints.size){gesture=null;return}
+ const p=[...touchPoints.values()],g=geometry;
+ gesture={points:p.map(v=>({...v})),visible:g.rows.length,offset,pricePan,range:g.hi-g.lo,plot:g.W-g.L-g.R,height:g.B-g.T,end:g.end};
+ if(p.length>=2){gesture.distance=Math.max(12,Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y));gesture.center=(p[0].x+p[1].x)/2;gesture.anchor=g.start+Math.max(0,Math.min(1,(gesture.center-g.L)/gesture.plot))*g.rows.length}
+}
+$('canvas').addEventListener('pointerdown',e=>{
+ if(!geometry||(e.pointerType==='mouse'&&e.button!==0))return;
+ e.preventDefault();touchPoints.set(e.pointerId,chartPoint(e));try{$('canvas').setPointerCapture(e.pointerId)}catch(_){}beginGesture();
+});
+$('canvas').addEventListener('pointermove',e=>{
+ if(!geometry)return;
+ if(touchPoints.has(e.pointerId)){
+  e.preventDefault();touchPoints.set(e.pointerId,chartPoint(e));const p=[...touchPoints.values()],a=gesture;if(!a)return;
+  if(p.length>=2&&a.points.length>=2){
+   const distance=Math.max(12,Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y));
+   visible=Math.max(12,Math.min(D.rows.length,Math.round(a.visible*a.distance/distance)));
+   const center=(p[0].x+p[1].x)/2,fraction=Math.max(0,Math.min(1,(center-geometry.L)/a.plot));
+   offset=Math.round(D.rows.length-a.anchor-(1-fraction)*visible);
+  }else if(p.length===1&&a.points.length===1){
+   offset=Math.round(a.offset+(p[0].x-a.points[0].x)/a.plot*a.visible);
+   pricePan=a.pricePan+(p[0].y-a.points[0].y)/a.height*a.range;
+  }
+  draw();persist();return;
+ }
+ inspectCandle(chartPoint(e).x);
+});
+function endGesture(e){
+ if(!touchPoints.has(e.pointerId))return;
+ const wasTap=gesture&&gesture.points.length===1&&touchPoints.size===1&&Math.hypot(touchPoints.get(e.pointerId).x-gesture.points[0].x,touchPoints.get(e.pointerId).y-gesture.points[0].y)<5;
+ const point=touchPoints.get(e.pointerId);touchPoints.delete(e.pointerId);beginGesture();persist();if(wasTap)inspectCandle(point.x);
+}
+for(const event of ['pointerup','pointercancel','lostpointercapture'])$('canvas').addEventListener(event,endGesture);
+$('canvas').addEventListener('dblclick',()=>{$('reset').onclick()});
+$('canvas').addEventListener('wheel',e=>{
+ if(!geometry)return;e.preventDefault();const p=chartPoint(e),g=geometry,fraction=Math.max(0,Math.min(1,(p.x-g.L)/(g.W-g.L-g.R))),anchor=g.start+fraction*g.rows.length;
+ visible=Math.max(12,Math.min(D.rows.length,Math.round(g.rows.length*(e.deltaY>0?1.15:.85))));offset=Math.round(D.rows.length-anchor-(1-fraction)*visible);draw();persist();
+},{passive:false});
+function inspectCandle(px){if(!geometry)return;const g=geometry,i=Math.max(0,Math.min(g.rows.length-1,Math.floor((px-g.L)/(g.W-g.L-g.R)*g.rows.length))),r=g.rows[i],time=new Date(r.t*1000).toLocaleString('en-US',{timeZone:'America/New_York'});$('tooltip').textContent=time+' · O '+fmt(r.open)+'  H '+fmt(r.high)+'  L '+fmt(r.low)+'  C '+fmt(r.close)+' · Vol '+fmt(r.volume,3);$('crosshair').innerHTML='<line x1="'+g.x(i)+'" x2="'+g.x(i)+'" y1="'+g.T+'" y2="'+g.B+'" stroke="#b8a5e0" stroke-dasharray="4 4"/>'}
+
+window.addEventListener('message', function(event){
+  if (!event.data || event.data.kind !== 'alpha-chart-update') return;
+  // Only the chart data changes: preserve iframe, zoom, gesture handlers and cards.
+  D = event.data.payload;
+  refreshLabels();
+  draw();
+});
+draw();
+</script></html>'''
+
+
+def signal_requirement_view(sig, seconds_left):
+    """Read-only explanation of the existing three alternative entry paths."""
+    keys = ('rsi', 'rsi3', 'rsi5', 'adx', 'vwap_atr', 'macd3', 'vol_ratio', 'mom3', 'target_atr')
+    valid = sig.get('data_valid') is not False and all(_plan_number(sig.get(k)) is not None for k in keys)
+    valid = valid and sig.get('trend3') in ('UP', 'DOWN', 'NEUTRAL') and sig.get('trend5') in ('UP', 'DOWN', 'NEUTRAL')
+    if not valid:
+        return {'valid': False, 'sides': {}, 'noise_ok': None}
+    r1, r3, r5, adx, vw, macd, volume, mom, cushion = (float(sig[k]) for k in keys)
+    d3, d5 = sig['trend3'], sig['trend5']
+    noise_ok = not (abs(vw) < .18 and (sig.get('distance') is None or abs(cushion) < .22) and adx < 20)
+    sides = {}
+    for side, sign, other in (('UP', 1, 'DOWN'), ('DOWN', -1, 'UP')):
+        up = sign == 1
+        routes = [
+            ('Tendencia alineada', [
+                ('Tendencias de 3 y 5 minutos en ' + side, d3 == side and d5 == side),
+                ('Fuerza de tendencia o RSI suficientes', adx >= 20 or (r3 >= 52 and r5 >= 50 if up else r3 <= 48 and r5 <= 50)),
+                ('Precio bien situado frente al promedio VWAP', vw > -.15 if up else vw < .15),
+            ]),
+            ('Señal temprana', [
+                ('La tendencia de 5 minutos no va en contra', d5 != other),
+                ('Impulso de 3 minutos a favor', macd * sign > 0),
+                ('RSI de 1 y 3 minutos a favor', r1 >= 53 and r3 >= 50 if up else r1 <= 47 and r3 <= 50),
+                ('Precio separado del promedio VWAP a favor', vw * sign >= .05),
+                ('Volumen o movimiento suficientes', volume >= .90 or mom * sign > .025),
+            ]),
+            ('Tramo final de la ronda', [
+                ('Quedan 3 minutos o menos', seconds_left is not None and 0 < seconds_left <= 180),
+                ('Margen suficiente frente al target', sig.get('distance') is not None and cushion * sign >= .35),
+                ('La tendencia de 5 minutos no va en contra', d5 != other),
+            ]),
+        ]
+        sides[side] = [{'name': name, 'checks': checks, 'met': sum(bool(ok) for _, ok in checks),
+                        'total': len(checks), 'complete': all(bool(ok) for _, ok in checks)} for name, checks in routes]
+    return {'valid': True, 'sides': sides, 'noise_ok': noise_ok}
+
+
+def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
+    """One visual box for individual conditions; never changes confirmation."""
+    view = signal_requirement_view(sig, seconds_left)
+    state = round_signal.get('round_state') or {}
+    now = now or datetime.now(timezone.utc)
+    end = pd.to_datetime((market or {}).get('close_time'), utc=True, errors='coerce')
+    closed = seconds_left is not None and seconds_left <= 0
+    if not pd.isna(end):
+        closed = closed or end <= pd.Timestamp(now)
+    ready = view['valid'] and bool(state) and not closed and not pd.isna(end)
+    side = sig.get('candidate') or state.get('active_direction') or state.get('first_direction')
+    if side not in ('UP', 'DOWN') and view['valid']:
+        side = max(('UP', 'DOWN'), key=lambda d: max(r['met']/r['total'] for r in view['sides'][d]))
+    checks = []
+    if view['valid'] and side in ('UP', 'DOWN'):
+        routes = view['sides'][side]
+        # Closing override has priority when applicable, just as in the engine.
+        complete = [r for r in routes if r['complete']]
+        route = (routes[2] if routes[2]['complete'] else complete[0] if complete else
+                 max(routes, key=lambda r: r['met']/r['total']))
+        checks = route['checks'] + [('Fuera de la zona de ruido', view['noise_ok'])]
+    total = len(checks)
+    met = sum(bool(ok) for _, ok in checks) if ready else 0
+    bars = ''.join('<i class="sq-on" title="' + html.escape(label, quote=True) + '"></i>' if ready and ok else
+                   '<i title="' + html.escape(label, quote=True) + '"></i>' for label, ok in checks)
+    label = 'REQUISITOS ' + side if side in ('UP','DOWN') else 'REQUISITOS DE LA SEÑAL'
+    note = 'RONDA TERMINADA' if closed else 'ESPERANDO DATOS' if not ready else 'Cada barra representa un requisito.'
+    number = str(met) + '<small>/' + str(total) + '</small>' if total else '—'
+    return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars i{height:7px;flex:1;background:#1d3038;border-radius:9px}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
+
+
+@st.fragment(run_every="2s")
+def live_dashboard():
+    btc_error = ""
+    live_price_error = ""
+    kalshi_error = ""
+    kalshi_live_error = ""
+
+    try:
+        btc_df = add_indicators(get_btc_data())
+        btc_ok = True
+    except Exception as error:
+        btc_ok = False
+        btc_error = str(error)
+        btc_df = None
+
+    try:
+        market = get_kalshi_btc_market()
+        kalshi_ok = market is not None
+    except Exception as error:
+        kalshi_ok = False
+        kalshi_error = str(error)
+        market = None
+
+    try:
+        coinbase_live_price = get_btc_live_price()
+        coinbase_live_ok = True
+    except Exception as error:
+        coinbase_live_ok = False
+        live_price_error = str(error)
+        coinbase_live_price = (
+            float(btc_df.iloc[-1]["close"]) if btc_ok else None
+        )
+
+    kalshi_live_price = None
+    kalshi_live_ok = False
+
+    if market:
+        try:
+            kalshi_live_price = get_kalshi_live_btc(market)
+            kalshi_live_ok = True
+        except Exception as error:
+            kalshi_live_error = str(error)
+
+    if kalshi_live_price is not None:
+        live_btc_price = kalshi_live_price
+        source = "KALSHI LIVE"
+    else:
+        live_btc_price = coinbase_live_price
+        source = (
+            "COINBASE"
+            if coinbase_live_ok else
+            "COINBASE CANDLE" if live_btc_price is not None else "SIN DATOS"
+        )
+
+    if market:
+        ticker = market.get("ticker", "--")
+        target = get_target_from_market(market)
+        seconds_left = get_seconds_remaining(market)
+    else:
+        ticker = "--"
+        target = None
+        seconds_left = None
+
+    if btc_ok:
+        sig = build_signal(
+            btc_df, target, seconds_left, live_btc_price, source
+        )
+    else:
+        _TRACE_CONTEXT.build_id = None
+        _TRACE_CONTEXT.build_payload = None
+        sig = {
+            "data_valid": False,
+            "data_error": btc_error,
+            "price": live_btc_price if live_btc_price is not None else 0,
+            "candle_price": 0,
+            "rsi": 50,
+            "mom3": 0,
+            "mom5": 0,
+            "mom15": 0,
+            "vol_ratio": 0,
+            "ema": "N/A",
+            "technical_score": 0,
+            "target_score": 0,
+            "final_score": 0,
+            "distance": None,
+            "distance_pct": None,
+            "momentum": "NEUTRAL",
+            "up_probability": 50,
+            "down_probability": 50,
+        }
+
+    round_signal = process_round_signal(
+        ticker, sig, market, seconds_left
+    )
+
+    # Cinta live de segundos para el Lector de Cierre.
+    update_micro_tape(ticker, live_btc_price, source)
+    micro = micro_reading()
+    reader = closing_reader(sig, round_signal, seconds_left, micro)
+    if not btc_ok:
+        reader = {**reader, "percent":0, "headline":"SIN DATOS ACTUALES",
+                  "note":"No se puede validar la señal hasta recuperar las velas."}
+    reader_percent_label = f"{reader['percent']}%" if reader.get("direction") else "—"
+    if round_signal.get("decision") not in ("UP", "DOWN"):
+        reader_percent_label = "—"
+    if seconds_left is not None and seconds_left <= 0:
+        # El reloj y el precio instantáneo no prueban la liquidación oficial.
+        reader = {**reader, "percent": 0,
+                  "headline": "RONDA TERMINADA · RESULTADO PENDIENTE",
+                  "note": "Esperando verificación del resultado oficial de Kalshi."}
+        reader_percent_label = "—"
+
+    # Ballenas: capa visual independiente; NO modifica señales ni probabilidades v4.6.1.
+    try:
+        whale = get_coinbase_whale_flow()
+    except Exception:
+        whale = None
+
+    state = round_signal.get("round_state")
+    active = (
+        state.get("active_direction")
+        if state and btc_ok
+        else None
+    )
+
+    # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
+    try:
+        order_book = get_coinbase_order_book()
+    except Exception:
+        order_book = None
+    order_flow = get_order_flow_advisory(whale)
+    reversal_detector_html = render_intelligent_market_panel(order_book, order_flow, active)
+
+    if active == "UP":
+        accent = "#00dfb5"
+        glow = "rgba(0,223,181,.46)"
+        soft = "rgba(0,223,181,.10)"
+        hero = "↑ UP"
+        confidence = sig["up_probability"]
+    elif active == "DOWN":
+        accent = "#e64b4b"
+        glow = "rgba(230,75,75,.45)"
+        soft = "rgba(230,75,75,.10)"
+        hero = "↓ DOWN"
+        confidence = sig["down_probability"]
+    else:
+        accent = "#38bdf8"
+        glow = "rgba(56,189,248,.30)"
+        soft = "rgba(56,189,248,.09)"
+        hero = None
+        confidence = max(
+            sig["up_probability"], sig["down_probability"]
+        )
+
+    market_live = kalshi_ok and live_btc_price is not None
+
+    distance = sig["distance"]
+    distance_pct = sig.get("distance_pct")
+    up = int(sig["up_probability"])
+    down = int(sig["down_probability"])
+    target_text = f"${target:,.0f}" if target is not None else "--"
+    countdown = format_countdown(seconds_left)
+
+    if distance is None:
+        distance_text, distance_sub = "--", "SIN TARGET"
+        distance_color = "#94a3b8"
+    else:
+        distance_text = f"${abs(distance):,.0f}"
+        distance_sub = f"{abs(distance_pct):.2f}%"
+        distance_color = "#00dfb5" if distance > 0 else "#e64b4b" if distance < 0 else "#94a3b8"
+    first_signal = (state.get("first_direction") if state else None) or "--"
+    first_time = "--"
+    if state and state.get("first_signal_time"):
+        signal_dt = state["first_signal_time"]
+        if signal_dt.tzinfo is None:
+            signal_dt = signal_dt.replace(tzinfo=timezone.utc)
+        first_time = signal_dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p")
+
+    # Etiqueta visual en español; el motor conserva internamente BULL/BEAR.
+    ema_display = "ALCISTA" if sig.get("ema") == "BULL" else "BAJISTA" if sig.get("ema") == "BEAR" else sig.get("ema", "N/A")
+
+    # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
+    # las probabilidades oficiales.
+    pre = build_presignal(sig, seconds_left)
+    pre_direction = pre["direction"]
+    pre_percent = pre["percent"]
+
+    if pre_direction == "UP":
+        pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
+        pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
+        pre_label = "POSIBLE UP"
+    elif pre_direction == "DOWN":
+        pre_color, pre_bg, pre_glow = "#e64b4b", "rgba(104,25,37,.28)", "rgba(230,75,75,.20)"
+        pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
+        pre_label = "POSIBLE DOWN"
+    else:
+        pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
+        pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
+        pre_label = "NEUTRAL"
+
+    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
+    pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
+
+    pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
+      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
+      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
+      <div class="prebar"><b style="width:{pre_percent}%"></b></div>
+      <div class="prenote">{pre_note}</div>
+    </section>'''
+
+    if active == "UP":
+        hero_arrow, hero_word = "", "UP"
+        btc_delta = f"{sig['mom3']:+.2f}%"
+    elif active == "DOWN":
+        hero_arrow, hero_word = "", "DOWN"
+        btc_delta = f"{sig['mom3']:+.2f}%"
+    else:
+        hero_arrow, hero_word = "•", "ESPERANDO"
+        btc_delta = f"{sig['mom3']:+.2f}%"
+
+    ema_class = "green" if sig["ema"] == "BULL" else "red"
+    rsi_class = "green" if sig["rsi"] >= 55 else "red" if sig["rsi"] <= 45 else ""
+    mom_class = "green" if sig["mom3"] > 0 else "red" if sig["mom3"] < 0 else ""
+    time_pct = max(0, min(100, int((seconds_left or 0) / 900 * 100)))
+
+    # Panel de cierre de últimos segundos — solo lectura; NO cambia la señal principal.
+    c30 = float(micro.get("change_30s", 0.0) or 0.0)
+    c10 = float(micro.get("change_10s", 0.0) or 0.0)
+    c5 = float(micro.get("change_5s", 0.0) or 0.0)
+    motion_labels = {}
+    for window in (5, 10, 30):
+        value = micro.get(f"change_{window}s")
+        motion_labels[window] = "—" if value is None else f"{'↑' if value > 0 else '↓' if value < 0 else '→'}<br>{value:+.0f}"
+    speed_ready = micro.get("change_10s") is not None
+    speed10 = c10 / 10.0
+    speed_word = "SUBIENDO" if speed10 > 0.15 else "BAJANDO" if speed10 < -0.15 else "ESTABLE"
+    speed_arrow = "↑" if speed10 > 0.15 else "↓" if speed10 < -0.15 else "→"
+    speed_value = f"{speed10:+.1f}/s" if speed_ready else "—"
+    if not speed_ready:
+        speed_word, speed_arrow = "REUNIENDO DATOS", ""
+    speed_color = "#00dfb5" if speed10 > 0.15 else "#e64b4b" if speed10 < -0.15 else "#94a3b8"
+    market_side = "UP" if (distance or 0) > 0 else "DOWN" if (distance or 0) < 0 else "NEUTRAL"
+    abs_final_distance = abs(distance or 0)
+
+    # En el tramo final, tiempo + posición REAL frente al target mandan en este cuadro.
+    # Así no muestra "CIERRE MUY DISPUTADO" solo porque la señal vieja o la velocidad
+    # contradigan el lado que realmente está ganando a segundos del cierre.
+    if seconds_left is not None and seconds_left <= 60 and market_side != "NEUTRAL":
+        if active in ("UP", "DOWN") and market_side != active:
+            final_status = f"GIRO FINAL HACIA {market_side}"
+        else:
+            final_status = f"VENTAJA FINAL {market_side}"
+        final_note = (
+            f"Quedan {seconds_left}s · BTC está ${abs_final_distance:,.0f} "
+            f"{'arriba' if distance > 0 else 'abajo'} del target · "
+            f"ahora favorece {market_side}."
+        )
+    elif active in ("UP", "DOWN"):
+        if market_side == active and ((active == "UP" and speed10 >= -0.15) or (active == "DOWN" and speed10 <= 0.15)):
+            final_status = f"AÚN FAVORABLE A {active}"
+            final_note = f"El precio se mantiene {'sobre' if active == 'UP' else 'bajo'} el target, con presión inmediata controlada."
+        elif market_side != "NEUTRAL" and market_side != active and abs_final_distance >= 5:
+            final_status = f"GIRO HACIA {market_side}"
+            final_note = f"BTC está al otro lado del target y la lectura actual favorece {market_side}."
+        else:
+            final_status = f"AÚN FAVORABLE A {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA CLARA"
+            final_note = "La lectura sigue el lado actual del target y el movimiento reciente."
+    else:
+        final_status = f"VENTAJA FINAL {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA FINAL"
+        final_note = "Lectura independiente basada en distancia, tiempo restante y movimiento de los últimos segundos."
+    if seconds_left is None or seconds_left > 60:
+        # Fuera del tramo final, esto describe posición, no pronostica cierre.
+        final_status = f"POSICIÓN ACTUAL {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA ACTUAL"
+        final_note = "Posición actual frente al target; todavía no es una lectura del cierre final."
+    if seconds_left is not None and seconds_left <= 0:
+        final_status = "RESULTADO OFICIAL PENDIENTE"
+        final_note = "El precio mostrado al terminar no confirma la liquidación del contrato."
+    final_distance = abs(distance) if distance is not None else 0.0
+    final_dist_pct = abs(distance_pct) if distance_pct is not None else 0.0
+    final_panel = f'''<div class="finalclose">
+      <div class="finalgrid">
+        <div class="finalcard motion"><div class="finaltitle">▥ &nbsp; MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motionrow">
+          <div><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
+          <div><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
+          <div><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
+        </div><div class="finalnote">Cambio de precio en los últimos segundos.</div></div>
+        <div class="finalcard distance"><div class="finaltitle">▥ &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">${final_distance:,.0f}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct:.2f}%</div></div>
+        <div class="finalcard speed"><div class="finaltitle">VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div><div class="finalnote">En los últimos 10 s.</div></div>
+      </div>
+      <div class="finalanalysis">
+        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b>{final_status}</b><span>{final_note}</span></div></div>
+        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
+      </div>
+    </div>'''
+
+    requirements_html = render_signal_requirements(sig, round_signal, market, seconds_left)
+
+    # Advertencia compacta únicamente visual; usa el aviso existente del motor.
+    weakness_html = (
+        '<div class="weakness-inline" role="status">⚠ ' +
+        html.escape(round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
+        '</div>'
+        if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
+    )
+
+    panel_html = f"""
+<div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
+  <header class="rhead">
+    <div class="rtitle">BTC Signal</div>
+    <div class="rver">v4.6.1</div>
+    <a class="gear" href="?page=settings" target="_self" aria-label="Ajustes">⚙</a>
+    <div class="rlive"><i></i>{'Mercado en vivo' if market_live else 'Conexión parcial'}</div>
+  </header>
+
+  <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}">
+    <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
+    <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
+  </section>
+
+  {weakness_html}
+
+  {pre_html}
+
+  <div class="rgrid">
+    <div class="rcard keycard">
+      <div class="bigicon btcicon">₿</div>
+      <div><div class="rlabel">BTC</div><div class="rvalue">${sig["price"]:,.0f}</div>
+      <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
+    </div>
+    <div class="rcard keycard">
+      <div class="bigicon targeticon">◎</div>
+      <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
+    </div>
+    <div class="rcard keycard">
+      <div class="bars" style="--accent:{distance_color}"><b></b><b></b><b></b></div>
+      <div><div class="rlabel">DISTANCIA AL TARGET</div><div class="rvalue" style="color:{distance_color}">{distance_text}</div>
+      <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
+    </div>
+    <div class="rcard keycard">
+      <div class="clock">◷</div>
+      <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
+      <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
+    </div>
+  </div>
+
+  <section class="rcard probs">
+    <div class="rlabel">APOYO CALCULADO · UP / DOWN</div>
+    <div class="pbar"><div class="pup" style="width:{up}%">{up}%</div><div class="pdown" style="width:{down}%">{down}%</div></div>
+    <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
+  </section>
+
+  <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
+    <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
+    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{reader['note']}</small></div>
+    <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
+    {final_panel}
+  </section>
+
+  {requirements_html}
+
+  {reversal_detector_html}
+
+
+  <section class="rcard tech">
+    <div class="techhead"><span>DETALLES TÉCNICOS</span><span>⌃</span></div>
+    <div class="techrow">
+      <div><small>1ª SEÑAL</small><b style="color:var(--accent)">{first_signal}</b><i>{first_time}</i></div>
+      <div><small>KALSHI · PRECIO</small><b>{f"{round_signal['entry_price'] * 100:.0f}¢" if round_signal['entry_price'] is not None else "—"}</b><i>{round_signal["entry_quality"]}</i></div>
+      <div><small>EMA</small><b class="{ema_class}">{ema_display}</b><i>9 / 21</i></div>
+      <div><small>RSI</small><b class="{rsi_class}">{sig["rsi"]:.0f}</b><i>14</i></div>
+      <div><small>MOMENTUM</small><b class="{mom_class}">{sig["mom3"]:+.2f}</b><i>3 MIN</i></div>
+    </div>
+  </section>
+
+  <footer><span>BTC SIGNAL v4.6.1 &nbsp; | &nbsp; DISEÑADO PARA TRADERS REALES</span><span>MENOS RUIDO. MÁS RESULTADOS.</span></footer>
+</div>
+<div class="ticker">{ticker} • SCORE {sig["final_score"]:+.2f}</div>
+"""
+    # Cambia solo texto y atributos, manteniendo nodos existentes.
+    # La UI vive fuera del fragmento; este fragmento sigue calculando cada 2 s.
+    panel_data = json.dumps(panel_html, ensure_ascii=False).replace("<", "\\u003c")
+    st.html(
+        "<script>window.__alphaUpdatePanel(" + panel_data + ");</script>",
+        unsafe_allow_javascript=True,
+    )
+
+    # Panel neón: capa visual independiente. No altera el motor de señales.
+    if btc_ok:
+        chart_timeframe = st.radio(
+            "Temporalidad del gráfico",
+            ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
+            horizontal=True, key="chart_timeframe", label_visibility="collapsed",
+        )
+        try:
+            chart_df = btc_df if chart_timeframe in ("1m", "3m", "5m") else _neon_chart_history(chart_timeframe)
+            chart_html = render_neon_chart(
+                chart_df, coinbase_live_price if coinbase_live_ok else None,
+                target, active, chart_timeframe, sig, whale, market, btc_df,
+            )
+            # Keep the chart in its permanent host outside this 2-second fragment.
+            # Send only new JSON payload; never recreate the iframe on each refresh.
+            chart_payload = _neon_payload(
+                chart_df, coinbase_live_price if coinbase_live_ok else None,
+                target, active, chart_timeframe, sig, whale, market, btc_df,
+            )
+            st.session_state["_alpha_chart_html_initial"] = chart_html
+            payload_script = json.dumps(chart_payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
+            st.html(
+                "<script>window.__alphaNextChart=" + payload_script + ";"
+                "if(window.__alphaPushChart)window.__alphaPushChart(window.__alphaNextChart);</script>",
+                unsafe_allow_javascript=True,
+            )
+        except Exception:
+            st.warning("No se pudo cargar esta temporalidad. Prueba 1m o vuelve a seleccionarla.")
+
+    if target is None and kalshi_ok:
+        st.warning(
+            "Kalshi está conectado, pero esta ronda no entregó un target numérico."
+        )
+    if btc_error:
+        st.error("Error Coinbase velas: " + btc_error)
+    if live_price_error and live_btc_price is None:
+        st.warning("Coinbase live: " + live_price_error)
+    if kalshi_live_error and coinbase_live_price is not None:
+        st.warning(
+            "Kalshi BTC live falló temporalmente; usando Coinbase."
+        )
+    if kalshi_error:
+        st.error("Error Kalshi: " + kalshi_error)
+
+
+import zlib
+
+SIGNAL_TRACE_DB = "btc_signal_decisions.db"
+_TRACE_CONTEXT = threading.local()
 
 
 def _trace_json(value):
@@ -3827,6 +3897,216 @@ def _trace_event(kind, payload, ticker=None):
         return
 
 
+
+
+# =========================================================
+# ALPHA AI GATE — supervised, conservative signal filter
+# Learns only from official Kalshi settlements. It can BLOCK a
+# weak UP/DOWN proposal, but it never invents or reverses a signal.
+# =========================================================
+AI_GATE_MIN_ROWS = 80
+AI_GATE_MIN_HOLDOUT = 15
+AI_GATE_MIN_BRIER_GAIN = 0.02
+AI_GATE_BLOCK_BELOW = 0.45
+_AI_GATE_CACHE = {"at": 0.0, "model": None, "status": "sin datos oficiales"}
+
+def _ai_sigmoid(z):
+    z = np.clip(np.asarray(z, dtype=float), -30.0, 30.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+def _ai_feature_vector(features, candidate=None):
+    values = []
+    for name in SHADOW_FEATURES:
+        try:
+            value = float(features.get(name))
+            if not np.isfinite(value):
+                value = np.nan
+        except (TypeError, ValueError, OverflowError):
+            value = np.nan
+        values.append(value)
+    # Direction matters: the same indicator values can mean different odds
+    # for a proposed UP versus DOWN signal.
+    values.append(1.0 if candidate == "UP" else 0.0 if candidate == "DOWN" else np.nan)
+    return np.asarray(values, dtype=float)
+
+def _ai_fit_logistic(X, y, epochs=900, lr=0.035):
+    means = np.nanmean(X, axis=0)
+    means = np.where(np.isfinite(means), means, 0.0)
+    X = np.where(np.isfinite(X), X, means)
+    scales = np.std(X, axis=0)
+    scales = np.where(scales < 1e-8, 1.0, scales)
+    Z = np.clip((X - means) / scales, -8, 8)
+    Z = np.column_stack([np.ones(len(Z)), Z])
+    weights = np.zeros(Z.shape[1], dtype=float)
+    # Full-batch gradient descent with mild L2 regularization.
+    for _ in range(epochs):
+        p = _ai_sigmoid(Z @ weights)
+        grad = (Z.T @ (p - y)) / len(y)
+        grad[1:] += 0.01 * weights[1:]
+        weights -= lr * grad
+    return {"means": means, "scales": scales, "weights": weights}
+
+def _ai_predict_model(model, X):
+    X = np.asarray(X, dtype=float)
+    means, scales = model["means"], model["scales"]
+    X = np.where(np.isfinite(X), X, means)
+    Z = np.clip((X - means) / scales, -8, 8)
+    Z = np.column_stack([np.ones(len(Z)), Z])
+    return _ai_sigmoid(Z @ model["weights"])
+
+def _ai_official_training_rows():
+    """Return only snapshots whose round has an official yes/no settlement."""
+    try:
+        with sqlite3.connect(SHADOW_AI_DB, timeout=2) as shadow:
+            shadow.row_factory = sqlite3.Row
+            shadow.execute("""CREATE TABLE IF NOT EXISTS snapshots (
+                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
+                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
+                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
+            snapshots = shadow.execute(
+                "SELECT ticker, observed_at, candidate, features_json "
+                "FROM snapshots WHERE candidate IN ('UP','DOWN') ORDER BY observed_at"
+            ).fetchall()
+        if not snapshots:
+            return []
+        with _history_db() as history:
+            history.row_factory = sqlite3.Row
+            try:
+                settled = {r["ticker"]: r["official_result"] for r in history.execute(
+                    "SELECT ticker, official_result FROM round_history "
+                    "WHERE verification_status='official' AND lower(official_result) IN ('yes','no')"
+                ).fetchall()}
+            except sqlite3.Error:
+                return []
+        rows = []
+        for row in snapshots:
+            outcome = settled.get(row["ticker"])
+            if outcome not in ("yes", "no"):
+                continue
+            candidate = row["candidate"]
+            won = (candidate == "UP" and outcome == "yes") or (candidate == "DOWN" and outcome == "no")
+            try:
+                features = json.loads(row["features_json"])
+            except (TypeError, ValueError):
+                continue
+            rows.append((_ai_feature_vector(features, candidate), 1.0 if won else 0.0, row["observed_at"]))
+        return rows
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return []
+
+def _ai_gate_model(force=False):
+    now = time.monotonic()
+    if not force and now - _AI_GATE_CACHE["at"] < 60:
+        return _AI_GATE_CACHE["model"], _AI_GATE_CACHE["status"]
+    _AI_GATE_CACHE["at"] = now
+    _AI_GATE_CACHE["model"] = None
+    rows = _ai_official_training_rows()
+    if len(rows) < AI_GATE_MIN_ROWS:
+        status = f"IA en aprendizaje: {len(rows)}/{AI_GATE_MIN_ROWS} rondas con resultado oficial"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+    X = np.vstack([r[0] for r in rows])
+    y = np.asarray([r[1] for r in rows], dtype=float)
+    split = max(int(len(rows) * 0.8), len(rows) - AI_GATE_MIN_HOLDOUT)
+    split = min(split, len(rows) - AI_GATE_MIN_HOLDOUT)
+    if split < 30 or len(np.unique(y[:split])) < 2 or len(np.unique(y[split:])) < 2:
+        status = "IA sin filtro: faltan resultados variados para validar"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+    try:
+        validation_model = _ai_fit_logistic(X[:split], y[:split])
+        predictions = _ai_predict_model(validation_model, X[split:])
+        baseline = float(np.mean(y[:split]))
+        model_brier = float(np.mean((predictions - y[split:]) ** 2))
+        baseline_brier = float(np.mean((baseline - y[split:]) ** 2))
+        gain = baseline_brier - model_brier
+        if gain < AI_GATE_MIN_BRIER_GAIN:
+            status = f"IA en evaluación: no mejora el modelo base (ganancia Brier {gain:.3f}); no bloquea señales"
+            _AI_GATE_CACHE.update(model=None, status=status)
+            return None, status
+        model = _ai_fit_logistic(X, y)
+        status = f"Filtro IA validado en historial: {len(rows)} rondas oficiales; mejora Brier {gain:.3f}"
+        _AI_GATE_CACHE.update(model=model, status=status)
+        return model, status
+    except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
+        status = f"IA sin filtro por validación: {type(exc).__name__}"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+
+def _apply_ai_signal_gate(sig):
+    """Only block a proposed signal when a validated model estimates weak odds."""
+    if not isinstance(sig, dict):
+        return sig
+    candidate = sig.get("candidate")
+    sig["candidate_raw"] = candidate
+    sig["ai_gate_active"] = False
+    sig["ai_win_probability"] = None
+    model, status = _ai_gate_model()
+    sig["ai_gate_status"] = status
+    if candidate not in ("UP", "DOWN") or model is None:
+        return sig
+    features = {name: sig.get(name) for name in SHADOW_FEATURES}
+    vector = _ai_feature_vector(features, candidate).reshape(1, -1)
+    try:
+        p_win = float(_ai_predict_model(model, vector)[0])
+    except (ValueError, TypeError, FloatingPointError):
+        return sig
+    sig["ai_win_probability"] = round(p_win * 100, 1)
+    if p_win < AI_GATE_BLOCK_BELOW:
+        sig["candidate"] = None
+        sig["quality"] = "NO TRADE · FILTRO IA"
+        sig["ai_gate_active"] = True
+        sig["ai_gate_reason"] = f"Probabilidad estimada de acierto {p_win:.1%}, bajo el umbral {AI_GATE_BLOCK_BELOW:.0%}"
+    else:
+        sig["ai_gate_active"] = True
+        sig["ai_gate_reason"] = f"Señal permitida; probabilidad estimada de acierto {p_win:.1%}"
+    return sig
+
+
+def build_signal(df, target, seconds_left, live_price=None, price_source=None):
+    _TRACE_CONTEXT.build_id = None
+    _TRACE_CONTEXT.build_payload = None
+    sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
+    sig = _apply_ai_signal_gate(sig)
+    sig["price_source"] = price_source
+    try:
+        candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
+        payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
+        _TRACE_CONTEXT.build_payload = payload
+        _TRACE_CONTEXT.build_id = _trace_event("build", payload)
+    except Exception:
+        pass
+    return sig
+
+
+def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
+    before = dict(state)
+    result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
+    # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
+    if not isinstance(state.get("exit_plan"), dict) and state.get("first_direction") in ("UP", "DOWN"):
+        state["exit_plan"] = make_exit_plan(state, signal, seconds_left, now)
+    update_exit_plan(state, signal, seconds_left, now)
+
+    try:
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"limited_retention_exit_plan_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload["data_revision"] = BACKGROUND_DATA_REVISION
+        payload["price_source"] = signal.get("price_source") if signal else None
+        if signal is not None and signal.get("data_valid") is False:
+            payload["data_valid"] = False
+            payload["data_error"] = signal.get("data_error", "")
+        if getattr(_TRACE_CONTEXT, "build_id", None) is None:
+            fallback = getattr(_TRACE_CONTEXT, "build_payload", None)
+            if fallback is not None:
+                payload["input_fallback"] = fallback
+        _trace_event("confirmation", payload, state.get("ticker"))
+    except Exception:
+        pass
+    finally:
+        _TRACE_CONTEXT.build_id = None
+        _TRACE_CONTEXT.build_payload = None
+    return result
+
+
 def export_round_diagnostics(ticker, limit=4000):
     """Exporta lecturas de una ronda y su verificación; no calcula señales."""
     import gzip
@@ -3846,7 +4126,7 @@ def export_round_diagnostics(ticker, limit=4000):
     with sqlite3.connect(SIGNAL_TRACE_DB, timeout=1) as conn:
         total, last_id = conn.execute("SELECT COUNT(*),MAX(id) FROM decisions WHERE kind='confirmation' AND ticker=?", (ticker,)).fetchone()
         rows = conn.execute("SELECT id,observed_at,thread_key,ticker,build_id,payload FROM decisions WHERE kind='confirmation' AND ticker=? AND id<=? ORDER BY id LIMIT ?", (ticker, last_id or 0, int(limit))).fetchall()
-        header = dict(schema_version=1,ticker=ticker,
+        header = dict(schema_version=1,ticker=ticker,engine_variant="limited_retention_v1",
                       exported_at=datetime.now(timezone.utc).isoformat(),
                       available_confirmations=total,exported_confirmations=len(rows),
                       truncated=total > len(rows),history=history)
@@ -3905,72 +4185,58 @@ def render_signal_trace_page():
 
 
 
-from pathlib import Path
+# Raíz visual estable: no se destruye con los ciclos del fragmento.
+# Requiere Streamlit con st.html(..., unsafe_allow_javascript=True).
+_ALPHA_STABLE_PANEL = r"""
+<div id="alpha-stable-panel"></div>
+<script>
+(function () {
+  if (window.__alphaUpdatePanel) return;
+  const root = document.getElementById('alpha-stable-panel');
+  function reconcile(current, fresh) {
+    if (current.nodeType !== fresh.nodeType ||
+        (current.nodeType === 1 && current.tagName !== fresh.tagName)) {
+      current.replaceWith(fresh.cloneNode(true)); return;
+    }
+    if (current.nodeType === 3) {
+      if (current.nodeValue !== fresh.nodeValue) current.nodeValue = fresh.nodeValue;
+      return;
+    }
+    if (current.nodeType !== 1) return;
+    // Preservar nodos existentes evita que Safari pierda altura y posición.
+    for (const attr of Array.from(current.attributes))
+      if (!fresh.hasAttribute(attr.name)) current.removeAttribute(attr.name);
+    for (const attr of Array.from(fresh.attributes))
+      if (current.getAttribute(attr.name) !== attr.value)
+        current.setAttribute(attr.name, attr.value);
+    let i = 0;
+    while (i < fresh.childNodes.length) {
+      if (!current.childNodes[i]) current.appendChild(fresh.childNodes[i].cloneNode(true));
+      else reconcile(current.childNodes[i], fresh.childNodes[i]);
+      i++;
+    }
+    while (current.childNodes.length > fresh.childNodes.length)
+      current.lastChild.remove();
+  }
+  window.__alphaUpdatePanel = function(html) {
+    const template = document.createElement('template');
+    template.innerHTML = html;
+    const incoming = template.content;
+    let i = 0;
+    while (i < incoming.childNodes.length) {
+      if (!root.childNodes[i]) root.appendChild(incoming.childNodes[i].cloneNode(true));
+      else reconcile(root.childNodes[i], incoming.childNodes[i]);
+      i++;
+    }
+    while (root.childNodes.length > incoming.childNodes.length)
+      root.lastChild.remove();
+  };
+})();
+</script>
+"""
 
-def _local_vault_path():
-    return Path(__file__).resolve().parent / ".kalshi_credentials.enc"
-
-def _local_vault_key_path():
-    return Path(__file__).resolve().parent / ".kalshi_vault.key"
-
-def _local_fernet():
-    from cryptography.fernet import Fernet
-    keyfile = _local_vault_key_path()
-    if not keyfile.exists():
-        keyfile.write_bytes(Fernet.generate_key())
-        keyfile.chmod(0o600)
-    return Fernet(keyfile.read_bytes())
-
-def save_local_kalshi_credentials(kid, pem):
-    encrypted = _local_fernet().encrypt(json.dumps({"id":kid,"pem":pem}).encode())
-    path = _local_vault_path()
-    path.write_bytes(encrypted)
-    path.chmod(0o600)
-
-def read_local_kalshi_credentials():
-    path = _local_vault_path()
-    if not path.exists():
-        return "", ""
-    try:
-        obj = json.loads(_local_fernet().decrypt(path.read_bytes()))
-        return obj["id"], obj["pem"]
-    except Exception:
-        return "", ""
-
-def delete_local_kalshi_credentials():
-    _local_vault_path().unlink(missing_ok=True)
-    _local_vault_key_path().unlink(missing_ok=True)
-
-def read_kalshi_secrets():
-    """Read persistent server-side secrets; never write private keys to code or SQLite."""
-    try:
-        key_id = str(st.secrets.get("KALSHI_KEY_ID", "") or "").strip()
-        pem = str(st.secrets.get("KALSHI_PRIVATE_KEY", "") or "")
-        return (key_id, _normalize_private_key(pem)) if key_id and pem else read_local_kalshi_credentials()
-    except (FileNotFoundError, KeyError):
-        return read_local_kalshi_credentials()
-
-# Inicia ejecución independiente de la pantalla, mientras el servidor esté activo.
-worker = current_execution_worker()
-if (not worker.key_id and st.session_state.get("kalshi_key_id")
-        and st.session_state.get("kalshi_private_key")):
-    try:
-        verified_balance, _ = kalshi_get_balance(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
-        worker.connect(st.session_state.kalshi_key_id, st.session_state.kalshi_private_key)
-        worker.balance = verified_balance
-    except Exception as exc:
-        worker.message = "Kalshi no autenticado: " + str(exc)[:180]
-secret_id, secret_pem = read_kalshi_secrets()
-if secret_id and secret_pem and not worker.key_id:
-    try:
-        verified_balance, _ = kalshi_get_balance(secret_id, secret_pem)
-        worker.connect(secret_id, secret_pem)
-        worker.balance = verified_balance
-    except Exception as exc:
-        worker.message = "Kalshi no autenticado: " + str(exc)[:180]
-
-# Inicia una sola vez el registrador autónomo de 12 horas.
-start_12h_history_worker()
+# Inicia una sola vez el registrador autónomo continuo.
+start_continuous_history_worker()
 start_history_verifier()
 
 page = str(st.query_params.get("page", "signal"))
@@ -3978,8 +4244,33 @@ if page == "signal_trace":
     render_signal_trace_page()
 elif page == "settings":
     render_history_page()
-elif page == "auto":
-    render_auto_trading_page()
 else:
-    render_execution_status()
+    st.html(_ALPHA_STABLE_PANEL, unsafe_allow_javascript=True)
     live_dashboard()
+    # Persistent chart host: not within the periodic Streamlit fragment.
+    # Initial srcdoc contains the complete original chart markup and controls.
+    initial_html = st.session_state.get("_alpha_chart_html_initial")
+    if initial_html:
+        safe_html = json.dumps(initial_html, ensure_ascii=False).replace("<", "\\u003c")
+        st.html(
+            '<div id="alpha-chart-stable-host" style="width:100%;min-height:1830px"></div>'
+            '<script>(function(){'
+            'const host=document.getElementById("alpha-chart-stable-host");'
+            'if(!host)return;'
+            'let frame=host.querySelector("iframe");'
+            'if(!frame){frame=document.createElement("iframe");'
+            'frame.setAttribute("title","Gráfica BTC interactiva");'
+            'frame.style.cssText="width:100%;height:1830px;border:0;display:block;background:#06121a";'
+            'frame.setAttribute("scrolling","yes");'
+            'frame.srcdoc=' + safe_html + ';host.appendChild(frame);}'
+            'window.__alphaPushChart=function(payload){'
+            'window.__alphaNextChart=payload;'
+            'if(frame.contentWindow)frame.contentWindow.postMessage({kind:"alpha-chart-update",payload:payload},"*");'
+            '};'
+            'frame.addEventListener("load",function(){'
+            'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
+            '});'
+            'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
+            '})();</script>',
+            unsafe_allow_javascript=True,
+        )
