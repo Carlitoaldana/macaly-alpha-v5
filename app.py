@@ -1796,12 +1796,17 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
         candidate="UP"
     elif aligned=="DOWN" and (trend_strong or (rsi3<=48 and rsi5<=50)) and vwap_atr<0.15:
         candidate="DOWN"
-    # Señal temprana: no espera alineación perfecta de 3M/5M cuando 5M no se opone
-    # y el impulso de 1M/3M + VWAP/participación ya apuntan a la misma dirección.
-    elif d5 != "DOWN" and l3["macd_hist"] > 0 and rsi1 >= 53 and rsi3 >= 50 and vwap_atr >= 0.05 and (rvol >= 0.90 or mom3 > 0.025):
+    # V5 TEST: tres requisitos esenciales para la ruta temprana:
+    # 1) MACD 3m orientado; 2) RSI 1m + posición VWAP; 3) momentum 3m.
+    # RSI 3m, volumen y alineación completa de 5m quedan como contexto,
+    # no como bloqueos adicionales. Una tendencia 5m claramente opuesta
+    # sigue vetando la entrada para evitar giros contra tendencia sin respaldo.
+    elif (d5 != "DOWN" and l3["macd_hist"] > 0
+          and rsi1 >= 52 and vwap_atr >= 0.05 and mom3 > 0.025):
         candidate="UP"
         quality="TEMPRANA"
-    elif d5 != "UP" and l3["macd_hist"] < 0 and rsi1 <= 47 and rsi3 <= 50 and vwap_atr <= -0.05 and (rvol >= 0.90 or mom3 < -0.025):
+    elif (d5 != "UP" and l3["macd_hist"] < 0
+          and rsi1 <= 48 and vwap_atr <= -0.05 and mom3 < -0.025):
         candidate="DOWN"
         quality="TEMPRANA"
     # Early entry: reject an already fading impulse, not a direction forever.
@@ -1838,7 +1843,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality}
 
 
 def build_presignal(sig, seconds_left):
