@@ -1828,6 +1828,26 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
                 candidate = side
                 quality = "TEMPRANA ACELERADA"
                 break
+    # V5 LAB: detect a possible reversal before the slower 5m trend flips.
+    # This path does not force a trade or bypass the three timed readings.
+    # Demand independent short-horizon agreement and meaningful impulse.
+    # Avoid tiny price moves near the contract target.
+    if candidate is None and impulse["reliable"] and not near_noise:
+        for side, sign in (("UP", 1), ("DOWN", -1)):
+            if d5 != ("DOWN" if side == "UP" else "UP"):
+                continue  # ordinary early paths handle non-opposing 5m trends
+            short_macd = float(l3["macd_hist"]) * sign > 0
+            short_momentum = mom3 * sign > 0.04
+            short_rsi = (rsi1 >= 54 and rsi3 >= 50) if sign == 1 else (rsi1 <= 46 and rsi3 <= 50)
+            vwap_ok = vwap_atr * sign >= 0.08
+            support = impulse["up"] if sign == 1 else impulse["down"]
+            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
+            if (short_macd and short_momentum and short_rsi and vwap_ok
+                    and support >= 0.70 and not exhausted
+                    and rvol >= 0.9 and abs(target_atr) >= 0.30):
+                candidate = side
+                quality = "GIRO TEMPRANO"
+                break
     # Early entry: reject an already fading impulse, not a direction forever.
     # Next reading can immediately reconsider either UP or DOWN.
     if quality in ("TEMPRANA", "TEMPRANA ACELERADA") and candidate in ("UP", "DOWN") and impulse["reliable"]:
@@ -1852,7 +1872,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
     if near_noise and not trend_strong: candidate=None
     if candidate:
         confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
-        if quality not in ("TEMPRANA", "TEMPRANA ACELERADA"):
+        if quality not in ("TEMPRANA", "TEMPRANA ACELERADA", "GIRO TEMPRANO"):
             quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
     evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
