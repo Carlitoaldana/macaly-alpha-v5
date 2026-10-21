@@ -2277,9 +2277,9 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 # NO modifica el motor, la preseñal, el lector, ballenas ni la interfaz.
 # =========================================================
 
-BACKGROUND_RUN_SECONDS = 30 * 24 * 60 * 60  # Compatibilidad; el bucle ya es continuo
+BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v4"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v3"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3454,7 +3454,7 @@ def signal_requirement_view(sig, seconds_left):
                 ('MACD 3m a favor y tendencia 5m no contraria', macd * sign > 0 and d5 != other),
                 ('RSI de 1 minuto y VWAP a favor',
                  (r1 >= 52 and vw >= .05) if up else (r1 <= 48 and vw <= -.05)),
-                ('Momentum de 3 minutos a favor', mom > .025 if up else mom < -.025),
+                ('Momentum de 3 minutos a favor', mom > .015 if up else mom < -.015),
             ]),
             ('Tramo final de la ronda', [
                 ('Quedan 3 minutos o menos', seconds_left is not None and 0 < seconds_left <= 180),
@@ -3490,12 +3490,17 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
         checks = route['checks'] + [('Fuera de la zona de ruido', view['noise_ok'])]
     total = len(checks)
     met = sum(bool(ok) for _, ok in checks) if ready else 0
-    bars = ''.join('<i class="sq-on" title="' + html.escape(label, quote=True) + '"></i>' if ready and ok else
-                   '<i title="' + html.escape(label, quote=True) + '"></i>' for label, ok in checks)
+    # Cada nombre corresponde al mismo booleano que controla su barra.
+    bars = ''.join(
+        '<div class="sq-item"><i' + (' class="sq-on"' if ready and ok else '') +
+        ' title="' + html.escape(label, quote=True) + '"></i>' +
+        '<span>' + html.escape(label) + '</span></div>'
+        for label, ok in checks
+    )
     label = 'REQUISITOS ' + side if side in ('UP','DOWN') else 'REQUISITOS DE LA SEÑAL'
     note = 'RONDA TERMINADA' if closed else 'ESPERANDO DATOS' if not ready else 'Cada barra representa un requisito.'
     number = str(met) + '<small>/' + str(total) + '</small>' if total else '—'
-    return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars i{height:7px;flex:1;background:#1d3038;border-radius:9px}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
+    return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars .sq-item{flex:1;min-width:0;text-align:center}.sq-bars i{display:block;height:7px;width:100%;background:#1d3038;border-radius:9px}.sq-bars .sq-item span{display:block;margin-top:7px;font-size:9px;line-height:1.25;color:#a5b6be;overflow-wrap:anywhere}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
 
 
 @st.fragment(run_every="2s")
@@ -3932,9 +3937,6 @@ def live_dashboard():
 import zlib
 
 SIGNAL_TRACE_DB = "btc_signal_decisions.db"
-TRACE_RETENTION_DAYS = 30  # Antes: 12 horas. No modifica las señales.
-_TRACE_LAST_CLEANUP = 0.0
-_TRACE_CLEANUP_LOCK = threading.Lock()
 _TRACE_CONTEXT = threading.local()
 
 
@@ -3950,7 +3952,6 @@ def _trace_json(value):
 
 def _trace_event(kind, payload, ticker=None):
     """Diagnóstico independiente: un fallo de escritura no altera la decisión."""
-    global _TRACE_LAST_CLEANUP
     try:
         observed = datetime.now(timezone.utc).isoformat()
         thread_key = str(id(threading.current_thread()))
@@ -3964,15 +3965,8 @@ def _trace_event(kind, payload, ticker=None):
             conn.execute("CREATE INDEX IF NOT EXISTS decisions_ticker ON decisions(ticker,id)")
             build_id = getattr(_TRACE_CONTEXT, "build_id", None) if kind == "confirmation" else None
             inserted = conn.execute("INSERT INTO decisions(observed_at,thread_key,kind,ticker,build_id,payload) VALUES(?,?,?,?,?,?)", (observed, thread_key, kind, ticker, build_id, packed))
-            # Limpiar como máximo una vez por hora, no en cada lectura.
-            # Evita bloquear el registrador cuando el historial crece.
-            now_mono = time.monotonic()
-            if now_mono - _TRACE_LAST_CLEANUP >= 3600:
-                with _TRACE_CLEANUP_LOCK:
-                    if now_mono - _TRACE_LAST_CLEANUP >= 3600:
-                        cutoff = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - TRACE_RETENTION_DAYS * 86400, timezone.utc).isoformat()
-                        conn.execute("DELETE FROM decisions WHERE observed_at < ?", (cutoff,))
-                        _TRACE_LAST_CLEANUP = now_mono
+            cutoff = datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() - 12*3600, timezone.utc).isoformat()
+            conn.execute("DELETE FROM decisions WHERE observed_at < ?", (cutoff,))
             event_id = inserted.lastrowid
         return event_id
     except Exception:
@@ -4209,7 +4203,7 @@ def export_round_diagnostics(ticker, limit=4000):
     with sqlite3.connect(SIGNAL_TRACE_DB, timeout=1) as conn:
         total, last_id = conn.execute("SELECT COUNT(*),MAX(id) FROM decisions WHERE kind='confirmation' AND ticker=?", (ticker,)).fetchone()
         rows = conn.execute("SELECT id,observed_at,thread_key,ticker,build_id,payload FROM decisions WHERE kind='confirmation' AND ticker=? AND id<=? ORDER BY id LIMIT ?", (ticker, last_id or 0, int(limit))).fetchall()
-        header = dict(schema_version=1,ticker=ticker,engine_variant="extended_retention_30d_v2",
+        header = dict(schema_version=1,ticker=ticker,engine_variant="limited_retention_v1",
                       exported_at=datetime.now(timezone.utc).isoformat(),
                       available_confirmations=total,exported_confirmations=len(rows),
                       truncated=total > len(rows),history=history)
