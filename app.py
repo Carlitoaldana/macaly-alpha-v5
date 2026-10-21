@@ -1887,17 +1887,6 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
             quality = "IMPULSO EN REVISIÓN"
     # A confirmed aligned trend may also exhaust: keep the 3-reading confirmation,
     # but do not invent a direction from the exhaustion signal alone.
-    # Near expiry, the contract target can dominate only when BTC has a meaningful ATR cushion.
-    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
-        # Gradually increase target relevance as expiry approaches; never
-        # assume that being above/below target guarantees the final outcome.
-        cushion = 0.35 if seconds_left > 60 else 0.25
-        if target_atr >= cushion and not impulse["exhaust_up"]:
-            candidate = "UP"
-            quality = "TRAMO FINAL"
-        elif target_atr <= -cushion and not impulse["exhaust_down"]:
-            candidate = "DOWN"
-            quality = "TRAMO FINAL"
     if near_noise and not trend_strong: candidate=None
     if candidate:
         confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
@@ -3456,11 +3445,6 @@ def signal_requirement_view(sig, seconds_left):
                  (r1 >= 52 and vw >= .05) if up else (r1 <= 48 and vw <= -.05)),
                 ('Momentum de 3 minutos a favor', mom > .015 if up else mom < -.015),
             ]),
-            ('Tramo final de la ronda', [
-                ('Quedan 3 minutos o menos', seconds_left is not None and 0 < seconds_left <= 180),
-                ('Margen suficiente frente al target', sig.get('distance') is not None and cushion * sign >= .35),
-                ('La tendencia de 5 minutos no va en contra', d5 != other),
-            ]),
         ]
         sides[side] = [{'name': name, 'checks': checks, 'met': sum(bool(ok) for _, ok in checks),
                         'total': len(checks), 'complete': all(bool(ok) for _, ok in checks)} for name, checks in routes]
@@ -3483,10 +3467,9 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
     checks = []
     if view['valid'] and side in ('UP', 'DOWN'):
         routes = view['sides'][side]
-        # Closing override has priority when applicable, just as in the engine.
+        # Mostrar solo rutas de tendencia y entrada temprana.
         complete = [r for r in routes if r['complete']]
-        route = (routes[2] if routes[2]['complete'] else complete[0] if complete else
-                 max(routes, key=lambda r: r['met']/r['total']))
+        route = complete[0] if complete else max(routes, key=lambda r: r['met']/r['total'])
         checks = route['checks'] + [('Fuera de la zona de ruido', view['noise_ok'])]
     total = len(checks)
     met = sum(bool(ok) for _, ok in checks) if ready else 0
