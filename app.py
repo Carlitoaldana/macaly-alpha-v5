@@ -1802,21 +1802,21 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
     # no como bloqueos adicionales. Una tendencia 5m claramente opuesta
     # sigue vetando la entrada para evitar giros contra tendencia sin respaldo.
     elif (d5 != "DOWN" and l3["macd_hist"] > 0
-          and rsi1 >= 52 and vwap_atr >= 0.05 and mom3 > 0.025):
+          and rsi1 >= 52 and vwap_atr >= 0.05 and mom3 > 0.015):
         candidate="UP"
         quality="TEMPRANA"
     elif (d5 != "UP" and l3["macd_hist"] < 0
-          and rsi1 <= 48 and vwap_atr <= -0.05 and mom3 < -0.025):
+          and rsi1 <= 48 and vwap_atr <= -0.05 and mom3 < -0.015):
         candidate="DOWN"
         quality="TEMPRANA"
     # V5 EXPERIMENTAL: 3/4 accelerated entry, only when the missing
     # early-route check is RSI/VWAP (not MACD, momentum or noise veto).
     # Momentum and MACD must agree; a clearly opposite 5m trend vetoes.
-    # Confirmation of three distinct readings remains mandatory.
+    # Two distinct timed readings remain mandatory in this V5 test.
     if candidate is None and not near_noise and impulse["reliable"]:
         for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
             macd_ok = float(l3["macd_hist"]) * sign > 0 and d5 != opposite
-            momentum_ok = mom3 * sign > 0.025
+            momentum_ok = mom3 * sign > 0.015
             rsi_vwap_ok = (rsi1 >= 52 and vwap_atr >= .05) if sign == 1 else (rsi1 <= 48 and vwap_atr <= -.05)
             strength = impulse["up"] if sign == 1 else impulse["down"]
             exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
