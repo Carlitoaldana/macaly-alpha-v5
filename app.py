@@ -3454,7 +3454,7 @@ def signal_requirement_view(sig, seconds_left):
                 ('MACD 3m a favor y tendencia 5m no contraria', macd * sign > 0 and d5 != other),
                 ('RSI de 1 minuto y VWAP a favor',
                  (r1 >= 52 and vw >= .05) if up else (r1 <= 48 and vw <= -.05)),
-                ('Momentum de 3 minutos a favor', mom > .025 if up else mom < -.025),
+                ('Momentum de 3 minutos a favor', mom > .015 if up else mom < -.015),
             ]),
             ('Tramo final de la ronda', [
                 ('Quedan 3 minutos o menos', seconds_left is not None and 0 < seconds_left <= 180),
@@ -3883,6 +3883,41 @@ def live_dashboard():
         "<script>window.__alphaUpdatePanel(" + panel_data + ");</script>",
         unsafe_allow_javascript=True,
     )
+
+    # Diagnóstico V5: solo lectura. No modifica candidaturas ni confirmaciones.
+    with st.expander("🔎 DIAGNÓSTICO V5 · ¿QUÉ FRENA LA SEÑAL?", expanded=False):
+        st.caption("Se actualiza con las lecturas del bot. No altera ninguna decisión.")
+        if sig.get("data_valid") is False:
+            st.warning("Datos no válidos: la señal no puede confirmarse.")
+        else:
+            st.write("Candidata:", sig.get("candidate_raw") or sig.get("candidate") or "NINGUNA")
+            st.write("Ruta:", sig.get("entry_route_internal", sig.get("quality", "—")))
+            st.write("Señal activa:", active if active in ("UP", "DOWN") else "ESPERANDO")
+            if sig.get("ai_gate_status"):
+                st.write("Filtro IA:", sig.get("ai_gate_status"))
+            if sig.get("ai_gate_reason"):
+                st.write("Decisión IA:", sig.get("ai_gate_reason"))
+            st.write("Momentum 3m:", f"{sig.get('mom3', 0):+.4f}% (umbral temprano ±0.015%)")
+            st.write("MACD 3m:", f"{sig.get('macd3', 0):+.5f}")
+            st.write("RSI 1m:", f"{sig.get('rsi', 0):.1f}")
+            st.write("VWAP/ATR:", f"{sig.get('vwap_atr', 0):+.3f}")
+            st.write("Tendencia 5m:", sig.get("trend5", "—"))
+            st.write("Zona de ruido:", "SÍ" if abs(sig.get("vwap_atr", 0)) < .18 and (sig.get("distance") is None or abs(sig.get("target_atr", 0)) < .22) and sig.get("adx", 0) < 20 else "NO")
+            for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
+                checks = {
+                    "MACD 3m favorable": sig.get("macd3", 0) * sign > 0,
+                    "Momentum temprano favorable": sig.get("mom3", 0) * sign > .015,
+                    "RSI 1m favorable": sig.get("rsi", 50) >= 52 if sign == 1 else sig.get("rsi", 50) <= 48,
+                    "VWAP favorable": sig.get("vwap_atr", 0) >= .05 if sign == 1 else sig.get("vwap_atr", 0) <= -.05,
+                    "Tendencia 5m no contraria": sig.get("trend5") != opposite,
+                }
+                st.write(side + " · ruta temprana:", " | ".join(("✓ " if ok else "✗ ") + name for name, ok in checks.items()))
+            rs = round_signal.get("round_state") or {}
+            st.write("Confirmaciones pendientes:", f"{rs.get('pending_count', 0)}/2")
+            st.write("Dirección pendiente:", rs.get("pending_direction") or "NINGUNA")
+            st.write("Intervalo entre confirmaciones:", "2 segundos")
+            st.caption("Otras rutas (alineada, acelerada, rápida, giro y tramo final) pueden producir señales aunque la ruta temprana no cumpla todos sus requisitos.")
+        st.markdown("[Abrir historial detallado de diagnósticos](?page=signal_trace)")
 
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
