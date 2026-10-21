@@ -29,8 +29,8 @@ st.set_page_config(
 NEW_ROUND_WAIT = 8
 NEW_ENTRY_LOCK = 75
 
-# Tres lecturas coherentes, separadas por al menos 2 s (mínimo 4 s).
-SIGNAL_CONFIRM_READINGS = 3
+# Dos lecturas coherentes, separadas por al menos 2 s (mínimo 2 s).
+SIGNAL_CONFIRM_READINGS = 2
 SIGNAL_CONFIRM_INTERVAL = 2.0
 # Caducidad operativa: una pausa >10s reinicia las lecturas pendientes.
 SIGNAL_CONFIRM_MAX_GAP = 10.0
