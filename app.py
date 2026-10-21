@@ -3490,12 +3490,17 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
         checks = route['checks'] + [('Fuera de la zona de ruido', view['noise_ok'])]
     total = len(checks)
     met = sum(bool(ok) for _, ok in checks) if ready else 0
-    bars = ''.join('<i class="sq-on" title="' + html.escape(label, quote=True) + '"></i>' if ready and ok else
-                   '<i title="' + html.escape(label, quote=True) + '"></i>' for label, ok in checks)
+    # Cada nombre corresponde al mismo booleano que controla su barra.
+    bars = ''.join(
+        '<div class="sq-item"><i' + (' class="sq-on"' if ready and ok else '') +
+        ' title="' + html.escape(label, quote=True) + '"></i>' +
+        '<span>' + html.escape(label) + '</span></div>'
+        for label, ok in checks
+    )
     label = 'REQUISITOS ' + side if side in ('UP','DOWN') else 'REQUISITOS DE LA SEÑAL'
     note = 'RONDA TERMINADA' if closed else 'ESPERANDO DATOS' if not ready else 'Cada barra representa un requisito.'
     number = str(met) + '<small>/' + str(total) + '</small>' if total else '—'
-    return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars i{height:7px;flex:1;background:#1d3038;border-radius:9px}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
+    return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars .sq-item{flex:1;min-width:0;text-align:center}.sq-bars i{display:block;height:7px;width:100%;background:#1d3038;border-radius:9px}.sq-bars .sq-item span{display:block;margin-top:7px;font-size:9px;line-height:1.25;color:#a5b6be;overflow-wrap:anywhere}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
 
 
 @st.fragment(run_every="2s")
@@ -3883,41 +3888,6 @@ def live_dashboard():
         "<script>window.__alphaUpdatePanel(" + panel_data + ");</script>",
         unsafe_allow_javascript=True,
     )
-
-    # Diagnóstico V5: solo lectura. No modifica candidaturas ni confirmaciones.
-    with st.expander("🔎 DIAGNÓSTICO V5 · ¿QUÉ FRENA LA SEÑAL?", expanded=False):
-        st.caption("Se actualiza con las lecturas del bot. No altera ninguna decisión.")
-        if sig.get("data_valid") is False:
-            st.warning("Datos no válidos: la señal no puede confirmarse.")
-        else:
-            st.write("Candidata:", sig.get("candidate_raw") or sig.get("candidate") or "NINGUNA")
-            st.write("Ruta:", sig.get("entry_route_internal", sig.get("quality", "—")))
-            st.write("Señal activa:", active if active in ("UP", "DOWN") else "ESPERANDO")
-            if sig.get("ai_gate_status"):
-                st.write("Filtro IA:", sig.get("ai_gate_status"))
-            if sig.get("ai_gate_reason"):
-                st.write("Decisión IA:", sig.get("ai_gate_reason"))
-            st.write("Momentum 3m:", f"{sig.get('mom3', 0):+.4f}% (umbral temprano ±0.015%)")
-            st.write("MACD 3m:", f"{sig.get('macd3', 0):+.5f}")
-            st.write("RSI 1m:", f"{sig.get('rsi', 0):.1f}")
-            st.write("VWAP/ATR:", f"{sig.get('vwap_atr', 0):+.3f}")
-            st.write("Tendencia 5m:", sig.get("trend5", "—"))
-            st.write("Zona de ruido:", "SÍ" if abs(sig.get("vwap_atr", 0)) < .18 and (sig.get("distance") is None or abs(sig.get("target_atr", 0)) < .22) and sig.get("adx", 0) < 20 else "NO")
-            for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
-                checks = {
-                    "MACD 3m favorable": sig.get("macd3", 0) * sign > 0,
-                    "Momentum temprano favorable": sig.get("mom3", 0) * sign > .015,
-                    "RSI 1m favorable": sig.get("rsi", 50) >= 52 if sign == 1 else sig.get("rsi", 50) <= 48,
-                    "VWAP favorable": sig.get("vwap_atr", 0) >= .05 if sign == 1 else sig.get("vwap_atr", 0) <= -.05,
-                    "Tendencia 5m no contraria": sig.get("trend5") != opposite,
-                }
-                st.write(side + " · ruta temprana:", " | ".join(("✓ " if ok else "✗ ") + name for name, ok in checks.items()))
-            rs = round_signal.get("round_state") or {}
-            st.write("Confirmaciones pendientes:", f"{rs.get('pending_count', 0)}/2")
-            st.write("Dirección pendiente:", rs.get("pending_direction") or "NINGUNA")
-            st.write("Intervalo entre confirmaciones:", "2 segundos")
-            st.caption("Otras rutas (alineada, acelerada, rápida, giro y tramo final) pueden producir señales aunque la ruta temprana no cumpla todos sus requisitos.")
-        st.markdown("[Abrir historial detallado de diagnósticos](?page=signal_trace)")
 
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
