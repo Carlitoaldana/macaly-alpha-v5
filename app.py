@@ -1809,9 +1809,28 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
           and rsi1 <= 48 and vwap_atr <= -0.05 and mom3 < -0.025):
         candidate="DOWN"
         quality="TEMPRANA"
+    # V5 EXPERIMENTAL: 3/4 accelerated entry, only when the missing
+    # early-route check is RSI/VWAP (not MACD, momentum or noise veto).
+    # Momentum and MACD must agree; a clearly opposite 5m trend vetoes.
+    # Confirmation of three distinct readings remains mandatory.
+    if candidate is None and not near_noise and impulse["reliable"]:
+        for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
+            macd_ok = float(l3["macd_hist"]) * sign > 0 and d5 != opposite
+            momentum_ok = mom3 * sign > 0.025
+            rsi_vwap_ok = (rsi1 >= 52 and vwap_atr >= .05) if sign == 1 else (rsi1 <= 48 and vwap_atr <= -.05)
+            strength = impulse["up"] if sign == 1 else impulse["down"]
+            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
+            # Requires evidence stronger than the ordinary early route;
+            # never skip a missing momentum or MACD requirement.
+            if (macd_ok and momentum_ok and not rsi_vwap_ok
+                    and strength >= 0.65 and not exhausted
+                    and adx5 >= 20 and rvol >= 0.8):
+                candidate = side
+                quality = "TEMPRANA ACELERADA"
+                break
     # Early entry: reject an already fading impulse, not a direction forever.
     # Next reading can immediately reconsider either UP or DOWN.
-    if quality == "TEMPRANA" and candidate in ("UP", "DOWN") and impulse["reliable"]:
+    if quality in ("TEMPRANA", "TEMPRANA ACELERADA") and candidate in ("UP", "DOWN") and impulse["reliable"]:
         fading = impulse["exhaust_up"] if candidate == "UP" else impulse["exhaust_down"]
         support = impulse["up"] if candidate == "UP" else impulse["down"]
         if fading and support < 0.45:
@@ -1833,7 +1852,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
     if near_noise and not trend_strong: candidate=None
     if candidate:
         confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
-        if quality != "TEMPRANA":
+        if quality not in ("TEMPRANA", "TEMPRANA ACELERADA"):
             quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
     evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
