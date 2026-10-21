@@ -3383,11 +3383,10 @@ def signal_requirement_view(sig, seconds_left):
                 ('Precio bien situado frente al promedio VWAP', vw > -.15 if up else vw < .15),
             ]),
             ('Señal temprana', [
-                ('La tendencia de 5 minutos no va en contra', d5 != other),
-                ('Impulso de 3 minutos a favor', macd * sign > 0),
-                ('RSI de 1 y 3 minutos a favor', r1 >= 53 and r3 >= 50 if up else r1 <= 47 and r3 <= 50),
-                ('Precio separado del promedio VWAP a favor', vw * sign >= .05),
-                ('Volumen o movimiento suficientes', volume >= .90 or mom * sign > .025),
+                ('MACD 3m a favor y tendencia 5m no contraria', macd * sign > 0 and d5 != other),
+                ('RSI de 1 minuto y VWAP a favor',
+                 (r1 >= 52 and vw >= .05) if up else (r1 <= 48 and vw <= -.05)),
+                ('Momentum de 3 minutos a favor', mom > .025 if up else mom < -.025),
             ]),
             ('Tramo final de la ronda', [
                 ('Quedan 3 minutos o menos', seconds_left is not None and 0 < seconds_left <= 180),
