@@ -1828,6 +1828,35 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
                 candidate = side
                 quality = "TEMPRANA ACELERADA"
                 break
+    # V5 TEST: candidatura rápida basada en evidencias ACTUALES de 1m.
+    # Las tendencias 3m/5m son contexto, no bloqueos absolutos. El precio
+    # en vivo y la EMA de 1m deben apoyar la misma dirección; una sola
+    # subida/bajada aislada no basta. La confirmación temporal permanece.
+    if candidate is None and impulse["reliable"] and not near_noise:
+        ema_fast = float(l1["ema9"])
+        ema_slow = float(l1["ema21"])
+        macd_1m = float(l1["macd_hist"])
+        # Movimiento mínimo relativo a la volatilidad real, no dólares fijos.
+        candle_delta_atr = (price - float(one.iloc[-2]["close"])) / atr
+        for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
+            fast_ema_ok = (ema_fast - ema_slow) * sign > 0
+            live_ok = (price - ema_fast) * sign > 0
+            short_macd_ok = macd_1m * sign > 0
+            rsi_ok = (rsi1 >= 53) if sign == 1 else (rsi1 <= 47)
+            price_impulse_ok = candle_delta_atr * sign >= 0.12
+            three_min_ok = mom3 * sign >= 0.012
+            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
+            # Contra 5m pedimos corroboración adicional; NO vetamos giros.
+            against_five = d5 == opposite
+            reversal_ok = (not against_five or
+                           (three_min_ok and abs(candle_delta_atr) >= 0.28
+                            and rvol >= 0.9))
+            if (fast_ema_ok and live_ok and short_macd_ok and rsi_ok
+                    and price_impulse_ok and reversal_ok and not exhausted
+                    and (three_min_ok or abs(candle_delta_atr) >= 0.22)):
+                candidate = side
+                quality = "REACCIÓN RÁPIDA"
+                break
     # V5 LAB: detect a possible reversal before the slower 5m trend flips.
     # This path does not force a trade or bypass the three timed readings.
     # Demand independent short-horizon agreement and meaningful impulse.
@@ -1850,7 +1879,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
                 break
     # Early entry: reject an already fading impulse, not a direction forever.
     # Next reading can immediately reconsider either UP or DOWN.
-    if quality in ("TEMPRANA", "TEMPRANA ACELERADA") and candidate in ("UP", "DOWN") and impulse["reliable"]:
+    if quality in ("TEMPRANA", "TEMPRANA ACELERADA", "REACCIÓN RÁPIDA") and candidate in ("UP", "DOWN") and impulse["reliable"]:
         fading = impulse["exhaust_up"] if candidate == "UP" else impulse["exhaust_down"]
         support = impulse["up"] if candidate == "UP" else impulse["down"]
         if fading and support < 0.45:
@@ -1872,7 +1901,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
     if near_noise and not trend_strong: candidate=None
     if candidate:
         confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
-        if quality not in ("TEMPRANA", "TEMPRANA ACELERADA", "GIRO TEMPRANO"):
+        if quality not in ("TEMPRANA", "TEMPRANA ACELERADA", "GIRO TEMPRANO", "REACCIÓN RÁPIDA"):
             quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
     evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
