@@ -913,6 +913,8 @@ def new_round_state(ticker, seconds_left):
         "reversal_warning": False,
         "reversal_text": "",
         "fresh_samples": [],
+        "opening_price_samples": [],
+        "opening_conflict": None,
         "candidate_history": [],
         "pending_direction": None,
         "pending_count": 0,
@@ -2102,39 +2104,47 @@ def _retention_supported(state, signal, seconds_left):
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
-    """Use fresh, same-round observations to reject a contradicted *first* entry.
+    """Valida la PRIMERA señal con movimiento propio de la ronda.
 
-    This does not change the signal engine, block reversals, or impose a timer.
-    Historical indicators remain available; only current-round prices are used
-    to detect a meaningful move against an unconfirmed opening candidate.
+    Los indicadores EMA/MACD de 3 y 5 minutos pueden venir de la ronda
+    anterior: son contexto, no una confirmación del movimiento nuevo.
+    Tras la primera señal, no restringe cambios UP/DOWN.
     """
+    if state.get("first_direction") in ("UP", "DOWN"):
+        return candidate
     if not signal or signal.get("data_valid") is False:
-        return candidate
+        return None
     try:
-        price = float(signal.get("price"))
-        distance = float(signal.get("distance"))
-        if not (np.isfinite(price) and np.isfinite(distance)):
-            return candidate
-    except (TypeError, ValueError, OverflowError):
-        return candidate
+        price = float(signal["price"])
+        atr = float(signal["atr"])
+        if not (math.isfinite(price) and math.isfinite(atr) and atr > 0):
+            return None
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+
     samples = state.setdefault("opening_price_samples", [])
-    # One reading per timestamp; no carry-over between ticker states.
     stamp = now.isoformat()
     if not samples or samples[-1][0] != stamp:
         samples.append([stamp, price])
-    if len(samples) > 12:
-        del samples[:-12]
-    if state.get("first_direction") in ("UP", "DOWN"):
-        return candidate  # Never interfere with subsequent UP/DOWN changes.
-    if candidate not in ("UP", "DOWN") or len(samples) < 2:
+    del samples[:-12]
+    if candidate not in ("UP", "DOWN"):
         return candidate
-    # Close to the strike, a significant fresh move against the proposed side
-    # deserves another reading rather than an inherited-trend entry.
-    if abs(distance) > 30:
-        return candidate
-    change = price - float(samples[0][1])
-    if (candidate == "DOWN" and change >= 5.0) or (candidate == "UP" and change <= -5.0):
-        state["opening_conflict"] = "Precio de la ronda contradice " + candidate
+    if len(samples) < 2:
+        state["opening_conflict"] = "Falta movimiento de la ronda actual"
+        return None
+
+    prices = [float(x[1]) for x in samples]
+    sign = 1 if candidate == "UP" else -1
+    minimum = max(1.0, 0.06 * atr)
+    # Un avance neto O un giro medible desde el extremo de esta ronda.
+    # No confundir un rebote de centavos con una reversión confirmada.
+    net = sign * (price - prices[0])
+    recovery = sign * (price - (min(prices) if sign == 1 else max(prices)))
+    latest = sign * (price - prices[-2])
+    impulse = signal.get("impulse_internal") or {}
+    exhausted = bool(impulse.get("exhaust_up" if sign == 1 else "exhaust_down"))
+    if exhausted or latest < -minimum or max(net, recovery) < minimum:
+        state["opening_conflict"] = "Sin impulso nuevo confirmado hacia " + candidate
         return None
     state["opening_conflict"] = None
     return candidate
