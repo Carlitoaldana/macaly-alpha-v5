@@ -3189,33 +3189,58 @@ def _neon_chart_history(timeframe):
     frame["time"] = pd.to_datetime(frame["time"], unit="s", utc=True)
     return frame.sort_values("time").drop_duplicates("time")
 
-def _neon_round_pivots(df, market, now):
-    # Cada ronda usa sus propias velas 1m cerradas; no mezcla rondas ni temporalidades.
-    if not market or not market.get("close_time"):
-        return [], None, None
-    end = pd.to_datetime(market["close_time"], utc=True, errors="coerce")
-    if pd.isna(end):
-        return [], None, None
-    start = end - pd.Timedelta(minutes=15)
-    frame = df.copy()
-    frame["time"] = pd.to_datetime(frame["time"], utc=True)
-    frame = frame.sort_values("time").drop_duplicates("time")
-    frame = frame[(frame["time"] >= start) & (frame["time"] < end)
-                  & (frame["time"] + pd.Timedelta(minutes=1) <= now)]
-    candles = frame.to_dict("records")
-    pivots = []
-    for i in range(2, len(candles)-2):
-        window = candles[i-2:i+3]
-        row = candles[i]
-        kind = "H" if row["high"] > max(r["high"] for j, r in enumerate(window) if j != 2) else "L" if row["low"] < min(r["low"] for j, r in enumerate(window) if j != 2) else None
-        if kind:
-            pivot = {"t": int(row["time"].timestamp()), "v": float(row["high" if kind == "H" else "low"]), "kind": kind}
-            if pivots and pivots[-1]["kind"] == kind:
-                if (kind == "H" and pivot["v"] > pivots[-1]["v"]) or (kind == "L" and pivot["v"] < pivots[-1]["v"]):
-                    pivots[-1] = pivot
-            else:
-                pivots.append(pivot)
-    return pivots, int(start.timestamp()), int(end.timestamp())
+def _neon_zigzag(rows, timeframe):
+    """Causal swing pivots; last extremum remains provisional until a reversal.
+
+    Uses only candles received so far. The live candle is included in rows.
+    No future bars, no contract-boundary reset, no trading signal changes.
+    """
+    if len(rows) < 2:
+        return []
+    # A reversal must exceed both a small fraction of price and local noise.
+    # All quantities are in USD; this is display-only, not a trading filter.
+    ranges = [max(0.0, float(r['high']) - float(r['low'])) for r in rows[-24:]]
+    typical_range = sorted(ranges)[len(ranges)//2] if ranges else 0.0
+    price = float(rows[-1]['close'])
+    threshold = max(price * 0.00022, typical_range * 1.25)
+    # Locate an initial direction from the first meaningful excursion.
+    anchor = {'i': 0, 'v': float(rows[0]['close']), 'kind': 'L', 'confirmed': True}
+    direction = 0
+    extreme_i = 0
+    extreme = anchor['v']
+    points = []
+    for i, r in enumerate(rows):
+        high, low = float(r['high']), float(r['low'])
+        if direction == 0:
+            if high - anchor['v'] >= threshold:
+                direction = 1
+                anchor['kind'] = 'L'
+                extreme_i, extreme = i, high
+                points = [anchor.copy()]
+            elif anchor['v'] - low >= threshold:
+                direction = -1
+                anchor['kind'] = 'H'
+                extreme_i, extreme = i, low
+                points = [anchor.copy()]
+            continue
+        if direction == 1:
+            if high >= extreme:
+                extreme_i, extreme = i, high
+            elif extreme - low >= threshold and i > extreme_i:
+                points.append({'i': extreme_i, 'v': extreme, 'kind': 'H', 'confirmed': True})
+                direction = -1
+                extreme_i, extreme = i, low
+        else:
+            if low <= extreme:
+                extreme_i, extreme = i, low
+            elif high - extreme >= threshold and i > extreme_i:
+                points.append({'i': extreme_i, 'v': extreme, 'kind': 'L', 'confirmed': True})
+                direction = 1
+                extreme_i, extreme = i, high
+    if direction:
+        points.append({'i': extreme_i, 'v': extreme,
+                       'kind': 'H' if direction == 1 else 'L', 'confirmed': False})
+    return points
 
 def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=None, round_df=None):
     intervals = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1D": 1440}
@@ -3268,15 +3293,10 @@ def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=
     activity = (last10/10)/(prior20/20) if prior20 > 0 else None
     imbalance = abs(buy-sell)/(buy+sell) if buy+sell else 0
     direction = "UP" if buy > sell else "DOWN" if sell > buy else "NEUTRAL"
-    round_pivots, round_start, round_end = _neon_round_pivots(
-        round_df if round_df is not None else df, market, now)
-    # A/B/C/D corresponden a los últimos giros confirmados de esta ronda.
-    pivots = []
-    for pivot in round_pivots[-4:]:
-        index = next((i for i, row in enumerate(rows)
-                      if row["t"] <= pivot["t"] < row["t"] + minutes*60), None)
-        if index is not None:
-            pivots.append({"i": index, "v": pivot["v"], "kind": pivot["kind"]})
+    # Dynamic chart-only ZigZag, consistent for every selected timeframe.
+    pivots = _neon_zigzag(rows, timeframe)
+    pivot_count = sum(bool(p['confirmed']) for p in pivots)
+    round_start = round_end = None
     latest = rows[-1]["close"] if rows else None
     recent_levels = rows[-21:-1]
     support = min((r["low"] for r in recent_levels), default=None)
@@ -3286,7 +3306,7 @@ def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=
             "signal": active if active in ("UP", "DOWN") else "ESPERANDO",
             "up": float(sig.get("up_probability", 50)),
             "down": float(sig.get("down_probability", 50)),
-            "support": support, "resistance": resistance, "pivots": pivots[-4:], "pivot_count": len(round_pivots), "round_start": round_start, "round_end": round_end,
+            "support": support, "resistance": resistance, "pivots": pivots, "pivot_count": pivot_count, "round_start": round_start, "round_end": round_end,
             "flow": {"ok": whale is not None, "buy": buy, "sell": sell,
                      "buys": buys, "sells": sells, "direction": direction,
                      "strength": "ALTA" if imbalance >= .6 else "MEDIA" if imbalance >= .3 else "BAJA",
@@ -3363,7 +3383,7 @@ let toggles=Object.assign({ema9:true,ema21:true,vwap:true,volume:true,rsi:true,p
 function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
 for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
 function refreshLabels(){
-$('subtitle').textContent=D.timeframe.toUpperCase()+' · COINBASE · BTC SIGNAL';$('price').textContent=usd(D.price);$('live').textContent=D.price==null?'● SIN COTIZACIÓN':'● PRECIO RECIBIDO';$('signal').textContent=(D.signal==='UP'?'▲ ':D.signal==='DOWN'?'▼ ':'')+D.signal;$('signal').className=D.signal==='UP'?'green':D.signal==='DOWN'?'red':'cyan';$('model').textContent=fmt(D.signal==='UP'?D.up:D.signal==='DOWN'?D.down:Math.max(D.up,D.down),1)+'%';$('pattern').textContent=D.round_start==null?'SIN RONDA ACTIVA':D.pivot_count+' EXTREMOS CONFIRMADOS EN ESTA RONDA';$('status').textContent=D.rows.length?'DATOS RECIBIDOS':'SIN VELAS';$('updated').textContent='Actualizado '+D.updated;$('viewtf').textContent=D.timeframe+' · VELAS REALES';
+$('subtitle').textContent=D.timeframe.toUpperCase()+' · COINBASE · BTC SIGNAL';$('price').textContent=usd(D.price);$('live').textContent=D.price==null?'● SIN COTIZACIÓN':'● PRECIO RECIBIDO';$('signal').textContent=(D.signal==='UP'?'▲ ':D.signal==='DOWN'?'▼ ':'')+D.signal;$('signal').className=D.signal==='UP'?'green':D.signal==='DOWN'?'red':'cyan';$('model').textContent=fmt(D.signal==='UP'?D.up:D.signal==='DOWN'?D.down:Math.max(D.up,D.down),1)+'%';$('pattern').textContent=D.pivot_count+' GIROS CONFIRMADOS · ÚLTIMO PUNTO MÓVIL';$('status').textContent=D.rows.length?'DATOS RECIBIDOS':'SIN VELAS';$('updated').textContent='Actualizado '+D.updated;$('viewtf').textContent=D.timeframe+' · VELAS REALES';
 const F=D.flow,total=F.buy+F.sell,known=F.ok;
 $('watch').textContent=!known?'SIN DATOS DE FLUJO':total===0?'ESPERANDO OPERACIONES':F.direction==='NEUTRAL'?'FLUJO EQUILIBRADO':'WATCH '+F.direction;
 for(const [id,value] of [['buy',F.buy],['sell',F.sell],['buytotal',F.buy],['selltotal',F.sell]])$(id).textContent=known?compact(value):'—';
@@ -3390,7 +3410,13 @@ for(let k=0;k<=4;k++){const xx=L+plot*k/4;s+='<line x1="'+xx+'" y1="'+T+'" x2="'
 s+='<g clip-path="url(#plot)">';if(toggles.volume){const max=Math.max(...rows.map(r=>r.volume),1);rows.forEach((r,i)=>{let h=r.volume/max*105;s+='<rect x="'+(x(i)-body/2)+'" y="'+(B-h)+'" width="'+body+'" height="'+h+'" fill="'+(r.close>=r.open?'#00dfb5':'#e64b4b')+'" opacity=".9"/>'})}
 rows.forEach((r,i)=>{const c=r.close>=r.open?'#00dfb5':'#e64b4b';s+='<line x1="'+x(i)+'" x2="'+x(i)+'" y1="'+y(r.high)+'" y2="'+y(r.low)+'" stroke="'+c+'" stroke-width="2.1"/><rect x="'+(x(i)-body/2)+'" y="'+Math.min(y(r.open),y(r.close))+'" width="'+body+'" height="'+Math.max(1.8,Math.abs(y(r.open)-y(r.close)))+'" fill="'+c+'"/>'});
 for(const k of ['ema9','ema21','vwap'])if(toggles[k]){let points=rows.map((r,i)=>r[k]==null?'':x(i)+','+y(r[k])).filter(Boolean).join(' ');s+='<polyline points="'+points+'" fill="none" stroke="'+colors[k]+'" stroke-width="3" '+(k==='vwap'?'stroke-dasharray="8 6"':'')+'/>'}
-if(toggles.patterns){const piv=D.pivots.filter(p=>p.i>=start&&p.i<end);s+='<polyline points="'+piv.map(p=>x(p.i-start)+','+y(p.v)).join(' ')+'" fill="none" stroke="#bc75ff" stroke-width="3"/>';piv.forEach(p=>{const letter='ABCD'[D.pivots.indexOf(p)];s+='<circle cx="'+x(p.i-start)+'" cy="'+y(p.v)+'" r="5" fill="#bb76ff"/><text x="'+x(p.i-start)+'" y="'+(y(p.v)+(p.kind==='H'?-14:24))+'" fill="#c487ff" font-size="18" text-anchor="middle">'+letter+'</text>'})}
+if(toggles.patterns){
+ const piv=D.pivots.filter(p=>p.i>=start&&p.i<end);
+ if(piv.length){
+  s+='<polyline points="'+piv.map(p=>x(p.i-start)+','+y(p.v)).join(' ')+'" fill="none" stroke="#bc75ff" stroke-width="2.7" stroke-linejoin="round" '+(!piv[piv.length-1].confirmed?'stroke-dasharray="7 4"':'')+'/>';
+  piv.forEach((p,j)=>{const px=x(p.i-start),py=y(p.v),letter='ABCDEFGHIJKLMNOPQRSTUVWXYZ'[j%26];s+='<circle cx="'+px+'" cy="'+py+'" r="'+(p.confirmed?4.5:5.5)+'" fill="'+(p.confirmed?'#bb76ff':'#f3b4ff')+'" '+(p.confirmed?'':'stroke="#fff" stroke-width="1.5"')+'/><text x="'+px+'" y="'+(py+(p.kind==='H'?-14:24))+'" fill="#dba8ff" font-weight="700" font-size="17" text-anchor="middle">'+letter+(p.confirmed?'':'*')+'</text>'});
+ }
+}
 s+='</g>';let levels=[[D.resistance,'RESISTANCE','#e64b4b'],[D.target,'TARGET','#00dfb5'],[D.price,'BTC','#00dfb5'],[D.support,'SUPPORT','#00dfb5']].filter(r=>r[0]!=null).map(r=>({v:r[0],label:r[1],c:r[2],yy:y(r[0]),labelY:y(r[0])})).filter(l=>l.yy>=T&&l.yy<=B).sort((a,b)=>a.yy-b.yy);
 let previous=-100;for(const l of levels){l.labelY=Math.max(T+12,previous+42,l.yy);previous=l.labelY}let excess=previous-(B-10);if(excess>0)for(const l of levels)l.labelY-=excess;
 for(const l of levels){s+='<line x1="0" y1="'+l.yy+'" x2="'+(W-R)+'" y2="'+l.yy+'" stroke="'+l.c+'" stroke-dasharray="4 5" opacity=".8"/><path d="M '+(W-R-6)+' '+l.yy+' L '+(W-R+5)+' '+l.labelY+'" stroke="'+l.c+'" fill="none"/><rect x="'+(W-R+4)+'" y="'+(l.labelY-17)+'" width="118" height="36" rx="4" fill="'+l.c+'"/><text x="'+(W-R+11)+'" y="'+(l.labelY-3)+'" fill="#06101b" font-size="10" font-weight="850">'+l.label+'</text><text x="'+(W-R+11)+'" y="'+(l.labelY+12)+'" fill="#06101b" font-size="14" font-weight="750">'+fmt(l.v)+'</text>'}
