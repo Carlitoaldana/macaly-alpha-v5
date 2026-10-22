@@ -1739,7 +1739,7 @@ def estimated_probabilities(
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-BRAIN_REVISION = "current_round_v1"
+BRAIN_REVISION = "current_round_v2"
 BRAIN_OBSERVE_SECONDS = 12.0
 BRAIN_SAMPLE_INTERVAL = 2.0
 BRAIN_MAX_GAP = 10.0
@@ -1803,13 +1803,15 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     direction lock or mandatory historical-round database lookup.
     """
     if state.get("brain_revision") != BRAIN_REVISION:
-        state.update(brain_revision=BRAIN_REVISION, brain_samples=[], brain_source=None,
+        state.update(brain_revision=BRAIN_REVISION, brain_samples=[], brain_tapes={}, brain_source=None,
                      active_direction=None, active_since=None, pending_direction=None,
                      pending_count=0, pending_since=None, pending_last_at=None)
+    state["brain_warning"] = None
     def clear(reason):
         state["active_direction"] = None
         state["active_since"] = None
         state["opening_conflict"] = reason
+        state["brain_invalid_count"] = 0
         if signal is not None:
             signal.update(candidate=None, quality=reason, final_score=0.0,
                           technical_score=0.0, up_probability=50, down_probability=50,
@@ -1821,10 +1823,14 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         remaining = actual if remaining is None else min(float(remaining), actual)
     if remaining is None or not math.isfinite(float(remaining)) or remaining <= 0 or remaining > 900:
         state["brain_samples"] = []
+        state["brain_tapes"] = {}
+        state["brain_last_decision"] = {}
         clear("SIN RONDA ACTIVA")
         return
     if not signal or signal.get("data_valid") is False:
         state["brain_samples"] = []
+        state["brain_tapes"] = {}
+        state["brain_last_decision"] = {}
         clear("SIN DATOS ACTUALES")
         return
     try:
@@ -1833,25 +1839,39 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             raise ValueError()
     except (KeyError, TypeError, ValueError, OverflowError):
         state["brain_samples"] = []
+        state["brain_tapes"] = {}
+        state["brain_last_decision"] = {}
         clear("SIN DATOS ACTUALES")
         return
     source = signal.get("price_source")
     # Candle closes cannot prove a fresh live movement.
     if source not in ("KALSHI LIVE", "COINBASE"):
         state["brain_samples"] = []
+        state["brain_tapes"] = {}
+        state["brain_last_decision"] = {}
         clear("ESPERANDO PRECIO EN VIVO")
         return
     stamp = now.timestamp()
-    samples = state.setdefault("brain_samples", [])
-    if source != state.get("brain_source") or (samples and
-            (stamp < samples[-1][0] or stamp - samples[-1][0] > BRAIN_MAX_GAP)):
+    # Screen and worker may use different live feeds. Each feed keeps its
+    # own observations; alternating feeds must not erase one another.
+    tapes = state.setdefault("brain_tapes", {})
+    samples = tapes.get(source, [])
+    if samples and (stamp < samples[-1][0] or stamp - samples[-1][0] > BRAIN_MAX_GAP):
         samples = []
-    state["brain_source"] = source
     samples = [x for x in samples if stamp - x[0] <= BRAIN_WINDOW_SECONDS]
     if not samples or stamp - samples[-1][0] >= BRAIN_SAMPLE_INTERVAL:
         samples.append([stamp, price])
+    tapes[source] = samples
     state["brain_samples"] = samples
+    state["brain_source"] = source
+    signal["brain_decision_source"] = source
     if len(samples) < 5 or samples[-1][0] - samples[0][0] < BRAIN_OBSERVE_SECONDS:
+        other = state.get("brain_last_decision") or {}
+        if (state.get("active_direction") in ("UP", "DOWN") and
+                other.get("source") != source and 0 <= stamp - other.get("at", 0) <= BRAIN_MAX_GAP):
+            signal.update(other["public"])
+            signal["brain_decision_source"] = other["source"]
+            return
         clear("OBSERVANDO RONDA ACTUAL")
         return
     times = np.array([x[0] for x in samples], dtype=float)
@@ -1893,15 +1913,43 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         "samples": len(samples), "net": float(net), "efficiency": efficiency,
         "earlier_speed": float(earlier_speed), "recent_speed": float(recent_speed),
         "fading": bool(fading), "supported": bool(supported)}
-    if not supported:
+    active = state.get("active_direction")
+    retained = False
+    if not supported and active in ("UP", "DOWN"):
+        active_sign = 1 if active == "UP" else -1
+        cushion = active_sign * float(distance) if distance is not None and math.isfinite(float(distance)) else None
+        adverse = (active_sign * net <= -minimum and
+                   active_sign * (prices[-1] - prices[split]) <= -minimum * .5 and efficiency >= .55)
+        invalid = cushion is None or cushion <= 0 or adverse
+        # Count only distinct spaced observations, never screen refreshes.
+        last_check = state.get("brain_invalid_at", 0)
+        if invalid:
+            if stamp - last_check >= BRAIN_SAMPLE_INTERVAL:
+                state["brain_invalid_count"] = state.get("brain_invalid_count", 0) + 1
+                state["brain_invalid_at"] = stamp
+        else:
+            state["brain_invalid_count"] = 0
+        if state.get("brain_invalid_count", 0) < 2 and cushion is not None:
+            retained = True
+            side, sign = active, active_sign
+            # Descriptive support, not a calibrated probability.
+            strength = min(3.0, max(.25, max(0.0, cushion) / atr))
+            state["brain_warning"] = active + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
+    if not supported and not retained:
         clear("FUERZA ACTUAL INSUFICIENTE" if not fading else "IMPULSO AGOTÁNDOSE")
         return
+    if supported:
+        state["brain_invalid_count"] = 0
+    quality = "RESPALDO VIGENTE • PERDIENDO FUERZA" if retained else "FUERZA ACTUAL CONFIRMADA"
     score = sign * strength
-    signal.update(candidate=side, quality="FUERZA ACTUAL CONFIRMADA",
-                  entry_route_internal="FUERZA ACTUAL CONFIRMADA", final_score=score,
+    signal.update(candidate=side, quality=quality,
+                  entry_route_internal=quality, final_score=score,
                   technical_score=score, momentum="ALCISTA" if sign == 1 else "BAJISTA",
                   up_probability=int(round(50 + score * 8)),
                   down_probability=int(round(50 - score * 8)))
+    state["brain_last_decision"] = {"source": source, "at": stamp,
+        "public": {key: signal[key] for key in ("candidate", "quality", "entry_route_internal",
+            "final_score", "technical_score", "momentum", "up_probability", "down_probability")}}
     state["opening_conflict"] = None
     if state.get("active_direction") != side:
         state["active_direction"] = side
@@ -1978,6 +2026,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         pass
     confirm_round_candidate(state, candidate, market, seconds_left, now, sig)
 
+    score = float(sig.get("final_score", 0.0))
     active = state.get("active_direction")
     reversal = False
     reversal_text = ""
@@ -2007,6 +2056,9 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
             reversal = True
             reversal_text = "DOWN PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
 
+    if active and state.get("brain_warning"):
+        reversal = True
+        reversal_text = state["brain_warning"]
     state["reversal_warning"] = reversal
     state["reversal_text"] = reversal_text
 
@@ -2041,7 +2093,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "current_round_brain_v1"
+BACKGROUND_DATA_REVISION = "current_round_brain_v2"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3905,7 +3957,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     update_exit_plan(state, signal, seconds_left, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v2", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
