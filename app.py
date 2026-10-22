@@ -2366,7 +2366,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         if sig.get("mom3",0) < -0.02: weakness_points += 1
         if sig.get("mom5",0) < 0: weakness_points += 1
         if price_change < -8: weakness_points += 1
-        if weakness_points >= 2 or (price_change < -8 and weakness_points >= 1):
+        if weakness_points >= 2:
             reversal = True
             reversal_text = "UP PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
 
@@ -2378,7 +2378,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         if sig.get("mom3",0) > 0.02: weakness_points += 1
         if sig.get("mom5",0) > 0: weakness_points += 1
         if price_change > 8: weakness_points += 1
-        if weakness_points >= 2 or (price_change > 8 and weakness_points >= 1):
+        if weakness_points >= 2:
             reversal = True
             reversal_text = "DOWN PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
 
@@ -2903,9 +2903,6 @@ def closing_reader(sig, round_signal, seconds_left, micro):
     elif round_signal.get("reversal"):
         headline = "SEÑAL PERDIENDO FUERZA"
         note = round_signal.get("reversal_text") or "Posible cambio de dirección."
-    elif strong_contradiction:
-        headline = f"{direction} PERDIENDO FUERZA"
-        note = "La presión live de 10s y 30s va contra la señal activa."
     elif confidence >= 75:
         headline = ("APOYO FUERTE AL CIERRE UP" if direction == "UP"
                     else "APOYO FUERTE AL CIERRE DOWN")
