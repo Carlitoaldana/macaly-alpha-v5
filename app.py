@@ -1739,7 +1739,7 @@ def estimated_probabilities(
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-BRAIN_REVISION = "current_round_v2"
+BRAIN_REVISION = "current_round_v3_confirmed_transitions"
 BRAIN_OBSERVE_SECONDS = 12.0
 BRAIN_SAMPLE_INTERVAL = 2.0
 BRAIN_MAX_GAP = 10.0
@@ -1774,12 +1774,43 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support}
 
 
-def build_presignal(sig, seconds_left):
-    """Same current-round evidence as the official decision; no legacy vote."""
-    score = float(sig.get("final_score", 0.0))
-    side = sig.get("candidate") or "NEUTRAL"
-    return {"direction": side, "percent": int(round(50 + min(abs(score), 5) * 8)),
-            "bull": max(score, 0.0), "bear": max(-score, 0.0)}
+def build_presignal(sig, seconds_left, ticker=None, now=None):
+    """Independent short price tape; never reads or writes the official decision."""
+    neutral = {"direction": "NEUTRAL", "percent": 50, "bull": 0.0, "bear": 0.0}
+    source = sig.get("price_source")
+    key = (ticker, source)
+    store = st.session_state.setdefault("independent_presignal", {})
+    if (not ticker or ticker == "--" or seconds_left is None or seconds_left <= 0
+            or sig.get("data_valid") is False or source not in ("COINBASE", "KALSHI LIVE")):
+        store.clear()
+        return neutral
+    price, atr = _plan_number(sig.get("price")), _plan_number(sig.get("atr"))
+    if price is None or atr is None or price <= 0 or atr <= 0:
+        store.clear()
+        return neutral
+    stamp = (now or datetime.now(timezone.utc)).timestamp()
+    for old in list(store):
+        if old[0] != ticker:
+            del store[old]
+    tape = store.get(key, [])
+    if tape and (stamp < tape[-1][0] or stamp - tape[-1][0] > 10):
+        tape = []
+    tape = [x for x in tape if stamp - x[0] <= 10]
+    if not tape or stamp - tape[-1][0] >= 1:
+        tape.append([stamp, price])
+    store[key] = tape
+    if len(tape) < 4 or tape[-1][0] - tape[0][0] < 6:
+        return neutral
+    net = tape[-1][1] - tape[0][1]
+    travel = sum(abs(y[1]-x[1]) for x, y in zip(tape, tape[1:]))
+    efficiency = abs(net) / max(travel, 1e-8)
+    if abs(net) < max(1.0, .03 * atr) or efficiency < .4:
+        return neutral
+    strength = min(5.0, abs(net) / atr * 10 * efficiency)
+    return {"direction": "UP" if net > 0 else "DOWN",
+            "percent": int(round(50 + strength * 8)),
+            "bull": strength if net > 0 else 0.0,
+            "bear": strength if net < 0 else 0.0}
 
 
 def entry_quality(price, seconds_left):
@@ -1805,13 +1836,16 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if state.get("brain_revision") != BRAIN_REVISION:
         state.update(brain_revision=BRAIN_REVISION, brain_samples=[], brain_tapes={}, brain_source=None,
                      active_direction=None, active_since=None, pending_direction=None,
-                     pending_count=0, pending_since=None, pending_last_at=None)
+                     pending_count=0, pending_since=None, pending_last_at=None,
+                     brain_invalid_count=0, brain_invalid_at=0, brain_authority=None)
     state["brain_warning"] = None
     def clear(reason):
         state["active_direction"] = None
         state["active_since"] = None
         state["opening_conflict"] = reason
         state["brain_invalid_count"] = 0
+        state.update(pending_direction=None, pending_count=0, pending_since=None,
+                     pending_last_at=None, pending_price_source=None)
         if signal is not None:
             signal.update(candidate=None, quality=reason, final_score=0.0,
                           technical_score=0.0, up_probability=50, down_probability=50,
@@ -1852,6 +1886,31 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         clear("ESPERANDO PRECIO EN VIVO")
         return
     stamp = now.timestamp()
+    def publish_active(reason):
+        side = state.get("active_direction")
+        if side not in ("UP", "DOWN"):
+            signal.update(candidate=None, quality=reason, final_score=0.0,
+                          technical_score=0.0, up_probability=50, down_probability=50,
+                          momentum="NEUTRAL", entry_route_internal=reason)
+            return
+        score = (1 if side == "UP" else -1) * .25
+        signal.update(candidate=side, quality=reason, final_score=score,
+                      technical_score=score, up_probability=50 + score * 8,
+                      down_probability=50 - score * 8,
+                      momentum="ALCISTA" if side == "UP" else "BAJISTA",
+                      entry_route_internal=reason)
+        state["brain_warning"] = side + " PERDIENDO FUERZA • " + reason
+    authority = state.get("brain_authority")
+    authority_at = state.get("brain_authority_at", 0)
+    if authority != source:
+        if authority and 0 <= stamp - authority_at <= BRAIN_MAX_GAP:
+            publish_active("EVALUANDO CON FUENTE ACTIVA")
+            signal["brain_decision_source"] = authority
+            return
+        state.update(brain_authority=source, pending_direction=None, pending_count=0,
+                     pending_since=None, pending_last_at=None, pending_price_source=None,
+                     brain_invalid_count=0, brain_invalid_at=0)
+    state["brain_authority_at"] = stamp
     # Screen and worker may use different live feeds. Each feed keeps its
     # own observations; alternating feeds must not erase one another.
     tapes = state.setdefault("brain_tapes", {})
@@ -1866,13 +1925,13 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     state["brain_source"] = source
     signal["brain_decision_source"] = source
     if len(samples) < 5 or samples[-1][0] - samples[0][0] < BRAIN_OBSERVE_SECONDS:
-        other = state.get("brain_last_decision") or {}
+        state.update(pending_direction=None, pending_count=0, pending_since=None, pending_last_at=None)
+        previous = state.get("brain_last_decision") or {}
         if (state.get("active_direction") in ("UP", "DOWN") and
-                other.get("source") != source and 0 <= stamp - other.get("at", 0) <= BRAIN_MAX_GAP):
-            signal.update(other["public"])
-            signal["brain_decision_source"] = other["source"]
-            return
-        clear("OBSERVANDO RONDA ACTUAL")
+                0 <= stamp - previous.get("at", 0) <= BRAIN_MAX_GAP):
+            publish_active("REUNIENDO MUESTRAS ACTUALES")
+        else:
+            clear("OBSERVANDO RONDA ACTUAL")
         return
     times = np.array([x[0] for x in samples], dtype=float)
     prices = np.array([x[1] for x in samples], dtype=float)
@@ -1915,31 +1974,56 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         "fading": bool(fading), "supported": bool(supported)}
     active = state.get("active_direction")
     retained = False
-    if not supported and active in ("UP", "DOWN"):
+    proposal = side if supported else None
+    # Entry and reversal are confirmed by distinct observations from one feed.
+    # No minimum holding time and no permanent restriction on either direction.
+    transition_ready = False
+    if proposal and proposal != active:
+        last = state.get("pending_last_at")
+        same = (state.get("pending_direction") == proposal and
+                state.get("pending_price_source") == source and last is not None and
+                0 <= stamp - last <= BRAIN_MAX_GAP)
+        if not same:
+            state.update(pending_direction=proposal, pending_price_source=source,
+                         pending_count=1, pending_since=stamp, pending_last_at=stamp)
+        elif stamp - last >= BRAIN_SAMPLE_INTERVAL:
+            state["pending_count"] += 1
+            state["pending_last_at"] = stamp
+        required = 3 if active in ("UP", "DOWN") else SIGNAL_CONFIRM_READINGS
+        transition_ready = (state["pending_count"] >= required and
+                            stamp - state["pending_since"] >= (required-1) * BRAIN_SAMPLE_INTERVAL)
+    else:
+        state.update(pending_direction=None, pending_count=0, pending_since=None,
+                     pending_last_at=None, pending_price_source=None)
+    if proposal == active or transition_ready:
+        state["brain_invalid_count"] = 0
+        state.update(pending_direction=None, pending_count=0, pending_since=None,
+                     pending_last_at=None, pending_price_source=None)
+    elif active in ("UP", "DOWN"):
         active_sign = 1 if active == "UP" else -1
         cushion = active_sign * float(distance) if distance is not None and math.isfinite(float(distance)) else None
         adverse = (active_sign * net <= -minimum and
                    active_sign * (prices[-1] - prices[split]) <= -minimum * .5 and efficiency >= .55)
-        invalid = cushion is None or cushion <= 0 or adverse
-        # Count only distinct spaced observations, never screen refreshes.
-        last_check = state.get("brain_invalid_at", 0)
+        # A pause with target support is a warning. Loss of target support
+        # plus absent forward progress must persist before invalidation.
+        invalid = cushion is None or (cushion <= -minimum and
+                   (adverse or active_sign * (prices[-1] - prices[split]) < minimum * .5))
         if invalid:
-            if stamp - last_check >= BRAIN_SAMPLE_INTERVAL:
+            if stamp - state.get("brain_invalid_at", 0) >= BRAIN_SAMPLE_INTERVAL:
                 state["brain_invalid_count"] = state.get("brain_invalid_count", 0) + 1
                 state["brain_invalid_at"] = stamp
         else:
             state["brain_invalid_count"] = 0
-        if state.get("brain_invalid_count", 0) < 2 and cushion is not None:
-            retained = True
-            side, sign = active, active_sign
-            # Descriptive support, not a calibrated probability.
-            strength = min(3.0, max(.25, max(0.0, cushion) / atr))
-            state["brain_warning"] = active + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
-    if not supported and not retained:
-        clear("FUERZA ACTUAL INSUFICIENTE" if not fading else "IMPULSO AGOTÁNDOSE")
+        if state["brain_invalid_count"] >= 3:
+            clear("RESPALDO INVALIDADO POR MOVIMIENTO CONTRARIO")
+            return
+        retained = True
+        side, sign = active, active_sign
+        strength = min(3.0, max(.25, max(0.0, cushion or 0.0) / atr))
+        state["brain_warning"] = active + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
+    else:
+        publish_active("CONFIRMANDO FUERZA ACTUAL" if proposal else "FUERZA ACTUAL INSUFICIENTE")
         return
-    if supported:
-        state["brain_invalid_count"] = 0
     quality = "RESPALDO VIGENTE • PERDIENDO FUERZA" if retained else "FUERZA ACTUAL CONFIRMADA"
     score = sign * strength
     signal.update(candidate=side, quality=quality,
@@ -2019,7 +2103,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     state["last_score"] = score
     score_change = score - previous_score
 
-    # El cerebro propone; tres lecturas espaciadas confirman la señal.
+    # El cerebro separa entrada, mantenimiento y confirmación de giros.
     candidate = sig.get("candidate")
     if restored_from_disk and candidate not in ("UP", "DOWN"):
         # No se mantiene una señal antigua ante una lectura neutral actual.
@@ -3478,7 +3562,7 @@ def live_dashboard():
 
     # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
     # las probabilidades oficiales.
-    pre = build_presignal(sig, seconds_left)
+    pre = build_presignal(sig, seconds_left, ticker=ticker)
     pre_direction = pre["direction"]
     pre_percent = pre["percent"]
 
@@ -3957,7 +4041,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     update_exit_plan(state, signal, seconds_left, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v2", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v3", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
