@@ -1739,7 +1739,7 @@ def estimated_probabilities(
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-BRAIN_REVISION = "current_round_v3_confirmed_transitions"
+BRAIN_REVISION = "current_round_v4_validated_observations"
 BRAIN_OBSERVE_SECONDS = 12.0
 BRAIN_SAMPLE_INTERVAL = 2.0
 BRAIN_MAX_GAP = 10.0
@@ -1775,42 +1775,50 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
 
 
 def build_presignal(sig, seconds_left, ticker=None, now=None):
-    """Independent short price tape; never reads or writes the official decision."""
-    neutral = {"direction": "NEUTRAL", "percent": 50, "bull": 0.0, "bear": 0.0}
+    """Independent live-price evaluation; no official candidate or candle-validity gate."""
+    empty = {"direction": "UNAVAILABLE", "percent": 50, "bull": 0.0, "bear": 0.0,
+             "status": "SIN DATOS ACTUALES"}
+    now_ts = (now or datetime.now(timezone.utc)).timestamp()
     source = sig.get("price_source")
-    key = (ticker, source)
     store = st.session_state.setdefault("independent_presignal", {})
-    if (not ticker or ticker == "--" or seconds_left is None or seconds_left <= 0
-            or sig.get("data_valid") is False or source not in ("COINBASE", "KALSHI LIVE")):
-        store.clear()
-        return neutral
-    price, atr = _plan_number(sig.get("price")), _plan_number(sig.get("atr"))
-    if price is None or atr is None or price <= 0 or atr <= 0:
-        store.clear()
-        return neutral
-    stamp = (now or datetime.now(timezone.utc)).timestamp()
-    for old in list(store):
-        if old[0] != ticker:
-            del store[old]
-    tape = store.get(key, [])
-    if tape and (stamp < tape[-1][0] or stamp - tape[-1][0] > 10):
-        tape = []
-    tape = [x for x in tape if stamp - x[0] <= 10]
-    if not tape or stamp - tape[-1][0] >= 1:
+    for key in list(store):
+        if key[0] != ticker:
+            del store[key]
+    if not ticker or ticker == "--" or seconds_left is None or seconds_left <= 0:
+        return {**empty, "status": "SIN RONDA ACTIVA"}
+    price = _plan_number(sig.get("price"))
+    stamp = _plan_number(sig.get("price_observed_at"))
+    if (source not in ("COINBASE", "KALSHI LIVE") or price is None or price <= 0
+            or stamp is None or not -5 <= now_ts - stamp <= LIVE_PRICE_MAX_AGE):
+        return empty
+    key = (ticker, source)
+    saved_tape = store.get(key, [])
+    if saved_tape and stamp < saved_tape[-1][0]:
+        return {**empty, "status":"ESPERANDO OBSERVACIÓN ACTUAL"}
+    tape = [x for x in saved_tape if 0 <= stamp-x[0] <= 90]
+    if not tape or stamp > tape[-1][0]:
         tape.append([stamp, price])
     store[key] = tape
-    if len(tape) < 4 or tape[-1][0] - tape[0][0] < 6:
-        return neutral
-    net = tape[-1][1] - tape[0][1]
-    travel = sum(abs(y[1]-x[1]) for x, y in zip(tape, tape[1:]))
-    efficiency = abs(net) / max(travel, 1e-8)
-    if abs(net) < max(1.0, .03 * atr) or efficiency < .4:
-        return neutral
-    strength = min(5.0, abs(net) / atr * 10 * efficiency)
-    return {"direction": "UP" if net > 0 else "DOWN",
-            "percent": int(round(50 + strength * 8)),
-            "bull": strength if net > 0 else 0.0,
-            "bear": strength if net < 0 else 0.0}
+    # Keep each feed's history. A sparse refresh must not erase all observations.
+    recent = [x for x in tape if stamp-x[0] <= 30]
+    for i in range(len(recent)-1, 0, -1):
+        if recent[i][0]-recent[i-1][0] > LIVE_PRICE_MAX_AGE:
+            recent = recent[i:]
+            break
+    if len(recent) < 3 or recent[-1][0]-recent[0][0] < 6:
+        return {**empty, "direction": "OBSERVING", "status": "REUNIENDO MUESTRAS"}
+    net = recent[-1][1]-recent[0][1]
+    travel = sum(abs(y[1]-x[1]) for x,y in zip(recent,recent[1:]))
+    efficiency = abs(net)/max(travel, 1e-8)
+    # Normalization uses only this independent price tape, not the official score.
+    scale = max(1.0, travel)
+    if abs(net) < 1.0 or efficiency < .4:
+        return {"direction":"NEUTRAL", "percent":50, "bull":0.0, "bear":0.0,
+                "status":"PRESIÓN EQUILIBRADA"}
+    strength = min(5.0, abs(net)/scale*5*efficiency)
+    return {"direction":"UP" if net > 0 else "DOWN", "percent":round(50+strength*8),
+            "bull":strength if net>0 else 0.0, "bear":strength if net<0 else 0.0,
+            "status":"PRESIÓN ACTUAL"}
 
 
 def entry_quality(price, seconds_left):
@@ -1839,6 +1847,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                      pending_count=0, pending_since=None, pending_last_at=None,
                      brain_invalid_count=0, brain_invalid_at=0, brain_authority=None)
     state["brain_warning"] = None
+    state["brain_suspended"] = False
     def clear(reason):
         state["active_direction"] = None
         state["active_since"] = None
@@ -1846,6 +1855,21 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["brain_invalid_count"] = 0
         state.update(pending_direction=None, pending_count=0, pending_since=None,
                      pending_last_at=None, pending_price_source=None)
+        if signal is not None:
+            signal.update(candidate=None, quality=reason, final_score=0.0,
+                          technical_score=0.0, up_probability=50, down_probability=50,
+                          momentum="NEUTRAL", entry_route_internal=reason)
+    def suspend(reason):
+        # Missing input is not contrary market evidence. Retain history privately;
+        # never present an unavailable decision as a currently validated signal.
+        state["brain_suspended"] = True
+        state["brain_warning"] = reason
+        state.update(pending_direction=None, pending_count=0, pending_since=None,
+                     pending_last_at=None, pending_price_source=None, brain_invalid_count=0)
+        previous = state.get("brain_last_decision") or {}
+        if now.timestamp() - previous.get("at", 0) > LIVE_PRICE_MAX_AGE:
+            state["active_direction"] = None
+            state["active_since"] = None
         if signal is not None:
             signal.update(candidate=None, quality=reason, final_score=0.0,
                           technical_score=0.0, up_probability=50, down_probability=50,
@@ -1862,30 +1886,21 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         clear("SIN RONDA ACTIVA")
         return
     if not signal or signal.get("data_valid") is False:
-        state["brain_samples"] = []
-        state["brain_tapes"] = {}
-        state["brain_last_decision"] = {}
-        clear("SIN DATOS ACTUALES")
+        suspend("SIN DATOS ACTUALES")
         return
     try:
         price, atr = float(signal["price"]), float(signal["atr"])
-        if not all(math.isfinite(x) and x > 0 for x in (price, atr)):
+        stamp = float(signal["price_observed_at"])
+        if (not all(math.isfinite(x) and x > 0 for x in (price, atr, stamp))
+                or not -5 <= now.timestamp()-stamp <= LIVE_PRICE_MAX_AGE):
             raise ValueError()
     except (KeyError, TypeError, ValueError, OverflowError):
-        state["brain_samples"] = []
-        state["brain_tapes"] = {}
-        state["brain_last_decision"] = {}
-        clear("SIN DATOS ACTUALES")
+        suspend("SIN DATOS ACTUALES")
         return
     source = signal.get("price_source")
-    # Candle closes cannot prove a fresh live movement.
     if source not in ("KALSHI LIVE", "COINBASE"):
-        state["brain_samples"] = []
-        state["brain_tapes"] = {}
-        state["brain_last_decision"] = {}
-        clear("ESPERANDO PRECIO EN VIVO")
+        suspend("ESPERANDO PRECIO EN VIVO")
         return
-    stamp = now.timestamp()
     def publish_active(reason):
         side = state.get("active_direction")
         if side not in ("UP", "DOWN"):
@@ -1915,8 +1930,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     # own observations; alternating feeds must not erase one another.
     tapes = state.setdefault("brain_tapes", {})
     samples = tapes.get(source, [])
-    if samples and (stamp < samples[-1][0] or stamp - samples[-1][0] > BRAIN_MAX_GAP):
-        samples = []
+    if samples and stamp < samples[-1][0]:
+        suspend("OBSERVACIÓN FUERA DE ORDEN")
+        return
     samples = [x for x in samples if stamp - x[0] <= BRAIN_WINDOW_SECONDS]
     if not samples or stamp - samples[-1][0] >= BRAIN_SAMPLE_INTERVAL:
         samples.append([stamp, price])
@@ -1928,10 +1944,10 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state.update(pending_direction=None, pending_count=0, pending_since=None, pending_last_at=None)
         previous = state.get("brain_last_decision") or {}
         if (state.get("active_direction") in ("UP", "DOWN") and
-                0 <= stamp - previous.get("at", 0) <= BRAIN_MAX_GAP):
+                0 <= now.timestamp() - previous.get("at", 0) <= LIVE_PRICE_MAX_AGE):
             publish_active("REUNIENDO MUESTRAS ACTUALES")
         else:
-            clear("OBSERVANDO RONDA ACTUAL")
+            suspend("REUNIENDO MUESTRAS ACTUALES")
         return
     times = np.array([x[0] for x in samples], dtype=float)
     prices = np.array([x[1] for x in samples], dtype=float)
@@ -1948,7 +1964,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     recent_move = sign * (prices[-1] - prices[split])
     fading = sign * earlier_speed > 0 and sign * recent_speed < 0.55 * sign * earlier_speed
     # Direction must be supported by actual movement, coherence and retained
-    # force. Slowing alone can invalidate it, before an opposite move appears.
+    # force for entry. Retention is evaluated separately below.
     supported = (side is not None and sign * net >= minimum and
                  recent_move >= minimum * 0.5 and efficiency >= 0.55 and
                  sign * steps[-1] >= 0 and not fading)
@@ -1995,7 +2011,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     else:
         state.update(pending_direction=None, pending_count=0, pending_since=None,
                      pending_last_at=None, pending_price_source=None)
-    if proposal == active or transition_ready:
+    if (proposal in ("UP", "DOWN") and proposal == active) or transition_ready:
         state["brain_invalid_count"] = 0
         state.update(pending_direction=None, pending_count=0, pending_since=None,
                      pending_last_at=None, pending_price_source=None)
@@ -2004,10 +2020,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         cushion = active_sign * float(distance) if distance is not None and math.isfinite(float(distance)) else None
         adverse = (active_sign * net <= -minimum and
                    active_sign * (prices[-1] - prices[split]) <= -minimum * .5 and efficiency >= .55)
-        # A pause with target support is a warning. Loss of target support
-        # plus absent forward progress must persist before invalidation.
-        invalid = cushion is None or (cushion <= -minimum and
-                   (adverse or active_sign * (prices[-1] - prices[split]) < minimum * .5))
+        # A pause is a warning, including before the target is reached.
+        # Invalidation requires actual coherent adverse movement and lost target support.
+        invalid = cushion is not None and cushion <= -minimum and adverse
         if invalid:
             if stamp - state.get("brain_invalid_at", 0) >= BRAIN_SAMPLE_INTERVAL:
                 state["brain_invalid_count"] = state.get("brain_invalid_count", 0) + 1
@@ -2111,7 +2126,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     confirm_round_candidate(state, candidate, market, seconds_left, now, sig)
 
     score = float(sig.get("final_score", 0.0))
-    active = state.get("active_direction")
+    active = state.get("active_direction") if not state.get("brain_suspended") else None
     reversal = False
     reversal_text = ""
 
@@ -2153,7 +2168,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#e64b4b"
         current_entry_price = get_no_ask(market)
     else:
-        decision, signal, icon, color = "ESPERANDO","SIN CONFIRMACIÓN","•","#38bdf8"
+        decision, signal, icon, color = "ESPERANDO",(sig.get("quality") if state.get("brain_suspended") else "SIN CONFIRMACIÓN"),"•","#38bdf8"
         current_entry_price = None
 
     quality, quality_color = entry_quality(current_entry_price, seconds_left)
@@ -2177,7 +2192,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "current_round_brain_v2"
+BACKGROUND_DATA_REVISION = "current_round_brain_v4"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2395,44 +2410,36 @@ def start_continuous_history_worker():
 # =========================================================
 
 def update_micro_tape(ticker, live_price, price_source=None):
-    if not ticker or ticker == "--" or live_price is None:
+    if not ticker or ticker == "--":
         return
-
-    # Cada ronda empieza con su propia cinta.
-    if (st.session_state.micro_ticker != ticker
-            or st.session_state.get("micro_price_source") != price_source):
+    if st.session_state.get("micro_tapes_ticker") != ticker:
+        st.session_state.micro_tapes_ticker = ticker
         st.session_state.micro_ticker = ticker
-        st.session_state.micro_price_source = price_source
-        st.session_state.micro_prices = []
-
-    now_ts = datetime.now(timezone.utc).timestamp()
+        st.session_state.micro_tapes = {}
+    tapes = st.session_state.setdefault("micro_tapes", {})
+    st.session_state.micro_price_source = price_source
     observed_ts = getattr(_PRICE_OBSERVATIONS, "values", {}).get(price_source)
-    if (observed_ts is None or not np.isfinite(float(live_price))
-            or not -5 <= now_ts - observed_ts <= LIVE_PRICE_MAX_AGE):
+    now_ts = datetime.now(timezone.utc).timestamp()
+    if (live_price is None or observed_ts is None or not np.isfinite(float(live_price))
+            or price_source not in ("COINBASE", "KALSHI LIVE")
+            or not -5 <= now_ts-observed_ts <= LIVE_PRICE_MAX_AGE):
         st.session_state.micro_prices = []
         return
-    tape = st.session_state.micro_prices
-
-    # Una pausa rompe la ventana micro; volver a reunir datos continuos.
-    if tape and observed_ts - tape[-1]["t"] > SIGNAL_CONFIRM_MAX_GAP:
-        tape.clear()
-    # Evita duplicar muestras dentro del mismo refresco.
-    if not tape or observed_ts - tape[-1]["t"] >= 1.0:
-        tape.append({"t": observed_ts, "p": float(live_price)})
-
-    # Conserva aproximadamente los últimos 90 segundos.
-    cutoff = now_ts - 90
-    st.session_state.micro_prices = [
-        x for x in tape if x["t"] >= cutoff
-    ]
+    tape = [x for x in tapes.get(price_source, []) if now_ts-x["t"] <= 90]
+    if not tape or observed_ts > tape[-1]["t"]:
+        tape.append({"t":observed_ts, "p":float(live_price)})
+    tapes[price_source] = tape
+    st.session_state.micro_prices = tape
 
 
 def micro_reading():
     tape = st.session_state.micro_prices
-    if (tape and (datetime.now(timezone.utc).timestamp() - tape[-1]["t"] > 6
-                  or any(b["t"] - a["t"] > SIGNAL_CONFIRM_MAX_GAP
-                         for a, b in zip(tape, tape[1:])))):
+    if tape and datetime.now(timezone.utc).timestamp()-tape[-1]["t"] > LIVE_PRICE_MAX_AGE:
         tape = []
+    for i in range(len(tape)-1, 0, -1):
+        if tape[i]["t"]-tape[i-1]["t"] > LIVE_PRICE_MAX_AGE:
+            tape = tape[i:]
+            break
 
     if len(tape) < 4:
         return {
@@ -2451,7 +2458,7 @@ def micro_reading():
     def price_ago(seconds):
         target_t = now_t - seconds
         candidates = [x for x in tape if x["t"] <= target_t]
-        if candidates and target_t - candidates[-1]["t"] <= SIGNAL_CONFIRM_INTERVAL:
+        if candidates and target_t - candidates[-1]["t"] <= SIGNAL_CONFIRM_MAX_GAP:
             return candidates[-1]["p"]
         return None
 
@@ -2505,7 +2512,7 @@ def closing_reader(sig, round_signal, seconds_left, micro):
     - Nunca llama "confirmado" a un resultado antes del cierre.
     """
     state = round_signal.get("round_state")
-    active_direction = state.get("active_direction") if state else None
+    active_direction = (round_signal.get("decision") if round_signal.get("decision") in ("UP", "DOWN") else None)
 
     if seconds_left is not None and seconds_left <= 0:
         distance = sig.get("distance")
@@ -2522,6 +2529,13 @@ def closing_reader(sig, round_signal, seconds_left, micro):
             "border":"rgba(148,163,184,.45)",
             "bg":"linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))",
         }
+
+    if state and state.get("brain_suspended"):
+        return {"percent":50, "headline":"EVALUACIÓN NO DISPONIBLE",
+                "note":sig.get("quality", "Esperando datos actuales para validar la señal."),
+                "micro":"REUNIENDO DATOS", "color":"#38bdf8",
+                "border":"rgba(56,189,248,.45)",
+                "bg":"linear-gradient(135deg,rgba(11,64,91,.30),rgba(9,23,34,.72))"}
 
     if active_direction not in ("UP", "DOWN"):
         first_direction = state.get("first_direction") if state else None
@@ -3474,6 +3488,9 @@ def live_dashboard():
             "down_probability": 50,
         }
 
+    pre = build_presignal({"price":live_btc_price, "price_source":source,
+                           "price_observed_at":getattr(_PRICE_OBSERVATIONS, "values", {}).get(source)},
+                          seconds_left, ticker=ticker)
     round_signal = process_round_signal(
         ticker, sig, market, seconds_left
     )
@@ -3500,7 +3517,7 @@ def live_dashboard():
     state = round_signal.get("round_state")
     active = (
         state.get("active_direction")
-        if state and btc_ok
+        if state and btc_ok and not state.get("brain_suspended")
         else None
     )
 
@@ -3562,7 +3579,6 @@ def live_dashboard():
 
     # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
     # las probabilidades oficiales.
-    pre = build_presignal(sig, seconds_left, ticker=ticker)
     pre_direction = pre["direction"]
     pre_percent = pre["percent"]
 
@@ -3576,15 +3592,17 @@ def live_dashboard():
         pre_label = "POSIBLE DOWN"
     else:
         pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
-        pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
-        pre_label = "NEUTRAL"
+        pre_note = ("La presión medida no tiene una inclinación clara." if pre_direction == "NEUTRAL"
+                    else "La preseñal está reuniendo observaciones de precio independientes." if pre_direction == "OBSERVING"
+                    else "No hay un precio actual verificable para evaluar la presión.")
+        pre_label = "NEUTRAL" if pre_direction == "NEUTRAL" else pre["status"]
 
     pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
     pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
       <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
-      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
+      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{str(pre_percent)+"%" if pre_direction in ("UP", "DOWN", "NEUTRAL") else "—"}</span></div>
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
       <div class="prenote">{pre_note}</div>
     </section>'''
@@ -4022,6 +4040,7 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     _TRACE_CONTEXT.build_payload = None
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
+    sig["price_observed_at"] = getattr(_PRICE_OBSERVATIONS, "values", {}).get(price_source)
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
         payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
