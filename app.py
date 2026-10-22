@@ -1773,7 +1773,7 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 
-def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
+def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
@@ -1883,6 +1883,38 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
                 candidate = side
                 quality = "GIRO TEMPRANO"
                 break
+    # LAB V5: el flujo agresor de Coinbase es APOYO, nunca orden ni veto.
+    # Se exige una muestra significativa, dirección coherente en 10s/30s,
+    # y corroboración técnica independiente. Una captura aislada no decide.
+    flow_support = {"used": False, "direction": None, "reason": "SIN APOYO FIABLE"}
+    if whale and isinstance(whale, dict):
+        flow_side = whale.get("flow_direction")
+        flow_imb = float(whale.get("flow_strength") or 0)
+        buy30 = float(whale.get("buy30") or 0)
+        sell30 = float(whale.get("sell30") or 0)
+        flow_total = buy30 + sell30
+        flow_ok = (flow_side in ("UP", "DOWN") and flow_total >= 500_000
+                   and flow_imb >= 0.20)
+        flow_support = {"used": False, "direction": flow_side if flow_ok else None,
+                        "reason": "FLUJO DISPONIBLE" if flow_ok else "MUESTRA INSUFICIENTE"}
+        if candidate is None and flow_ok and not near_noise and impulse["reliable"]:
+            sign = 1 if flow_side == "UP" else -1
+            rsi_ok = rsi1 >= 50 if sign == 1 else rsi1 <= 50
+            macd_ok = float(l1["macd_hist"]) * sign > 0
+            mom_ok = mom3 * sign >= 0.012
+            price_ok = (price - float(l1["ema9"])) * sign > 0
+            vwap_ok = vwap_atr * sign >= -0.04
+            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
+            # Contra una tendencia 5m opuesta se exige también momentum 5m.
+            against_5m = d5 == ("DOWN" if sign == 1 else "UP")
+            turn_ok = (not against_5m or
+                       (mom5 * sign >= 0.025 and abs(mom3) >= 0.025))
+            if (rsi_ok and macd_ok and mom_ok and price_ok and vwap_ok
+                    and turn_ok and not exhausted):
+                candidate = flow_side
+                quality = "FLUJO + IMPULSO"
+                flow_support = {"used": True, "direction": flow_side,
+                                "reason": "FLUJO CORROBORADO POR PRECIO Y MOMENTUM"}
     # Contexto temporal continuo (ronda de 15 minutos).
     # El tiempo restante interviene en CADA lectura, sin activar una regla
     # especial a los 3 minutos ni fijar UP/DOWN para el resto de la ronda.
@@ -1932,7 +1964,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support}
 
 
 def build_presignal(sig, seconds_left):
@@ -3314,7 +3346,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 <section class="panel">
 <header class="header"><div><h2>BTC / USD</h2><div class="sub" id="subtitle"></div></div><div><div class="price" id="price"></div><div class="live" id="live"></div></div></header>
 <div class="cards"><div class="card signal"><div class="label">SEÑAL OFICIAL DEL BOT</div><strong id="signal"></strong><small>Motor BTC Signal v4.6.1</small></div><div class="card"><div class="label">APOYO DEL MODELO</div><strong class="cyan" id="model"></strong><small>Apoyo calculado · no probabilidad de acierto</small></div><div class="card"><div class="label">ESTADO DE LA GRÁFICA</div><strong class="status" id="status"></strong><small id="updated"></small></div></div>
-<details id="whale"><summary>🐋 WHALE FLOW <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>🐋 WHALE FLOW — LIVE</h3><div class="note">Operaciones observadas de Coinbase · últimos 30 s</div><div class="watch" id="watch"></div><div class="metrics"><div class="metric"><small>BUY FLOW</small><b class="green" id="buy"></b></div><div class="metric"><small>SELL FLOW</small><b class="red" id="sell"></b></div><div class="metric"><small>DIFERENCIA</small><b id="diff"></b></div><div class="metric"><small>ACTIVIDAD</small><b id="activity"></b></div><div class="metric"><small>FUERZA DEL DESEQUILIBRIO</small><b id="strength"></b></div></div><div class="bars"><div class="bar">BUY<div class="track"><i id="buybar" style="background:#00dfb5"></i></div><b id="buytotal"></b></div><div class="bar">SELL<div class="track"><i id="sellbar" style="background:#e64b4b"></i></div><b id="selltotal"></b></div></div><div class="count"><div class="metric"><small>🐋 BUY WHALES</small><b class="green" id="buys"></b></div><div class="metric"><small>🐋 SELL WHALES</small><b class="red" id="sells"></b></div></div><div class="metric difference"><small>DIFERENCIA DE OPERACIONES</small><b id="countdiff"></b></div><p class="note">«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. Es información de flujo, independiente de la señal oficial.</p></div></details>
+<details id="whale"><summary>🐋 WHALE FLOW <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>🐋 WHALE FLOW — LIVE</h3><div class="note">Operaciones observadas de Coinbase · últimos 30 s</div><div class="watch" id="watch"></div><div class="metrics"><div class="metric"><small>BUY FLOW</small><b class="green" id="buy"></b></div><div class="metric"><small>SELL FLOW</small><b class="red" id="sell"></b></div><div class="metric"><small>DIFERENCIA</small><b id="diff"></b></div><div class="metric"><small>ACTIVIDAD</small><b id="activity"></b></div><div class="metric"><small>FUERZA DEL DESEQUILIBRIO</small><b id="strength"></b></div></div><div class="bars"><div class="bar">BUY<div class="track"><i id="buybar" style="background:#00dfb5"></i></div><b id="buytotal"></b></div><div class="bar">SELL<div class="track"><i id="sellbar" style="background:#e64b4b"></i></div><b id="selltotal"></b></div></div><div class="count"><div class="metric"><small>🐋 BUY WHALES</small><b class="green" id="buys"></b></div><div class="metric"><small>🐋 SELL WHALES</small><b class="red" id="sells"></b></div></div><div class="metric difference"><small>DIFERENCIA DE OPERACIONES</small><b id="countdiff"></b></div><p class="note">«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. En el laboratorio, el flujo puede apoyar una candidatura solo con confirmación técnica; no decide por sí solo.</p></div></details>
 <details id="momentum"><summary>⚡ SHORT-TERM MOMENTUM <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>MOVIMIENTO RECIENTE DE BTC</h3><div class="metrics" id="momrows"></div><p class="note">Cambio porcentual calculado por el motor en 3, 5 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.</p></div></details>
 <div class="tools"><h3>INDICADORES</h3><div class="toggles" id="toggles"></div><div class="legend" id="legend"></div></div>
 <div class="floatcounts"><div>🐋 BUY WHALES <b id="floatbuy"></b></div><div>🐋 SELL WHALES <b id="floatsell"></b></div></div>
@@ -3583,9 +3615,15 @@ def live_dashboard():
         target = None
         seconds_left = None
 
+    # Una sola lectura de Whale Flow por ciclo; la misma alimenta el panel.
+    try:
+        whale = get_coinbase_whale_flow()
+    except Exception:
+        whale = None
+
     if btc_ok:
         sig = build_signal(
-            btc_df, target, seconds_left, live_btc_price, source
+            btc_df, target, seconds_left, live_btc_price, source, whale=whale
         )
     else:
         _TRACE_CONTEXT.build_id = None
@@ -3631,11 +3669,8 @@ def live_dashboard():
                   "note": "Esperando verificación del resultado oficial de Kalshi."}
         reader_percent_label = "—"
 
-    # Ballenas: capa visual independiente; NO modifica señales ni probabilidades v4.6.1.
-    try:
-        whale = get_coinbase_whale_flow()
-    except Exception:
-        whale = None
+    # Whale Flow: panel visual y apoyo opcional a candidatura en el laboratorio.
+    # No se consulta por segunda vez ni modifica las confirmaciones temporales.
 
     state = round_signal.get("round_state")
     active = (
@@ -4156,10 +4191,10 @@ def _apply_ai_signal_gate(sig):
     return sig
 
 
-def build_signal(df, target, seconds_left, live_price=None, price_source=None):
+def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
     _TRACE_CONTEXT.build_id = None
     _TRACE_CONTEXT.build_payload = None
-    sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
+    sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
