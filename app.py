@@ -2093,13 +2093,11 @@ def _retention_supported(state, signal, seconds_left):
     direction = state.get("active_direction")
     if direction not in ("UP", "DOWN"):
         return False
-    # Mantener señal con 2 de 3: EMA, momentum de 5 min y posición frente al target.
-    supports = (
-        signal.get("ema") == ("BULL" if direction == "UP" else "BEAR"),
-        mom5 > 0 if direction == "UP" else mom5 < 0,
-        distance > 0 if direction == "UP" else distance < 0,
-    )
-    return sum(supports) >= 2
+    # Una condición contraria solo advierte; dos permiten retirar.
+    votes = (signal.get("ema") == ("BULL" if direction == "UP" else "BEAR"),
+             mom5 > 0 if direction == "UP" else mom5 < 0,
+             distance > 0 if direction == "UP" else distance < 0)
+    return sum(votes) >= 2
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
@@ -2227,6 +2225,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_count"] = 1
         state["pending_since"] = now.isoformat()
         state["pending_last_at"] = now.isoformat()
+        # Guardar impulso inicial para verificar si se agotó durante la confirmación.
+        state["pending_initial_mom3"] = signal.get("mom3") if signal else None
+        state["pending_initial_price"] = signal.get("price") if signal else None
         return
 
     if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
@@ -2236,6 +2237,31 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     elapsed = (now - since).total_seconds() if since else 0
     if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
             and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+        # No basta con que sigan alcistas/bajistas los indicadores retrasados:
+        # contrastar el impulso actual con el de la primera lectura.
+        # No añade espera fija ni bloquea una futura candidatura contraria.
+        fading = False
+        if signal:
+            impulse = signal.get("impulse_internal") or {}
+            fading = bool(impulse.get("exhaust_up" if candidate == "UP" else "exhaust_down"))
+            try:
+                sign = 1 if candidate == "UP" else -1
+                initial_mom = float(state["pending_initial_mom3"])
+                current_mom = float(signal["mom3"])
+                initial_price = float(state["pending_initial_price"])
+                current_price = float(signal["price"])
+                atr = float(signal["atr"])
+                if all(np.isfinite(v) for v in (initial_mom, current_mom, initial_price, current_price, atr)) and atr > 0:
+                    fading = fading or (sign * (initial_mom - current_mom) >= 0.05
+                                        and sign * (current_price - initial_price) <= -0.15 * atr)
+            except (KeyError, TypeError, ValueError, OverflowError):
+                pass
+        if fading:
+            state["pending_direction"] = None
+            state["pending_count"] = 0
+            state["pending_since"] = None
+            state["pending_last_at"] = None
+            return
         state["active_direction"] = candidate
         state["active_since"] = now
         if state.get("first_direction") is None:
