@@ -4006,13 +4006,60 @@ def live_dashboard():
                           pd.Timestamp(_diag_since).to_pydatetime()).total_seconds()), 2)
         except (ValueError, TypeError):
             pass
+    # REGISTRO TEMPORAL EN SESIÓN: observación solamente, sin afectar decisiones.
+    _diag_now = datetime.now(timezone.utc)
+    _diag_memory = st.session_state.setdefault("alpha_lab_diagnostic", {"last": None, "rows": []})
+    _diag_last = _diag_memory["last"]
+    _diag_previous_ticker = (_diag_last or {}).get("ticker")
+    _diag_new_round = bool(_diag_previous_ticker and _diag_previous_ticker != ticker and ticker != "--")
+    _diag_candidate_lost = bool(_diag_last and _diag_last.get("candidate") in ("UP", "DOWN") and _diag_candidate not in ("UP", "DOWN"))
+    _diag_pending_reset = bool(_diag_last and (_diag_last.get("pending_count") or 0) > 0 and not _diag_count)
+    _diag_seconds_jump = None
+    if _diag_last and _diag_last.get("seconds_left") is not None and seconds_left is not None:
+        _diag_seconds_jump = round(float(seconds_left) - float(_diag_last["seconds_left"]), 2)
+    _diag_row = {
+        "timestamp_utc": _diag_now.isoformat(),
+        "ticker": ticker,
+        "previous_ticker": _diag_previous_ticker or "",
+        "ticker_changed": int(_diag_new_round),
+        "seconds_left": seconds_left,
+        "seconds_change": _diag_seconds_jump,
+        "candidate": _diag_candidate or "NINGUNO",
+        "previous_candidate": (_diag_last or {}).get("candidate") or "NINGUNO",
+        "candidate_disappeared": int(_diag_candidate_lost),
+        "candidate_quality": sig.get("quality", ""),
+        "signal_score": sig.get("final_score"),
+        "signal_valid": sig.get("data_valid"),
+        "active_direction": _diag_state.get("active_direction") or "",
+        "pending_direction": _diag_pending or "",
+        "pending_count": _diag_count,
+        "pending_reset": int(_diag_pending_reset),
+        "pending_elapsed_seconds": _diag_wait,
+        "price_source": source,
+        "btc_live_price": live_btc_price,
+        "coinbase_live_price": coinbase_live_price,
+        "kalshi_live_price": kalshi_live_price,
+        "target": target,
+        "price_delta_target": (live_btc_price - target if live_btc_price is not None and target is not None else None),
+        "candle_age_seconds": _diag_candle_age,
+        "cycle_total_ms": _diag_times.get("ciclo_completo_incluida_pantalla"),
+    }
+    for _diag_stage in _diag_rows:
+        _diag_row["ms_" + _diag_stage["Etapa"].lower().replace(" ", "_").replace("+", "y")] = _diag_stage["Duración ms"]
+    _diag_memory["rows"].append(_diag_row)
+    _diag_memory["rows"] = _diag_memory["rows"][-2000:]
+    _diag_memory["last"] = {"ticker": ticker, "candidate": _diag_candidate,
+                            "pending_count": _diag_count, "seconds_left": seconds_left}
     with st.expander("🔬 DIAGNÓSTICO TEMPORAL DEL CEREBRO · LABORATORIO", expanded=True):
         st.caption("Solo medición. El refresco está programado cada 2 s; una consulta lenta puede alargarlo. La edad de vela no equivale a latencia del precio live.")
         st.dataframe(pd.DataFrame(_diag_rows), hide_index=True, use_container_width=True)
         st.write("**Datos:**", f"Precio: {source} · Vela: {_diag_candle_age if _diag_candle_age is not None else 'sin edad'} s")
         st.write("**Decisión:**", f"Candidato: {_diag_candidate or 'NINGUNO'} · Antes: {_diag_active_before or 'NINGUNA'} · Activa: {_diag_state.get('active_direction') or 'NINGUNA'}")
         st.write("**Confirmación:**", f"Pendiente: {_diag_pending or 'NINGUNA'} · Lecturas: {_diag_count}/{SIGNAL_CONFIRM_READINGS} · Espera acumulada: {_diag_wait if _diag_wait is not None else '—'} s")
-        st.caption("Haz una captura de esta tabla en varios ciclos. No se envía ningún dato automáticamente.")
+        st.write("**Cambios detectados:**", f"Ronda nueva: {'SÍ' if _diag_new_round else 'no'} · Candidato desaparecido: {'SÍ' if _diag_candidate_lost else 'no'} · Confirmación reiniciada: {'SÍ' if _diag_pending_reset else 'no'}")
+        st.write("**Muestras guardadas en esta sesión:**", len(_diag_memory["rows"]))
+        st.download_button("⬇️ Descargar CSV del diagnóstico", data=pd.DataFrame(_diag_memory["rows"]).to_csv(index=False).encode("utf-8"), file_name="alpha_v5_diagnostico_temporal.csv", mime="text/csv", key="alpha_lab_csv")
+        st.caption("Mediciones de esta sesión de Streamlit: no se envían automáticamente y pueden perderse si se reinicia la sesión.")
 
 
 import zlib
