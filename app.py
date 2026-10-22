@@ -2105,11 +2105,19 @@ def _exit_watch_update(state, sig, market, now):
     No opera ni cambia UP/DOWN. Historial breve en memoria de la ronda.
     """
     side = state.get("active_direction")
+    # La alerta pertenece a la dirección activa; no heredarla de otra señal.
+    if state.get("exit_watch_side") != side:
+        state["exit_watch_side"] = side
+        state["exit_watch_prices"] = []
+        state["exit_watch_text"] = ""
+        state.pop("exit_watch_at", None)
     if side not in ("UP", "DOWN") or sig.get("data_valid") is False:
-        return state.get("exit_watch_text", "") if side in ("UP", "DOWN") else ""
+        state["exit_watch_text"] = ""
+        return ""
     price = _plan_number(sig.get("price"))
     if price is None:
-        return state.get("exit_watch_text", "")
+        state["exit_watch_text"] = ""
+        return ""
     sign = 1 if side == "UP" else -1
     samples = state.setdefault("exit_watch_prices", [])
     ts = now.timestamp()
@@ -2117,7 +2125,8 @@ def _exit_watch_update(state, sig, market, now):
         samples.append([ts, price])
     samples[:] = [x for x in samples if ts - x[0] <= 45][-45:]
     if len(samples) < 3 or ts - samples[0][0] < 8:
-        return state.get("exit_watch_text", "")
+        state["exit_watch_text"] = ""
+        return ""
     favorable = [sign * x[1] for x in samples]
     best = max(favorable)
     current = favorable[-1]
@@ -2146,8 +2155,10 @@ def _exit_watch_update(state, sig, market, now):
         state["exit_watch_text"] = msg
         state["exit_watch_at"] = now.isoformat()
         return msg
-    # Conservar brevemente la alerta ya emitida para que un refresco no la borre.
-    return state.get("exit_watch_text", "")
+    # Sin agotamiento actual, apagar el cartel: no mantener alertas antiguas.
+    state["exit_watch_text"] = ""
+    state.pop("exit_watch_at", None)
+    return ""
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
