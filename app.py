@@ -12,7 +12,7 @@ import time
 
 # =========================================================
 # MACALY + ALPHA BOT v4.6.1 • MOBILE PRO UI
-# BTC 15 MIN • SAME v4.6.1 SIGNAL ENGINE
+# BTC 15 MIN • CURRENT ROUND SIGNAL ENGINE
 # =========================================================
 
 st.set_page_config(
@@ -928,8 +928,8 @@ def new_round_state(ticker, seconds_left):
 # Solo guarda el estado de la ronda; NO cambia el cerebro.
 # =========================================================
 
-LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
-ROUND_STATE_DB = 'btc_signal_round_state_v2.db'
+LEGACY_ROUND_STATE_DB = 'btc_signal_round_current_v1.db'
+ROUND_STATE_DB = 'btc_signal_round_current_v1.db'
 _ROUND_TRANSACTION = threading.local()
 
 
@@ -1739,43 +1739,15 @@ def estimated_probabilities(
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
-    """Directional persistence / exhaustion in comparable ATR units.
-
-    Informational internally; never imposes a permanent UP/DOWN lock.
-    Percent momentum is converted to dollars before ATR normalization.
-    Uses completed/current candle history, not fabricated price targets.
-    """
-    if not np.isfinite(price) or price <= 0 or not np.isfinite(atr) or atr <= 0:
-        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
-                "exhaust_down": False, "reliable": False}
-    close = one["close"].astype(float).tail(9).to_numpy()
-    if len(close) < 7 or not np.all(np.isfinite(close)):
-        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
-                "exhaust_down": False, "reliable": False}
-    changes = np.diff(close)
-    # Directional efficiency: net movement divided by total absolute movement.
-    travel = float(np.sum(np.abs(changes[-5:])))
-    efficiency = abs(float(close[-1] - close[-6])) / max(travel, 1e-8)
-    recent = float(np.sum(changes[-2:])) / atr
-    previous = float(np.sum(changes[-5:-2])) / atr
-    m3 = float(np.clip(price * mom3 / 100.0 / atr, -3, 3))
-    m5 = float(np.clip(price * mom5 / 100.0 / atr, -3, 3))
-    m15 = float(np.clip(price * mom15 / 100.0 / atr, -3, 3))
-    volume = float(np.clip(rvol, 0, 3)) if np.isfinite(rvol) else 1.0
-    # No invented dollar target: these are dimensionless internal strengths.
-    trend = .48 * m3 + .32 * m5 + .20 * m15
-    strength = float(np.clip(trend * (.75 + .25 * efficiency) *
-                             (.90 + .10 * min(volume, 1.5)), -3, 3))
-    exhaust_up = (previous > .35 and recent < -.10) or (m5 > .35 and m3 < -.12)
-    exhaust_down = (previous < -.35 and recent > .10) or (m5 < -.35 and m3 > .12)
-    return {"up": max(0., strength), "down": max(0., -strength),
-            "exhaust_up": bool(exhaust_up), "exhaust_down": bool(exhaust_down),
-            "reliable": True, "efficiency": round(float(efficiency), 3),
-            "recent_atr": round(recent, 3)}
+BRAIN_REVISION = "current_round_v1"
+BRAIN_OBSERVE_SECONDS = 12.0
+BRAIN_SAMPLE_INTERVAL = 2.0
+BRAIN_MAX_GAP = 10.0
+BRAIN_WINDOW_SECONDS = 24.0
 
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
+    """Indicators describe context only. Round-local observations decide entries."""
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
@@ -1791,281 +1763,24 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
     rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
     mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
-    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
-    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
-    candidate=None; quality="SIN CONFIRMACIÓN"
-    if aligned=="UP" and (trend_strong or (rsi3>=52 and rsi5>=50)) and vwap_atr>-0.15:
-        candidate="UP"
-    elif aligned=="DOWN" and (trend_strong or (rsi3<=48 and rsi5<=50)) and vwap_atr<0.15:
-        candidate="DOWN"
-    # V5 TEST: tres requisitos esenciales para la ruta temprana:
-    # 1) MACD 3m orientado; 2) RSI 1m + posición VWAP; 3) momentum 3m.
-    # RSI 3m, volumen y alineación completa de 5m quedan como contexto,
-    # no como bloqueos adicionales. Una tendencia 5m claramente opuesta
-    # sigue vetando la entrada para evitar giros contra tendencia sin respaldo.
-    elif ((d5 != "DOWN" or
-           (impulse["reliable"] and impulse["up"] >= 0.75
-            and mom3 > 0.04 and rvol >= 0.9))
-          and l3["macd_hist"] > 0
-          and rsi1 >= 52 and vwap_atr >= 0.05 and mom3 > 0.015):
-        candidate="UP"
-        quality="TEMPRANA"
-    elif ((d5 != "UP" or
-           (impulse["reliable"] and impulse["down"] >= 0.75
-            and mom3 < -0.04 and rvol >= 0.9))
-          and l3["macd_hist"] < 0
-          and rsi1 <= 48 and vwap_atr <= -0.05 and mom3 < -0.015):
-        candidate="DOWN"
-        quality="TEMPRANA"
-    # V5 EXPERIMENTAL: 3/4 accelerated entry, only when the missing
-    # early-route check is RSI/VWAP (not MACD, momentum or noise veto).
-    # Momentum and MACD must agree; a clearly opposite 5m trend vetoes.
-    # Two distinct timed readings remain mandatory in this V5 test.
-    if candidate is None and not near_noise and impulse["reliable"]:
-        for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
-            macd_ok = float(l3["macd_hist"]) * sign > 0 and d5 != opposite
-            momentum_ok = mom3 * sign > 0.015
-            rsi_vwap_ok = (rsi1 >= 52 and vwap_atr >= .05) if sign == 1 else (rsi1 <= 48 and vwap_atr <= -.05)
-            strength = impulse["up"] if sign == 1 else impulse["down"]
-            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
-            # Requires evidence stronger than the ordinary early route;
-            # never skip a missing momentum or MACD requirement.
-            if (macd_ok and momentum_ok and not rsi_vwap_ok
-                    and strength >= 0.65 and not exhausted
-                    and adx5 >= 20 and rvol >= 0.8):
-                candidate = side
-                quality = "TEMPRANA ACELERADA"
-                break
-    # V5 TEST: candidatura rápida basada en evidencias ACTUALES de 1m.
-    # Las tendencias 3m/5m son contexto, no bloqueos absolutos. El precio
-    # en vivo y la EMA de 1m deben apoyar la misma dirección; una sola
-    # subida/bajada aislada no basta. La confirmación temporal permanece.
-    if candidate is None and impulse["reliable"] and not near_noise:
-        ema_fast = float(l1["ema9"])
-        ema_slow = float(l1["ema21"])
-        macd_1m = float(l1["macd_hist"])
-        # Movimiento mínimo relativo a la volatilidad real, no dólares fijos.
-        candle_delta_atr = (price - float(one.iloc[-2]["close"])) / atr
-        for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
-            fast_ema_ok = (ema_fast - ema_slow) * sign > 0
-            live_ok = (price - ema_fast) * sign > 0
-            short_macd_ok = macd_1m * sign > 0
-            rsi_ok = (rsi1 >= 53) if sign == 1 else (rsi1 <= 47)
-            price_impulse_ok = candle_delta_atr * sign >= 0.12
-            three_min_ok = mom3 * sign >= 0.012
-            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
-            # Contra 5m pedimos corroboración adicional; NO vetamos giros.
-            against_five = d5 == opposite
-            reversal_ok = (not against_five or
-                           (three_min_ok and abs(candle_delta_atr) >= 0.28
-                            and rvol >= 0.9))
-            if (fast_ema_ok and live_ok and short_macd_ok and rsi_ok
-                    and price_impulse_ok and reversal_ok and not exhausted
-                    and (three_min_ok or abs(candle_delta_atr) >= 0.22)):
-                candidate = side
-                quality = "REACCIÓN RÁPIDA"
-                break
-    # V5 LAB: detect a possible reversal before the slower 5m trend flips.
-    # This path does not force a trade or bypass the three timed readings.
-    # Demand independent short-horizon agreement and meaningful impulse.
-    # Avoid tiny price moves near the contract target.
-    if candidate is None and impulse["reliable"] and not near_noise:
-        for side, sign in (("UP", 1), ("DOWN", -1)):
-            if d5 != ("DOWN" if side == "UP" else "UP"):
-                continue  # ordinary early paths handle non-opposing 5m trends
-            short_macd = float(l3["macd_hist"]) * sign > 0
-            short_momentum = mom3 * sign > 0.04
-            short_rsi = (rsi1 >= 54 and rsi3 >= 50) if sign == 1 else (rsi1 <= 46 and rsi3 <= 50)
-            vwap_ok = vwap_atr * sign >= 0.08
-            support = impulse["up"] if sign == 1 else impulse["down"]
-            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
-            if (short_macd and short_momentum and short_rsi and vwap_ok
-                    and support >= 0.70 and not exhausted
-                    and rvol >= 0.9 and abs(target_atr) >= 0.30):
-                candidate = side
-                quality = "GIRO TEMPRANO"
-                break
-    # LAB V5: el flujo agresor de Coinbase es APOYO, nunca orden ni veto.
-    # Se exige una muestra significativa, dirección coherente en 10s/30s,
-    # y corroboración técnica independiente. Una captura aislada no decide.
-    flow_support = {"used": False, "direction": None, "reason": "SIN APOYO FIABLE"}
-    if whale and isinstance(whale, dict):
-        flow_side = whale.get("flow_direction")
-        flow_imb = float(whale.get("flow_strength") or 0)
-        buy30 = float(whale.get("buy30") or 0)
-        sell30 = float(whale.get("sell30") or 0)
-        flow_total = buy30 + sell30
-        flow_ok = (flow_side in ("UP", "DOWN") and flow_total >= 500_000
-                   and flow_imb >= 0.20)
-        flow_support = {"used": False, "direction": flow_side if flow_ok else None,
-                        "reason": "FLUJO DISPONIBLE" if flow_ok else "MUESTRA INSUFICIENTE"}
-        if candidate is None and flow_ok and not near_noise and impulse["reliable"]:
-            sign = 1 if flow_side == "UP" else -1
-            rsi_ok = rsi1 >= 50 if sign == 1 else rsi1 <= 50
-            macd_ok = float(l1["macd_hist"]) * sign > 0
-            mom_ok = mom3 * sign >= 0.012
-            price_ok = (price - float(l1["ema9"])) * sign > 0
-            vwap_ok = vwap_atr * sign >= -0.04
-            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
-            # Contra una tendencia 5m opuesta se exige también momentum 5m.
-            against_5m = d5 == ("DOWN" if sign == 1 else "UP")
-            turn_ok = (not against_5m or
-                       (mom5 * sign >= 0.025 and abs(mom3) >= 0.025))
-            if (rsi_ok and macd_ok and mom_ok and price_ok and vwap_ok
-                    and turn_ok and not exhausted):
-                candidate = flow_side
-                quality = "FLUJO + IMPULSO"
-                flow_support = {"used": True, "direction": flow_side,
-                                "reason": "FLUJO CORROBORADO POR PRECIO Y MOMENTUM"}
-    # Contexto temporal continuo (ronda de 15 minutos).
-    # El tiempo restante interviene en CADA lectura, sin activar una regla
-    # especial a los 3 minutos ni fijar UP/DOWN para el resto de la ronda.
-    # Cuando el precio está claramente del otro lado del target y queda
-    # poco tiempo, exigir corroboración real antes de aceptar un giro contrario.
-    if candidate in ("UP", "DOWN") and distance is not None and seconds_left is not None:
-        remaining = float(np.clip(seconds_left, 0.0, 900.0))
-        progress = 1.0 - remaining / 900.0
-        time_weight = 0.12 + 0.88 * progress ** 1.6
-        direction_sign = 1 if candidate == "UP" else -1
-        opposite_target_atr = -direction_sign * target_atr
-        # Umbral continuo: al principio tolera rebotes; hacia el cierre
-        # se vuelve más exigente con una dirección contraria al target.
-        tolerance_atr = 1.8 - 1.4 * time_weight
-        if opposite_target_atr > tolerance_atr:
-            impulse_support = (impulse["up"] if candidate == "UP" else impulse["down"])
-            strong_reversal = (
-                impulse["reliable"]
-                and impulse_support >= 0.75
-                and mom3 * direction_sign > 0.04
-                and (d3 == candidate or d5 == candidate)
-                and not (impulse["exhaust_up"] if candidate == "UP" else impulse["exhaust_down"])
-            )
-            if not strong_reversal:
-                candidate = None
-                quality = "GIRO SIN RESPALDO FRENTE AL TARGET"
-    # Early entry: reject an already fading impulse, not a direction forever.
-    # Next reading can immediately reconsider either UP or DOWN.
-    if quality in ("TEMPRANA", "TEMPRANA ACELERADA", "REACCIÓN RÁPIDA") and candidate in ("UP", "DOWN") and impulse["reliable"]:
-        fading = impulse["exhaust_up"] if candidate == "UP" else impulse["exhaust_down"]
-        support = impulse["up"] if candidate == "UP" else impulse["down"]
-        if fading and support < 0.45:
-            candidate = None
-            quality = "IMPULSO EN REVISIÓN"
-    # A confirmed aligned trend may also exhaust: keep the 3-reading confirmation,
-    # but do not invent a direction from the exhaustion signal alone.
-    if near_noise and not trend_strong: candidate=None
-    if candidate:
-        confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
-        if quality not in ("TEMPRANA", "TEMPRANA ACELERADA", "GIRO TEMPRANO", "REACCIÓN RÁPIDA"):
-            quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
-    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
-    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
-    # Closing support adapts continuously; it is NOT a calibrated win probability.
-    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
-        weight = .35 + .35 * (180 - seconds_left) / 180
-        evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
-    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
-    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
+    evidence = 0.0
+    up_probability = down_probability = 50
+    momentum = "NEUTRAL"
+    candidate = None
+    quality = "OBSERVANDO RONDA ACTUAL"
+    impulse = {"up": 0.0, "down": 0.0, "exhaust_up": False,
+               "exhaust_down": False, "reliable": False}
+    flow_support = {"used": False, "direction": None, "reason": "CONTEXTO"}
     return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support}
 
 
 def build_presignal(sig, seconds_left):
-    """PRESEÑAL INDEPENDIENTE Y REACTIVA.
+    """Same current-round evidence as the official decision; no legacy vote."""
+    score = float(sig.get("final_score", 0.0))
+    side = sig.get("candidate") or "NEUTRAL"
+    return {"direction": side, "percent": int(round(50 + min(abs(score), 5) * 8)),
+            "bull": max(score, 0.0), "bear": max(-score, 0.0)}
 
-    No cambia la señal oficial. Usa la lectura ACTUAL y, a medida que se acerca
-    el cierre, reduce el peso de señales lentas (3M/5M) y aumenta el peso de la
-    posición actual frente al target. Así puede girar UP/DOWN sin quedarse
-    pegada a una tendencia vieja.
-    """
-    bull = 0.0
-    bear = 0.0
-
-    ema = sig.get("ema")
-    rsi1 = float(sig.get("rsi", 50) or 50)
-    rsi3 = float(sig.get("rsi3", 50) or 50)
-    rsi5 = float(sig.get("rsi5", 50) or 50)
-    mom3 = float(sig.get("mom3", 0) or 0)
-    mom5 = float(sig.get("mom5", 0) or 0)
-    trend3 = sig.get("trend3", "NEUTRAL")
-    trend5 = sig.get("trend5", "NEUTRAL")
-    macd3 = float(sig.get("macd3", 0) or 0)
-    macd5 = float(sig.get("macd5", 0) or 0)
-    plus_di = float(sig.get("plus_di", 0) or 0)
-    minus_di = float(sig.get("minus_di", 0) or 0)
-    vwap_atr = float(sig.get("vwap_atr", 0) or 0)
-    target_atr = float(sig.get("target_atr", 0) or 0)
-
-    secs = 900 if seconds_left is None else max(0, int(seconds_left))
-    # Los marcos lentos importan al principio; cerca del cierre mandan menos.
-    slow = 1.0 if secs > 300 else 0.70 if secs > 180 else 0.45 if secs > 90 else 0.25
-
-    if ema == "BULL": bull += 0.85
-    elif ema == "BEAR": bear += 0.85
-
-    if trend3 == "UP": bull += 1.10 * slow
-    elif trend3 == "DOWN": bear += 1.10 * slow
-    if trend5 == "UP": bull += 0.90 * slow
-    elif trend5 == "DOWN": bear += 0.90 * slow
-
-    if rsi1 >= 52: bull += 0.90
-    elif rsi1 <= 48: bear += 0.90
-    if rsi3 >= 51: bull += 0.55 * slow
-    elif rsi3 <= 49: bear += 0.55 * slow
-    if rsi5 >= 52: bull += 0.30 * slow
-    elif rsi5 <= 48: bear += 0.30 * slow
-
-    if mom3 > 0.015: bull += 1.15
-    elif mom3 < -0.015: bear += 1.15
-    elif mom3 > 0: bull += 0.30
-    elif mom3 < 0: bear += 0.30
-    if mom5 > 0.025: bull += 0.55 * slow
-    elif mom5 < -0.025: bear += 0.55 * slow
-
-    if macd3 > 0: bull += 0.70 * slow
-    elif macd3 < 0: bear += 0.70 * slow
-    if macd5 > 0: bull += 0.35 * slow
-    elif macd5 < 0: bear += 0.35 * slow
-    if plus_di > minus_di: bull += 0.50 * slow
-    elif minus_di > plus_di: bear += 0.50 * slow
-
-    if vwap_atr >= 0.03: bull += 0.70
-    elif vwap_atr <= -0.03: bear += 0.70
-
-    # El target gana importancia progresivamente. No inventa dirección:
-    # usa únicamente dónde está BTC respecto al target en este instante.
-    if secs > 300:
-        tw = 0.65
-    elif secs > 180:
-        tw = 1.40
-    elif secs > 90:
-        tw = 2.40
-    elif secs > 30:
-        tw = 3.60
-    else:
-        tw = 5.00
-
-    # Magnitud: una separación mayor en ATR da más convicción, sin bloquear
-    # cambios cuando BTC cruza el target.
-    target_strength = min(1.75, 0.55 + abs(target_atr) * 2.25)
-    if target_atr > 0:
-        bull += tw * target_strength
-    elif target_atr < 0:
-        bear += tw * target_strength
-
-    total = bull + bear
-    edge = bull - bear
-    if total < 1.5 or abs(edge) < 0.35:
-        return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear}
-
-    direction = "UP" if edge > 0 else "DOWN"
-    dominant = max(bull, bear)
-    share = dominant / total if total else 0.5
-
-    # Porcentaje propio de la preseñal. Puede llegar a 100 solo cuando la
-    # lectura actual es realmente dominante; no copia la probabilidad oficial.
-    percent = int(round(np.clip(50 + (share - 0.5) * 92 + min(abs(edge), 6.0) * 1.8, 52, 100)))
-
-    return {"direction":direction, "percent":percent, "bull":bull, "bear":bear}
 
 def entry_quality(price, seconds_left):
     if price is None:
@@ -2081,220 +1796,120 @@ def entry_quality(price, seconds_left):
 # CONTROL DE RONDA — EL CEREBRO MANDA
 # =========================================================
 
-def _retention_supported(state, signal, seconds_left):
-    """Retain only a previously confirmed side with current finite support."""
-    if not signal or seconds_left is None or seconds_left <= 0:
-        return False
-    try:
-        mom5 = float(signal["mom5"])
-        distance = float(signal["distance"])
-        if not np.isfinite(mom5) or not np.isfinite(distance):
-            return False
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return False
-    direction = state.get("active_direction")
-    if direction not in ("UP", "DOWN"):
-        return False
-    # Una condición contraria solo advierte; dos permiten retirar.
-    votes = (signal.get("ema") == ("BULL" if direction == "UP" else "BEAR"),
-             mom5 > 0 if direction == "UP" else mom5 < 0,
-             distance > 0 if direction == "UP" else distance < 0)
-    return sum(votes) >= 2
-
-
-
-def _round_opening_crosscheck(state, candidate, signal, now):
-    """Valida la PRIMERA señal con movimiento propio de la ronda.
-
-    Los indicadores EMA/MACD de 3 y 5 minutos pueden venir de la ronda
-    anterior: son contexto, no una confirmación del movimiento nuevo.
-    Tras la primera señal, no restringe cambios UP/DOWN.
-    """
-    if state.get("first_direction") in ("UP", "DOWN"):
-        return candidate
-    if not signal or signal.get("data_valid") is False:
-        return None
-    try:
-        price = float(signal["price"])
-        atr = float(signal["atr"])
-        if not (math.isfinite(price) and math.isfinite(atr) and atr > 0):
-            return None
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return None
-
-    samples = state.setdefault("opening_price_samples", [])
-    stamp = now.isoformat()
-    if not samples or samples[-1][0] != stamp:
-        samples.append([stamp, price])
-    del samples[:-12]
-    if candidate not in ("UP", "DOWN"):
-        return candidate
-    if len(samples) < 2:
-        state["opening_conflict"] = "Falta movimiento de la ronda actual"
-        return None
-
-    prices = [float(x[1]) for x in samples]
-    sign = 1 if candidate == "UP" else -1
-    minimum = max(1.0, 0.06 * atr)
-    # Un avance neto O un giro medible desde el extremo de esta ronda.
-    # No confundir un rebote de centavos con una reversión confirmada.
-    net = sign * (price - prices[0])
-    recovery = sign * (price - (min(prices) if sign == 1 else max(prices)))
-    latest = sign * (price - prices[-2])
-    impulse = signal.get("impulse_internal") or {}
-    exhausted = bool(impulse.get("exhaust_up" if sign == 1 else "exhaust_down"))
-    if exhausted or latest < -minimum or max(net, recovery) < minimum:
-        state["opening_conflict"] = "Sin impulso nuevo confirmado hacia " + candidate
-        return None
-    state["opening_conflict"] = None
-    return candidate
-
-
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """Confirmación compartida por la pantalla y el registrador de fondo.
+    """Single decision path from this round's observed prices.
 
-    La primera señal queda inmutable. Un cambio UP/DOWN posterior también
-    necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
-    la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
+    No candle alignment vote, inherited candidate, separate retention route,
+    direction lock or mandatory historical-round database lookup.
     """
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
-    # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
-    closed = seconds_left is not None and seconds_left <= 0
-    close_time = (market or {}).get("close_time")
-    if close_time:
-        end = pd.to_datetime(close_time, utc=True, errors="coerce")
-        if pd.isna(end):
-            candidate = None
-        else:
-            actual_left = (end - pd.Timestamp(now)).total_seconds()
-            seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
-            closed = seconds_left <= 0
-    if closed:
-        for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
-                    "active_direction", "active_since"):
-            state[key] = None
-        state["pending_count"] = 0
+    if state.get("brain_revision") != BRAIN_REVISION:
+        state.update(brain_revision=BRAIN_REVISION, brain_samples=[], brain_source=None,
+                     active_direction=None, active_since=None, pending_direction=None,
+                     pending_count=0, pending_since=None, pending_last_at=None)
+    def clear(reason):
+        state["active_direction"] = None
+        state["active_since"] = None
+        state["opening_conflict"] = reason
+        if signal is not None:
+            signal.update(candidate=None, quality=reason, final_score=0.0,
+                          technical_score=0.0, up_probability=50, down_probability=50,
+                          momentum="NEUTRAL", entry_route_internal=reason)
+    remaining = seconds_left
+    close = pd.to_datetime((market or {}).get("close_time"), utc=True, errors="coerce")
+    if not pd.isna(close):
+        actual = (close - pd.Timestamp(now)).total_seconds()
+        remaining = actual if remaining is None else min(float(remaining), actual)
+    if remaining is None or not math.isfinite(float(remaining)) or remaining <= 0 or remaining > 900:
+        state["brain_samples"] = []
+        clear("SIN RONDA ACTIVA")
         return
-    if signal is not None and signal.get("data_valid") is False:
-        # Una interrupción no demuestra neutralidad ni permite confirmar.
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        if seconds_left is not None and seconds_left <= 0:
-            state["active_direction"] = None
-            state["active_since"] = None
+    if not signal or signal.get("data_valid") is False:
+        state["brain_samples"] = []
+        clear("SIN DATOS ACTUALES")
         return
-    source = signal.get("price_source") if signal else None
-    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
-        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
-            # Tres lecturas deben pertenecer a una misma referencia de precio.
-            state["pending_direction"] = None
-            state["pending_count"] = 0
-            state["pending_since"] = None
-            state["pending_last_at"] = None
-        state["pending_price_source"] = source
-    if candidate not in ("UP", "DOWN"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        retain = _retention_supported(state, signal, seconds_left)
-        if not retain and signal and state.get("active_direction") in ("UP", "DOWN"):
-            side = state["active_direction"]
-            sign = 1 if side == "UP" else -1
-            dist = _plan_number(signal.get("distance"))
-            score = _plan_number(signal.get("final_score"))
-            # Retroceso breve no invalida una dirección aún ampliamente respaldada.
-            # No afecta la confirmación de un candidato opuesto.
-            retain = (dist is not None and score is not None
-                      and sign * dist >= 30 and sign * score >= 2.0)
-        if not retain:
-            state["active_direction"] = None
-            state["active_since"] = None
+    try:
+        price, atr = float(signal["price"]), float(signal["atr"])
+        if not all(math.isfinite(x) and x > 0 for x in (price, atr)):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError, OverflowError):
+        state["brain_samples"] = []
+        clear("SIN DATOS ACTUALES")
         return
-
-    if candidate == state.get("active_direction"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    source = signal.get("price_source")
+    # Candle closes cannot prove a fresh live movement.
+    if source not in ("KALSHI LIVE", "COINBASE"):
+        state["brain_samples"] = []
+        clear("ESPERANDO PRECIO EN VIVO")
         return
-
-    last = state.get("pending_last_at")
-    if isinstance(last, str):
-        try:
-            last = datetime.fromisoformat(last)
-        except ValueError:
-            last = None
-    since = state.get("pending_since")
-    if isinstance(since, str):
-        try:
-            since = datetime.fromisoformat(since)
-        except ValueError:
-            since = None
-
-    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
-                              or (now - last).total_seconds() < 0)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        last = since = None
-    if state.get("pending_direction") != candidate:
-        state["pending_direction"] = candidate
-        state["pending_count"] = 1
-        state["pending_since"] = now.isoformat()
-        state["pending_last_at"] = now.isoformat()
-        # Guardar impulso inicial para verificar si se agotó durante la confirmación.
-        state["pending_initial_mom3"] = signal.get("mom3") if signal else None
-        state["pending_initial_price"] = signal.get("price") if signal else None
+    stamp = now.timestamp()
+    samples = state.setdefault("brain_samples", [])
+    if source != state.get("brain_source") or (samples and
+            (stamp < samples[-1][0] or stamp - samples[-1][0] > BRAIN_MAX_GAP)):
+        samples = []
+    state["brain_source"] = source
+    samples = [x for x in samples if stamp - x[0] <= BRAIN_WINDOW_SECONDS]
+    if not samples or stamp - samples[-1][0] >= BRAIN_SAMPLE_INTERVAL:
+        samples.append([stamp, price])
+    state["brain_samples"] = samples
+    if len(samples) < 5 or samples[-1][0] - samples[0][0] < BRAIN_OBSERVE_SECONDS:
+        clear("OBSERVANDO RONDA ACTUAL")
         return
-
-    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] = int(state.get("pending_count", 0)) + 1
-        state["pending_last_at"] = now.isoformat()
-
-    elapsed = (now - since).total_seconds() if since else 0
-    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
-        # No basta con que sigan alcistas/bajistas los indicadores retrasados:
-        # contrastar el impulso actual con el de la primera lectura.
-        # No añade espera fija ni bloquea una futura candidatura contraria.
-        fading = False
-        if signal:
-            impulse = signal.get("impulse_internal") or {}
-            fading = bool(impulse.get("exhaust_up" if candidate == "UP" else "exhaust_down"))
-            try:
-                sign = 1 if candidate == "UP" else -1
-                initial_mom = float(state["pending_initial_mom3"])
-                current_mom = float(signal["mom3"])
-                initial_price = float(state["pending_initial_price"])
-                current_price = float(signal["price"])
-                atr = float(signal["atr"])
-                if all(np.isfinite(v) for v in (initial_mom, current_mom, initial_price, current_price, atr)) and atr > 0:
-                    fading = fading or (sign * (initial_mom - current_mom) >= 0.05
-                                        and sign * (current_price - initial_price) <= -0.15 * atr)
-            except (KeyError, TypeError, ValueError, OverflowError):
-                pass
-        if fading:
-            state["pending_direction"] = None
-            state["pending_count"] = 0
-            state["pending_since"] = None
-            state["pending_last_at"] = None
-            return
-        state["active_direction"] = candidate
+    times = np.array([x[0] for x in samples], dtype=float)
+    prices = np.array([x[1] for x in samples], dtype=float)
+    steps = np.diff(prices)
+    split = len(prices) // 2
+    earlier_speed = (prices[split] - prices[0]) / (times[split] - times[0])
+    recent_speed = (prices[-1] - prices[split]) / (times[-1] - times[split])
+    net = prices[-1] - prices[0]
+    travel = float(np.abs(steps).sum())
+    efficiency = abs(net) / max(travel, 1e-8)
+    side = "UP" if recent_speed > 0 else "DOWN" if recent_speed < 0 else None
+    sign = 1 if side == "UP" else -1
+    minimum = max(1.0, 0.06 * atr)
+    recent_move = sign * (prices[-1] - prices[split])
+    fading = sign * earlier_speed > 0 and sign * recent_speed < 0.55 * sign * earlier_speed
+    # Direction must be supported by actual movement, coherence and retained
+    # force. Slowing alone can invalidate it, before an opposite move appears.
+    supported = (side is not None and sign * net >= minimum and
+                 recent_move >= minimum * 0.5 and efficiency >= 0.55 and
+                 sign * steps[-1] >= 0 and not fading)
+    distance = signal.get("distance")
+    if distance is None or not math.isfinite(float(distance)):
+        supported = False
+    else:
+        # Continuous time/target assessment. This can reject the present
+        # evidence, never fixes a direction for later observations.
+        gap = max(0.0, -sign * float(distance))
+        needed_speed = gap / max(float(remaining), 1.0)
+        supported = supported and sign * recent_speed >= 1.25 * needed_speed
+    strength = min(5.0, abs(net) / max(atr, 1e-8) * 10 * efficiency)
+    signal["impulse_internal"] = {
+        "up": strength if side == "UP" else 0.0,
+        "down": strength if side == "DOWN" else 0.0,
+        "exhaust_up": bool(side == "UP" and fading),
+        "exhaust_down": bool(side == "DOWN" and fading),
+        "reliable": True, "efficiency": efficiency}
+    signal["round_evidence"] = {"span_seconds": float(times[-1]-times[0]),
+        "samples": len(samples), "net": float(net), "efficiency": efficiency,
+        "earlier_speed": float(earlier_speed), "recent_speed": float(recent_speed),
+        "fading": bool(fading), "supported": bool(supported)}
+    if not supported:
+        clear("FUERZA ACTUAL INSUFICIENTE" if not fading else "IMPULSO AGOTÁNDOSE")
+        return
+    score = sign * strength
+    signal.update(candidate=side, quality="FUERZA ACTUAL CONFIRMADA",
+                  entry_route_internal="FUERZA ACTUAL CONFIRMADA", final_score=score,
+                  technical_score=score, momentum="ALCISTA" if sign == 1 else "BAJISTA",
+                  up_probability=int(round(50 + score * 8)),
+                  down_probability=int(round(50 - score * 8)))
+    state["opening_conflict"] = None
+    if state.get("active_direction") != side:
+        state["active_direction"] = side
         state["active_since"] = now
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    if state.get("first_direction") is None:
+        state.update(first_direction=side, first_signal_time=now,
+                     first_signal_seconds=remaining,
+                     first_signal_price=get_yes_ask(market) if side == "UP" else get_no_ask(market))
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -2426,7 +2041,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v3"
+BACKGROUND_DATA_REVISION = "current_round_brain_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3566,34 +3181,17 @@ draw();
 
 
 def signal_requirement_view(sig, seconds_left):
-    """Read-only explanation of the existing three alternative entry paths."""
-    keys = ('rsi', 'rsi3', 'rsi5', 'adx', 'vwap_atr', 'macd3', 'vol_ratio', 'mom3', 'target_atr')
-    valid = sig.get('data_valid') is not False and all(_plan_number(sig.get(k)) is not None for k in keys)
-    valid = valid and sig.get('trend3') in ('UP', 'DOWN', 'NEUTRAL') and sig.get('trend5') in ('UP', 'DOWN', 'NEUTRAL')
-    if not valid:
-        return {'valid': False, 'sides': {}, 'noise_ok': None}
-    r1, r3, r5, adx, vw, macd, volume, mom, cushion = (float(sig[k]) for k in keys)
-    d3, d5 = sig['trend3'], sig['trend5']
-    noise_ok = not (abs(vw) < .18 and (sig.get('distance') is None or abs(cushion) < .22) and adx < 20)
+    evidence = sig.get("round_evidence") or {}
+    valid = sig.get("data_valid") is not False
     sides = {}
-    for side, sign, other in (('UP', 1, 'DOWN'), ('DOWN', -1, 'UP')):
-        up = sign == 1
-        routes = [
-            ('Tendencia alineada', [
-                ('Tendencias de 3 y 5 minutos en ' + side, d3 == side and d5 == side),
-                ('Fuerza de tendencia o RSI suficientes', adx >= 20 or (r3 >= 52 and r5 >= 50 if up else r3 <= 48 and r5 <= 50)),
-                ('Precio bien situado frente al promedio VWAP', vw > -.15 if up else vw < .15),
-            ]),
-            ('Señal temprana', [
-                ('MACD 3m a favor y tendencia 5m no contraria', macd * sign > 0 and d5 != other),
-                ('RSI de 1 minuto y VWAP a favor',
-                 (r1 >= 52 and vw >= .05) if up else (r1 <= 48 and vw <= -.05)),
-                ('Momentum de 3 minutos a favor', mom > .015 if up else mom < -.015),
-            ]),
-        ]
-        sides[side] = [{'name': name, 'checks': checks, 'met': sum(bool(ok) for _, ok in checks),
-                        'total': len(checks), 'complete': all(bool(ok) for _, ok in checks)} for name, checks in routes]
-    return {'valid': True, 'sides': sides, 'noise_ok': noise_ok}
+    for side, sign in (("UP", 1), ("DOWN", -1)):
+        checks = [("Observación de la ronda actual completada", evidence.get("span_seconds", 0) >= BRAIN_OBSERVE_SECONDS),
+                  ("Movimiento actual hacia " + side, sign * evidence.get("recent_speed", 0) > 0),
+                  ("Fuerza, coherencia y target respaldan la señal", sig.get("candidate") == side)]
+        sides[side] = [{"name": "Fuerza actual de la ronda", "checks": checks,
+                        "met": sum(bool(ok) for _, ok in checks), "total": len(checks),
+                        "complete": all(bool(ok) for _, ok in checks)}]
+    return {"valid": valid, "sides": sides, "noise_ok": evidence.get("efficiency", 0) >= .55}
 
 
 def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
@@ -4307,7 +3905,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     update_exit_plan(state, signal, seconds_left, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"limited_retention_exit_plan_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
