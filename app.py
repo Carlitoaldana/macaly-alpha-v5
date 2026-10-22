@@ -2091,8 +2091,15 @@ def _retention_supported(state, signal, seconds_left):
     except (KeyError, TypeError, ValueError, OverflowError):
         return False
     direction = state.get("active_direction")
-    return ((direction == "UP" and signal.get("ema") == "BULL" and mom5 > 0 and distance > 0)
-            or (direction == "DOWN" and signal.get("ema") == "BEAR" and mom5 < 0 and distance < 0))
+    if direction not in ("UP", "DOWN"):
+        return False
+    # Mantener señal con 2 de 3: EMA, momentum de 5 min y posición frente al target.
+    supports = (
+        signal.get("ema") == ("BULL" if direction == "UP" else "BEAR"),
+        mom5 > 0 if direction == "UP" else mom5 < 0,
+        distance > 0 if direction == "UP" else distance < 0,
+    )
+    return sum(supports) >= 2
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
@@ -2423,6 +2430,63 @@ def _background_get_live_price(market):
     _BACKGROUND_PRICE_SOURCE.value = "COINBASE"
     return price
 
+# =========================================================
+# ALPHA AI SHADOW — observational only; NEVER alters UP/DOWN
+# Stores one immutable decision-time snapshot per ticker.
+# Training labels must come from official Kalshi settlement.
+# =========================================================
+SHADOW_AI_DB = "alpha_ai_shadow.db"
+SHADOW_FEATURES = ("rsi", "rsi3", "rsi5", "mom3", "mom5", "mom15", "vol_ratio",
+                   "technical_score", "target_score", "adx", "macd3", "macd5",
+                   "atr", "vwap_atr", "target_atr", "distance_pct")
+
+def _shadow_capture(ticker, sig, state, seconds_left):
+    """Read-only capture of existing engine output; no signal writes or model inference."""
+    if not ticker or not isinstance(sig, dict) or seconds_left is None:
+        return
+    try:
+        remaining = float(seconds_left)
+        if not 0 < remaining <= 900:
+            return
+        price = float(sig.get("price"))
+        target = float(state.get("last_target"))
+        if not np.isfinite(price) or not np.isfinite(target) or target <= 0:
+            return
+        def safe_float(value):
+            try:
+                number = float(value)
+                return number if np.isfinite(number) else None
+            except (TypeError, ValueError, OverflowError):
+                return None
+        features = {name: safe_float(sig.get(name)) for name in SHADOW_FEATURES}
+        # Store the engine's original proposal so the training label evaluates
+        # the proposal, not the AI-filtered display result.
+        signal = sig.get("candidate_raw", sig.get("candidate"))
+        if signal not in ("UP", "DOWN"):
+            # Wait for the first actual proposal; otherwise a neutral first poll
+            # would permanently occupy this ticker's one-snapshot slot.
+            return
+        with sqlite3.connect(SHADOW_AI_DB, timeout=3) as conn:
+            conn.execute("""CREATE TABLE IF NOT EXISTS snapshots (
+                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
+                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
+                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
+            conn.execute("""INSERT INTO snapshots
+                (ticker, observed_at, seconds_left, btc_price, target, candidate, features_json)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    observed_at=excluded.observed_at,
+                    seconds_left=excluded.seconds_left,
+                    btc_price=excluded.btc_price,
+                    target=excluded.target,
+                    candidate=excluded.candidate,
+                    features_json=excluded.features_json
+                WHERE snapshots.candidate IS NULL AND excluded.candidate IS NOT NULL""",
+                (str(ticker), datetime.now(timezone.utc).isoformat(), remaining,
+                 price, target, signal, json.dumps(features, allow_nan=False)))
+    except (sqlite3.Error, TypeError, ValueError, OverflowError):
+        return
+
 def _background_update_state_without_coordinator(state, sig, market, seconds_left):
     now = datetime.now(timezone.utc)
     price = float(sig.get("price", 0.0))
@@ -2436,6 +2500,7 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     state["last_score"] = float(sig.get("final_score", 0.0))
     confirm_round_candidate(state, sig.get("candidate"), market, seconds_left, now, sig)
     save_round_state(state)
+    _shadow_capture(state.get("ticker"), sig, state, seconds_left)
     return state
 
 def _background_history_loop(stop_event=None):
@@ -2468,6 +2533,7 @@ def _background_history_loop(stop_event=None):
             if stop_event and stop_event.is_set():
                 break
             active_state = _background_update_state(active_state, sig, market, seconds_left)
+            _shadow_capture(ticker, sig, active_state, seconds_left)
             if seconds_left is not None and seconds_left <= 0:
                 save_round_history(active_state)
         except Exception as exc:
@@ -4006,6 +4072,170 @@ def _trace_event(kind, payload, ticker=None):
         return
 
 
+
+
+# =========================================================
+# ALPHA AI GATE — supervised, conservative signal filter
+# Learns only from official Kalshi settlements. It can BLOCK a
+# weak UP/DOWN proposal, but it never invents or reverses a signal.
+# =========================================================
+AI_GATE_MIN_ROWS = 80
+AI_GATE_MIN_HOLDOUT = 15
+AI_GATE_MIN_BRIER_GAIN = 0.02
+AI_GATE_BLOCK_BELOW = 0.45
+_AI_GATE_CACHE = {"at": 0.0, "model": None, "status": "sin datos oficiales"}
+
+def _ai_sigmoid(z):
+    z = np.clip(np.asarray(z, dtype=float), -30.0, 30.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+def _ai_feature_vector(features, candidate=None):
+    values = []
+    for name in SHADOW_FEATURES:
+        try:
+            value = float(features.get(name))
+            if not np.isfinite(value):
+                value = np.nan
+        except (TypeError, ValueError, OverflowError):
+            value = np.nan
+        values.append(value)
+    # Direction matters: the same indicator values can mean different odds
+    # for a proposed UP versus DOWN signal.
+    values.append(1.0 if candidate == "UP" else 0.0 if candidate == "DOWN" else np.nan)
+    return np.asarray(values, dtype=float)
+
+def _ai_fit_logistic(X, y, epochs=900, lr=0.035):
+    means = np.nanmean(X, axis=0)
+    means = np.where(np.isfinite(means), means, 0.0)
+    X = np.where(np.isfinite(X), X, means)
+    scales = np.std(X, axis=0)
+    scales = np.where(scales < 1e-8, 1.0, scales)
+    Z = np.clip((X - means) / scales, -8, 8)
+    Z = np.column_stack([np.ones(len(Z)), Z])
+    weights = np.zeros(Z.shape[1], dtype=float)
+    # Full-batch gradient descent with mild L2 regularization.
+    for _ in range(epochs):
+        p = _ai_sigmoid(Z @ weights)
+        grad = (Z.T @ (p - y)) / len(y)
+        grad[1:] += 0.01 * weights[1:]
+        weights -= lr * grad
+    return {"means": means, "scales": scales, "weights": weights}
+
+def _ai_predict_model(model, X):
+    X = np.asarray(X, dtype=float)
+    means, scales = model["means"], model["scales"]
+    X = np.where(np.isfinite(X), X, means)
+    Z = np.clip((X - means) / scales, -8, 8)
+    Z = np.column_stack([np.ones(len(Z)), Z])
+    return _ai_sigmoid(Z @ model["weights"])
+
+def _ai_official_training_rows():
+    """Return only snapshots whose round has an official yes/no settlement."""
+    try:
+        with sqlite3.connect(SHADOW_AI_DB, timeout=2) as shadow:
+            shadow.row_factory = sqlite3.Row
+            shadow.execute("""CREATE TABLE IF NOT EXISTS snapshots (
+                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
+                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
+                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
+            snapshots = shadow.execute(
+                "SELECT ticker, observed_at, candidate, features_json "
+                "FROM snapshots WHERE candidate IN ('UP','DOWN') ORDER BY observed_at"
+            ).fetchall()
+        if not snapshots:
+            return []
+        with _history_db() as history:
+            history.row_factory = sqlite3.Row
+            try:
+                settled = {r["ticker"]: r["official_result"] for r in history.execute(
+                    "SELECT ticker, official_result FROM round_history "
+                    "WHERE verification_status='official' AND lower(official_result) IN ('yes','no')"
+                ).fetchall()}
+            except sqlite3.Error:
+                return []
+        rows = []
+        for row in snapshots:
+            outcome = settled.get(row["ticker"])
+            if outcome not in ("yes", "no"):
+                continue
+            candidate = row["candidate"]
+            won = (candidate == "UP" and outcome == "yes") or (candidate == "DOWN" and outcome == "no")
+            try:
+                features = json.loads(row["features_json"])
+            except (TypeError, ValueError):
+                continue
+            rows.append((_ai_feature_vector(features, candidate), 1.0 if won else 0.0, row["observed_at"]))
+        return rows
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return []
+
+def _ai_gate_model(force=False):
+    now = time.monotonic()
+    if not force and now - _AI_GATE_CACHE["at"] < 60:
+        return _AI_GATE_CACHE["model"], _AI_GATE_CACHE["status"]
+    _AI_GATE_CACHE["at"] = now
+    _AI_GATE_CACHE["model"] = None
+    rows = _ai_official_training_rows()
+    if len(rows) < AI_GATE_MIN_ROWS:
+        status = f"IA en aprendizaje: {len(rows)}/{AI_GATE_MIN_ROWS} rondas con resultado oficial"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+    X = np.vstack([r[0] for r in rows])
+    y = np.asarray([r[1] for r in rows], dtype=float)
+    split = max(int(len(rows) * 0.8), len(rows) - AI_GATE_MIN_HOLDOUT)
+    split = min(split, len(rows) - AI_GATE_MIN_HOLDOUT)
+    if split < 30 or len(np.unique(y[:split])) < 2 or len(np.unique(y[split:])) < 2:
+        status = "IA sin filtro: faltan resultados variados para validar"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+    try:
+        validation_model = _ai_fit_logistic(X[:split], y[:split])
+        predictions = _ai_predict_model(validation_model, X[split:])
+        baseline = float(np.mean(y[:split]))
+        model_brier = float(np.mean((predictions - y[split:]) ** 2))
+        baseline_brier = float(np.mean((baseline - y[split:]) ** 2))
+        gain = baseline_brier - model_brier
+        if gain < AI_GATE_MIN_BRIER_GAIN:
+            status = f"IA en evaluación: no mejora el modelo base (ganancia Brier {gain:.3f}); no bloquea señales"
+            _AI_GATE_CACHE.update(model=None, status=status)
+            return None, status
+        model = _ai_fit_logistic(X, y)
+        status = f"Filtro IA validado en historial: {len(rows)} rondas oficiales; mejora Brier {gain:.3f}"
+        _AI_GATE_CACHE.update(model=model, status=status)
+        return model, status
+    except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
+        status = f"IA sin filtro por validación: {type(exc).__name__}"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+
+def _apply_ai_signal_gate(sig):
+    """Only block a proposed signal when a validated model estimates weak odds."""
+    if not isinstance(sig, dict):
+        return sig
+    candidate = sig.get("candidate")
+    sig["candidate_raw"] = candidate
+    sig["ai_gate_active"] = False
+    sig["ai_win_probability"] = None
+    model, status = _ai_gate_model()
+    sig["ai_gate_status"] = status
+    if candidate not in ("UP", "DOWN") or model is None:
+        return sig
+    features = {name: sig.get(name) for name in SHADOW_FEATURES}
+    vector = _ai_feature_vector(features, candidate).reshape(1, -1)
+    try:
+        p_win = float(_ai_predict_model(model, vector)[0])
+    except (ValueError, TypeError, FloatingPointError):
+        return sig
+    sig["ai_win_probability"] = round(p_win * 100, 1)
+    if p_win < AI_GATE_BLOCK_BELOW:
+        sig["candidate"] = None
+        sig["quality"] = "NO TRADE · FILTRO IA"
+        sig["ai_gate_active"] = True
+        sig["ai_gate_reason"] = f"Probabilidad estimada de acierto {p_win:.1%}, bajo el umbral {AI_GATE_BLOCK_BELOW:.0%}"
+    else:
+        sig["ai_gate_active"] = True
+        sig["ai_gate_reason"] = f"Señal permitida; probabilidad estimada de acierto {p_win:.1%}"
+    return sig
 
 
 def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
