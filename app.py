@@ -1801,11 +1801,17 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
     # RSI 3m, volumen y alineación completa de 5m quedan como contexto,
     # no como bloqueos adicionales. Una tendencia 5m claramente opuesta
     # sigue vetando la entrada para evitar giros contra tendencia sin respaldo.
-    elif (d5 != "DOWN" and l3["macd_hist"] > 0
+    elif ((d5 != "DOWN" or
+           (impulse["reliable"] and impulse["up"] >= 0.75
+            and mom3 > 0.04 and rvol >= 0.9))
+          and l3["macd_hist"] > 0
           and rsi1 >= 52 and vwap_atr >= 0.05 and mom3 > 0.015):
         candidate="UP"
         quality="TEMPRANA"
-    elif (d5 != "UP" and l3["macd_hist"] < 0
+    elif ((d5 != "UP" or
+           (impulse["reliable"] and impulse["down"] >= 0.75
+            and mom3 < -0.04 and rvol >= 0.9))
+          and l3["macd_hist"] < 0
           and rsi1 <= 48 and vwap_atr <= -0.05 and mom3 < -0.015):
         candidate="DOWN"
         quality="TEMPRANA"
