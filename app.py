@@ -1739,7 +1739,7 @@ def estimated_probabilities(
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-BRAIN_REVISION = "current_round_v5_range_context"
+BRAIN_REVISION = "current_round_v6_target_continuity"
 BRAIN_OBSERVE_SECONDS = 12.0
 BRAIN_SAMPLE_INTERVAL = 2.0
 BRAIN_MAX_GAP = 10.0
@@ -1835,6 +1835,53 @@ def entry_quality(price, seconds_left):
 # =========================================================
 # CONTROL DE RONDA — EL CEREBRO MANDA
 # =========================================================
+
+def _directional_backing(context_samples, short_samples, atr, distance, remaining):
+    """Conservative directional evidence, not a calibrated closing probability.
+
+    A short price move cannot be extrapolated over the whole contract lifetime.
+    Both horizons must agree and the target must be reachable with a noise margin.
+    """
+    result = {"proposal": None, "ready": False, "ranging": False,
+              "context_slope": 0.0, "short_slope": 0.0, "target_margin": 0.0}
+    if len(context_samples) < 6 or len(short_samples) < 5:
+        return result
+    span = context_samples[-1][0] - context_samples[0][0]
+    if span < 30:
+        return result
+    def measure(samples):
+        ts = np.array([x[0]-samples[0][0] for x in samples], dtype=float)
+        ps = np.array([x[1] for x in samples], dtype=float)
+        slope, intercept = np.polyfit(ts, ps-ps[0], 1)
+        residual = ps-ps[0]-(slope*ts+intercept)
+        noise = float(np.sqrt(np.mean(residual**2)))
+        travel = float(np.abs(np.diff(ps)).sum())
+        return float(slope), noise, abs(float(ps[-1]-ps[0]))/max(travel, 1e-8), travel, float(np.ptp(ps))
+    broad, noise, efficiency, travel, width = measure(context_samples)
+    fast, _, short_efficiency, _, _ = measure(short_samples)
+    minimum = max(1.0, .06*atr)
+    margin = max(minimum, .15*atr, 2*noise)
+    ranging = bool(travel >= 1.8*max(width, minimum) and efficiency < .4)
+    result.update(ready=True, ranging=ranging, context_slope=broad,
+                  short_slope=fast, target_margin=margin, context_efficiency=efficiency,
+                  context_span=span)
+    if distance is None or not math.isfinite(float(distance)):
+        return result
+    side = "UP" if broad > 0 else "DOWN" if broad < 0 else None
+    sign = 1 if side == "UP" else -1
+    # Discount speed; use at most 45 s of forward evidence even early in a round.
+    speed = max(0.0, min(sign*broad, sign*fast)) * .5
+    horizon = min(45.0, max(0.0, float(remaining)))
+    projected = float(distance) + sign*speed*horizon
+    target_ok = sign*projected > margin
+    continuous = (side is not None and sign*fast > 0 and efficiency >= .55
+                  and short_efficiency >= .55 and sign*broad*span >= 2*minimum)
+    result.update(projected_distance=projected, target_ok=target_ok,
+                  continuous=continuous)
+    if continuous and target_ok and not ranging:
+        result["proposal"] = side
+    return result
+
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
     """Single decision path from this round's observed prices.
@@ -1977,15 +2024,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     supported = (side is not None and sign * net >= minimum and
                  recent_move >= minimum * 0.5 and efficiency >= 0.55 and
                  sign * steps[-1] >= 0 and not fading)
-    distance = signal.get("distance")
-    if distance is None or not math.isfinite(float(distance)):
-        supported = False
-    else:
-        # Continuous time/target assessment. This can reject the present
-        # evidence, never fixes a direction for later observations.
-        gap = max(0.0, -sign * float(distance))
-        needed_speed = gap / max(float(remaining), 1.0)
-        supported = supported and sign * recent_speed >= 1.25 * needed_speed
+    distance = _plan_number(signal.get("distance"))
+    backing = _directional_backing(context_samples, samples, atr, distance, remaining)
+    supported = bool(supported and backing["proposal"] == side)
     strength = min(5.0, abs(net) / max(atr, 1e-8) * 10 * efficiency)
     signal["impulse_internal"] = {
         "up": strength if side == "UP" else 0.0,
@@ -1997,28 +2038,12 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         "samples": len(samples), "net": float(net), "efficiency": efficiency,
         "earlier_speed": float(earlier_speed), "recent_speed": float(recent_speed),
         "fading": bool(fading), "supported": bool(supported)}
-    context_prices = np.array([x[1] for x in context_samples], dtype=float)
-    context_travel = float(np.abs(np.diff(context_prices)).sum())
-    context_net = float(context_prices[-1]-context_prices[0])
-    context_range = float(context_prices.max()-context_prices.min())
-    context_efficiency = abs(context_net)/max(context_travel, 1e-8)
-    # A full return within a bounded range gives travel without directional progress.
-    # A breakout may provide new evidence in EITHER direction, without a hold timer.
-    prior_prices = [x[1] for x in context_samples if stamp-x[0] >= BRAIN_WINDOW_SECONDS]
-    breakout = bool(prior_prices and side is not None and
-                    (price > max(prior_prices)+minimum if side == "UP"
-                     else price < min(prior_prices)-minimum))
-    ranging = bool(context_range >= minimum and context_travel >= 1.8*context_range
-                   and context_efficiency < .35 and not (breakout and supported))
+    ranging = backing["ranging"]
     state["brain_market_regime"] = "RANGE" if ranging else "EVALUATING"
-    signal["round_evidence"].update(context_seconds=float(context_samples[-1][0]-context_samples[0][0]),
-        context_net=context_net, context_travel=context_travel,
-        context_efficiency=context_efficiency, context_range=context_range,
-        ranging=ranging, breakout=breakout)
-    if ranging:
-        signal["round_evidence"]["supported"] = False
-        clear("MERCADO LATERAL • ANALIZANDO FUERZA DOMINANTE")
-        return
+    signal["round_evidence"].update(backing)
+    signal["round_evidence"]["supported"] = supported
+    # Range evidence withdraws only near an uncertain target, after repeated
+    # observations. A pause with a meaningful target cushion retains its side.
     active = state.get("active_direction")
     retained = False
     proposal = side if supported else None
@@ -2053,7 +2078,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                    active_sign * (prices[-1] - prices[split]) <= -minimum * .5 and efficiency >= .55)
         # A pause is a warning, including before the target is reached.
         # Invalidation requires actual coherent adverse movement and lost target support.
-        invalid = cushion is not None and cushion <= -minimum and adverse
+        invalid = (cushion is not None and
+                   ((cushion <= -minimum and adverse) or
+                    (ranging and cushion <= backing["target_margin"])))
         if invalid:
             if stamp - state.get("brain_invalid_at", 0) >= BRAIN_SAMPLE_INTERVAL:
                 state["brain_invalid_count"] = state.get("brain_invalid_count", 0) + 1
@@ -2061,14 +2088,17 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         else:
             state["brain_invalid_count"] = 0
         if state["brain_invalid_count"] >= 3:
-            clear("RESPALDO INVALIDADO POR MOVIMIENTO CONTRARIO")
+            clear("MERCADO LATERAL • ANALIZANDO FUERZA DOMINANTE" if ranging else
+                  "RESPALDO INVALIDADO POR MOVIMIENTO CONTRARIO")
             return
         retained = True
         side, sign = active, active_sign
         strength = min(3.0, max(.25, max(0.0, cushion or 0.0) / atr))
         state["brain_warning"] = active + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
     else:
-        publish_active("CONFIRMANDO FUERZA ACTUAL" if proposal else "FUERZA ACTUAL INSUFICIENTE")
+        publish_active("CONFIRMANDO FUERZA ACTUAL" if proposal else
+                       "MERCADO LATERAL • ANALIZANDO FUERZA DOMINANTE" if ranging else
+                       "ANALIZANDO CONTINUIDAD Y TARGET")
         return
     quality = "RESPALDO VIGENTE • PERDIENDO FUERZA" if retained else "FUERZA ACTUAL CONFIRMADA"
     score = sign * strength
@@ -2223,7 +2253,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "current_round_brain_v5"
+BACKGROUND_DATA_REVISION = "current_round_brain_v6"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2561,7 +2591,7 @@ def closing_reader(sig, round_signal, seconds_left, micro):
             "bg":"linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))",
         }
 
-    if state and state.get("brain_market_regime") == "RANGE" and not state.get("brain_suspended"):
+    if state and state.get("brain_market_regime") == "RANGE" and not state.get("brain_suspended") and active_direction is None:
         return {"percent":50, "headline":"MERCADO LATERAL • ANALIZANDO",
                 "note":"Sin fuerza dominante confirmada. La preseñal sigue evaluando la presión inmediata.",
                 "micro":"SIN VENTAJA DIRECCIONAL", "color":"#38bdf8",
@@ -2589,6 +2619,13 @@ def closing_reader(sig, round_signal, seconds_left, micro):
             "border": "rgba(56,189,248,.45)",
             "bg": "linear-gradient(135deg,rgba(11,64,91,.30),rgba(9,23,34,.72))",
         }
+
+    if not micro.get("ready"):
+        return {"percent":50, "headline":"MICROLECTURA INCOMPLETA",
+                "note":"La señal principal usa su propia evaluación. Este lector aún no dispone de movimiento suficiente para valorar el cierre.",
+                "micro":"REUNIENDO DATOS", "color":"#38bdf8",
+                "border":"rgba(56,189,248,.45)",
+                "bg":"linear-gradient(135deg,rgba(11,64,91,.30),rgba(9,23,34,.72))"}
 
     distance = sig.get("distance")
     close_direction = active_direction
@@ -3373,9 +3410,9 @@ def signal_requirement_view(sig, seconds_left):
     valid = sig.get("data_valid") is not False
     sides = {}
     for side, sign in (("UP", 1), ("DOWN", -1)):
-        checks = [("Observación de la ronda actual completada", evidence.get("span_seconds", 0) >= BRAIN_OBSERVE_SECONDS),
+        checks = [("Continuidad de la ronda actual evaluada", evidence.get("ready", False)),
                   ("Movimiento actual hacia " + side, sign * evidence.get("recent_speed", 0) > 0),
-                  ("Fuerza, coherencia y target respaldan la señal", sig.get("candidate") == side)]
+                  ("Continuidad y proyección al target respaldan " + side, evidence.get("proposal") == side and evidence.get("supported", False))]
         sides[side] = [{"name": "Fuerza actual de la ronda", "checks": checks,
                         "met": sum(bool(ok) for _, ok in checks), "total": len(checks),
                         "complete": all(bool(ok) for _, ok in checks)}]
@@ -4098,7 +4135,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     update_exit_plan(state, signal, seconds_left, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v3", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v6", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
