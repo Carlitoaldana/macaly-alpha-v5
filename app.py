@@ -3359,7 +3359,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 <script>
 let D=__PAYLOAD__; const $=id=>document.getElementById(id), fmt=(v,n=2)=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:n,maximumFractionDigits:n}), usd=v=>v==null?'—':'$'+fmt(v), compact=v=>v==null?'—':v>=1e6?'$'+(v/1e6).toFixed(2)+'M':v>=1000?'$'+(v/1000).toFixed(0)+'K':'$'+fmt(v,0);
 let saved={};try{saved=JSON.parse(localStorage.getItem('btc-neon-panel-v1')||'{}')}catch(e){}
-let toggles=Object.assign({ema9:true,ema21:true,vwap:true,volume:true,rsi:true,patterns:true},saved.toggles),visible=saved.visible||48,offset=saved.offset||0,pricePan=Number.isFinite(saved.pricePan)?saved.pricePan:0;
+let toggles=Object.assign({ema9:true,ema21:true,vwap:true,volume:true,rsi:true,patterns:true},saved.toggles),visible=saved.visible||32,offset=saved.offset||0,pricePan=Number.isFinite(saved.pricePan)?saved.pricePan:0;
 function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
 for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
 function refreshLabels(){
@@ -3382,13 +3382,13 @@ document.querySelectorAll('.toggle').forEach(x=>x.removeAttribute('data-unused')
 for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
 const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(0,Math.min(offset,Math.max(0,n-visible)));const end=n-Math.round(offset),start=Math.max(0,end-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$('canvas').innerHTML='<div class="empty">Esperando velas actuales…</div>';return}
 const last=all[n-1];$('legend').innerHTML=['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join('');
-const W=720,H=toggles.rsi?780:615,L=10,R=126,T=28,B=580,plot=W-L-R,step=plot/rows.length,body=Math.max(2,Math.min(11,step*.65));
+const W=720,H=toggles.rsi?780:615,L=10,R=126,T=28,B=580,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
 let vals=rows.flatMap(r=>[r.low,r.high]);for(const k of ['ema9','ema21','vwap'])if(toggles[k])vals.push(...rows.map(r=>r[k]).filter(v=>v!=null));for(const v of [D.target,D.support,D.resistance,D.price])if(v!=null)vals.push(v);let lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,5);lo-=pad;hi+=pad;lo+=pricePan;hi+=pricePan;const y=v=>T+(hi-v)/(hi-lo)*(B-T),x=i=>L+(i+.5)*step;
 let s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Gráfica BTC con velas, indicadores y RSI"><defs><clipPath id="plot"><rect x="0" y="0" width="'+(W-R)+'" height="'+B+'"/></clipPath></defs>';
 for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="14">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
 for(let k=0;k<=4;k++){const xx=L+plot*k/4;s+='<line x1="'+xx+'" y1="'+T+'" x2="'+xx+'" y2="'+(toggles.rsi?H-30:B)+'" stroke="#191c34"/>'}
 s+='<g clip-path="url(#plot)">';if(toggles.volume){const max=Math.max(...rows.map(r=>r.volume),1);rows.forEach((r,i)=>{let h=r.volume/max*105;s+='<rect x="'+(x(i)-body/2)+'" y="'+(B-h)+'" width="'+body+'" height="'+h+'" fill="'+(r.close>=r.open?'#00dfb5':'#e64b4b')+'" opacity=".9"/>'})}
-rows.forEach((r,i)=>{const c=r.close>=r.open?'#00dfb5':'#e64b4b';s+='<line x1="'+x(i)+'" x2="'+x(i)+'" y1="'+y(r.high)+'" y2="'+y(r.low)+'" stroke="'+c+'" stroke-width="1.7"/><rect x="'+(x(i)-body/2)+'" y="'+Math.min(y(r.open),y(r.close))+'" width="'+body+'" height="'+Math.max(1.8,Math.abs(y(r.open)-y(r.close)))+'" fill="'+c+'"/>'});
+rows.forEach((r,i)=>{const c=r.close>=r.open?'#00dfb5':'#e64b4b';s+='<line x1="'+x(i)+'" x2="'+x(i)+'" y1="'+y(r.high)+'" y2="'+y(r.low)+'" stroke="'+c+'" stroke-width="2.1"/><rect x="'+(x(i)-body/2)+'" y="'+Math.min(y(r.open),y(r.close))+'" width="'+body+'" height="'+Math.max(1.8,Math.abs(y(r.open)-y(r.close)))+'" fill="'+c+'"/>'});
 for(const k of ['ema9','ema21','vwap'])if(toggles[k]){let points=rows.map((r,i)=>r[k]==null?'':x(i)+','+y(r[k])).filter(Boolean).join(' ');s+='<polyline points="'+points+'" fill="none" stroke="'+colors[k]+'" stroke-width="3" '+(k==='vwap'?'stroke-dasharray="8 6"':'')+'/>'}
 if(toggles.patterns){const piv=D.pivots.filter(p=>p.i>=start&&p.i<end);s+='<polyline points="'+piv.map(p=>x(p.i-start)+','+y(p.v)).join(' ')+'" fill="none" stroke="#bc75ff" stroke-width="3"/>';piv.forEach(p=>{const letter='ABCD'[D.pivots.indexOf(p)];s+='<circle cx="'+x(p.i-start)+'" cy="'+y(p.v)+'" r="5" fill="#bb76ff"/><text x="'+x(p.i-start)+'" y="'+(y(p.v)+(p.kind==='H'?-14:24))+'" fill="#c487ff" font-size="18" text-anchor="middle">'+letter+'</text>'})}
 s+='</g>';let levels=[[D.resistance,'RESISTANCE','#e64b4b'],[D.target,'TARGET','#00dfb5'],[D.price,'BTC','#00dfb5'],[D.support,'SUPPORT','#00dfb5']].filter(r=>r[0]!=null).map(r=>({v:r[0],label:r[1],c:r[2],yy:y(r[0]),labelY:y(r[0])})).filter(l=>l.yy>=T&&l.yy<=B).sort((a,b)=>a.yy-b.yy);
@@ -3398,7 +3398,7 @@ if(toggles.rsi){const rt=620,rh=120,ry=v=>rt+(100-v)/100*rh;s+='<text x="14" y="
 for(let k=0;k<4;k++){const i=Math.round((rows.length-1)*k/3),tm=new Date(rows[i].t*1000).toLocaleString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',...(D.timeframe==='1D'?{month:'short',day:'numeric'}:{})});s+='<text x="'+x(i)+'" y="'+(H-7)+'" fill="#95a1bc" font-size="11" text-anchor="middle">'+tm+'</text>'}
 s+='<g id="crosshair"></g></svg>';$('canvas').innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end};
 }
-$('zoomin').onclick=()=>{visible=Math.max(12,Math.round(visible*.75));persist();draw()};$('zoomout').onclick=()=>{visible=Math.round(visible*1.3);persist();draw()};$('older').onclick=()=>{offset+=Math.max(5,Math.floor(visible/4));persist();draw()};$('newer').onclick=()=>{offset-=Math.max(5,Math.floor(visible/4));persist();draw()};$('reset').onclick=()=>{offset=0;visible=48;pricePan=0;draw();persist()};
+$('zoomin').onclick=()=>{visible=Math.max(12,Math.round(visible*.75));persist();draw()};$('zoomout').onclick=()=>{visible=Math.round(visible*1.3);persist();draw()};$('older').onclick=()=>{offset+=Math.max(5,Math.floor(visible/4));persist();draw()};$('newer').onclick=()=>{offset-=Math.max(5,Math.floor(visible/4));persist();draw()};$('reset').onclick=()=>{offset=0;visible=32;pricePan=0;draw();persist()};
 const touchPoints=new Map();let gesture=null;
 function chartPoint(e){const r=$('canvas').getBoundingClientRect();return {x:(e.clientX-r.left)/r.width*geometry.W,y:(e.clientY-r.top)/r.height*geometry.H}}
 function beginGesture(){
@@ -3444,9 +3444,35 @@ function inspectCandle(px){if(!geometry)return;const g=geometry,i=Math.max(0,Mat
 window.addEventListener('message', function(event){
   if (!event.data || event.data.kind !== 'alpha-chart-update') return;
   // Only the chart data changes: preserve iframe, zoom, gesture handlers and cards.
-  D = event.data.payload;
-  refreshLabels();
-  draw();
+  // La lógica y el precio recibido siguen intactos: solo interpolamos la
+  // posición VISUAL de la última vela entre dos cotizaciones reales.
+  const next = event.data.payload;
+  if (!next || !Array.isArray(next.rows)) return;
+  const old = D;
+  const sameCandle = old && old.timeframe === next.timeframe &&
+    old.rows && old.rows.length && next.rows.length &&
+    old.rows[old.rows.length-1].t === next.rows[next.rows.length-1].t;
+  if (window.__alphaVisualFrame) cancelAnimationFrame(window.__alphaVisualFrame);
+  D = next;
+  refreshLabels(); // Etiquetas: siempre el dato REAL, nunca interpolado.
+  if (!sameCandle || offset > 0 || touchPoints.size > 0 || document.hidden) { draw(); return; }
+  const previous = old.rows[old.rows.length-1], current = next.rows[next.rows.length-1];
+  const keys = ['open','high','low','close','ema9','ema21','vwap','rsi'];
+  const start = performance.now(), duration = 580;
+  function frame(now) {
+    const u = Math.min(1,(now-start)/duration), f = u*u*(3-2*u);
+    if (u >= 1) { D = next; draw(); window.__alphaVisualFrame = null; return; }
+    const row = {...current};
+    for (const k of keys) {
+      if (Number.isFinite(previous[k]) && Number.isFinite(current[k]))
+        row[k] = previous[k] + (current[k]-previous[k])*f;
+    }
+    // El histórico es el real. Solo la vela abierta se anima.
+    D = {...next, rows: next.rows.slice(0,-1).concat(row)};
+    draw();
+    window.__alphaVisualFrame = requestAnimationFrame(frame);
+  }
+  window.__alphaVisualFrame = requestAnimationFrame(frame);
 });
 draw();
 </script></html>'''
