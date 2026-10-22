@@ -3526,6 +3526,11 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
 
 @st.fragment(run_every="2s")
 def live_dashboard():
+    # Diagnóstico TEMPORAL, solo observación. No altera el motor.
+    _diag_t0 = time.perf_counter()
+    _diag_times = {}
+    def _diag_mark(name):
+        _diag_times[name] = round((time.perf_counter() - _diag_t0) * 1000, 1)
     btc_error = ""
     live_price_error = ""
     kalshi_error = ""
@@ -3539,6 +3544,7 @@ def live_dashboard():
         btc_error = str(error)
         btc_df = None
 
+    _diag_mark("velas_e_indicadores")
     try:
         market = get_kalshi_btc_market()
         kalshi_ok = market is not None
@@ -3547,6 +3553,7 @@ def live_dashboard():
         kalshi_error = str(error)
         market = None
 
+    _diag_mark("mercado_kalshi")
     try:
         coinbase_live_price = get_btc_live_price()
         coinbase_live_ok = True
@@ -3557,6 +3564,7 @@ def live_dashboard():
             float(btc_df.iloc[-1]["close"]) if btc_ok else None
         )
 
+    _diag_mark("precio_coinbase")
     kalshi_live_price = None
     kalshi_live_ok = False
 
@@ -3567,6 +3575,7 @@ def live_dashboard():
         except Exception as error:
             kalshi_live_error = str(error)
 
+    _diag_mark("precio_kalshi")
     if kalshi_live_price is not None:
         live_btc_price = kalshi_live_price
         source = "KALSHI LIVE"
@@ -3615,9 +3624,17 @@ def live_dashboard():
             "down_probability": 50,
         }
 
+    _diag_mark("motor_indicadores")
+    _diag_candidate = sig.get("candidate")
+    _diag_active_before = None
+    try:
+        _diag_active_before = st.session_state.rounds.get(ticker, {}).get("active_direction")
+    except Exception:
+        pass
     round_signal = process_round_signal(
         ticker, sig, market, seconds_left
     )
+    _diag_mark("confirmacion_y_estado")
 
     # Cinta live de segundos para el Lector de Cierre.
     update_micro_tape(ticker, live_btc_price, source)
@@ -3953,6 +3970,49 @@ def live_dashboard():
         )
     if kalshi_error:
         st.error("Error Kalshi: " + kalshi_error)
+
+    # PANEL TEMPORAL DE LABORATORIO: eliminar al terminar las pruebas.
+    # Muestra duración de cada etapa y no modifica señales ni filtros.
+    _diag_mark("ciclo_completo_incluida_pantalla")
+    _diag_stages = [
+        ("Velas + indicadores", _diag_times.get("velas_e_indicadores", 0)),
+        ("Consulta mercado Kalshi", _diag_times.get("mercado_kalshi", 0)),
+        ("Precio Coinbase", _diag_times.get("precio_coinbase", 0)),
+        ("Precio Kalshi", _diag_times.get("precio_kalshi", 0)),
+        ("Motor de señal", _diag_times.get("motor_indicadores", 0)),
+        ("Confirmación y estado", _diag_times.get("confirmacion_y_estado", 0)),
+        ("Pantalla restante", _diag_times.get("ciclo_completo_incluida_pantalla", 0)),
+    ]
+    _diag_prev = 0.0
+    _diag_rows = []
+    for _diag_label, _diag_elapsed in _diag_stages:
+        _diag_rows.append({"Etapa": _diag_label,
+                           "Duración ms": round(_diag_elapsed - _diag_prev, 1)})
+        _diag_prev = _diag_elapsed
+    _diag_candle_age = None
+    if btc_df is not None:
+        try:
+            _diag_candle_age = round(float(btc_df.attrs.get("candle_age_seconds")), 1)
+        except (ValueError, TypeError):
+            pass
+    _diag_state = round_signal.get("round_state") or {}
+    _diag_pending = _diag_state.get("pending_direction")
+    _diag_count = _diag_state.get("pending_count", 0)
+    _diag_wait = None
+    _diag_since = _diag_state.get("pending_since")
+    if _diag_since:
+        try:
+            _diag_wait = round(max(0.0, (datetime.now(timezone.utc) -
+                          pd.Timestamp(_diag_since).to_pydatetime()).total_seconds()), 2)
+        except (ValueError, TypeError):
+            pass
+    with st.expander("🔬 DIAGNÓSTICO TEMPORAL DEL CEREBRO · LABORATORIO", expanded=True):
+        st.caption("Solo medición. El refresco está programado cada 2 s; una consulta lenta puede alargarlo. La edad de vela no equivale a latencia del precio live.")
+        st.dataframe(pd.DataFrame(_diag_rows), hide_index=True, use_container_width=True)
+        st.write("**Datos:**", f"Precio: {source} · Vela: {_diag_candle_age if _diag_candle_age is not None else 'sin edad'} s")
+        st.write("**Decisión:**", f"Candidato: {_diag_candidate or 'NINGUNO'} · Antes: {_diag_active_before or 'NINGUNA'} · Activa: {_diag_state.get('active_direction') or 'NINGUNA'}")
+        st.write("**Confirmación:**", f"Pendiente: {_diag_pending or 'NINGUNA'} · Lecturas: {_diag_count}/{SIGNAL_CONFIRM_READINGS} · Espera acumulada: {_diag_wait if _diag_wait is not None else '—'} s")
+        st.caption("Haz una captura de esta tabla en varios ciclos. No se envía ningún dato automáticamente.")
 
 
 import zlib
