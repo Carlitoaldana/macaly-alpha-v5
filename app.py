@@ -1877,6 +1877,32 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None):
                 candidate = side
                 quality = "GIRO TEMPRANO"
                 break
+    # Contexto temporal continuo (ronda de 15 minutos).
+    # El tiempo restante interviene en CADA lectura, sin activar una regla
+    # especial a los 3 minutos ni fijar UP/DOWN para el resto de la ronda.
+    # Cuando el precio está claramente del otro lado del target y queda
+    # poco tiempo, exigir corroboración real antes de aceptar un giro contrario.
+    if candidate in ("UP", "DOWN") and distance is not None and seconds_left is not None:
+        remaining = float(np.clip(seconds_left, 0.0, 900.0))
+        progress = 1.0 - remaining / 900.0
+        time_weight = 0.12 + 0.88 * progress ** 1.6
+        direction_sign = 1 if candidate == "UP" else -1
+        opposite_target_atr = -direction_sign * target_atr
+        # Umbral continuo: al principio tolera rebotes; hacia el cierre
+        # se vuelve más exigente con una dirección contraria al target.
+        tolerance_atr = 1.8 - 1.4 * time_weight
+        if opposite_target_atr > tolerance_atr:
+            impulse_support = (impulse["up"] if candidate == "UP" else impulse["down"])
+            strong_reversal = (
+                impulse["reliable"]
+                and impulse_support >= 0.75
+                and mom3 * direction_sign > 0.04
+                and (d3 == candidate or d5 == candidate)
+                and not (impulse["exhaust_up"] if candidate == "UP" else impulse["exhaust_down"])
+            )
+            if not strong_reversal:
+                candidate = None
+                quality = "GIRO SIN RESPALDO FRENTE AL TARGET"
     # Early entry: reject an already fading impulse, not a direction forever.
     # Next reading can immediately reconsider either UP or DOWN.
     if quality in ("TEMPRANA", "TEMPRANA ACELERADA", "REACCIÓN RÁPIDA") and candidate in ("UP", "DOWN") and impulse["reliable"]:
