@@ -3461,7 +3461,19 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
     if not pd.isna(end):
         closed = closed or end <= pd.Timestamp(now)
     ready = view['valid'] and bool(state) and not closed and not pd.isna(end)
-    side = sig.get('candidate') or state.get('active_direction') or state.get('first_direction')
+    side = sig.get('candidate')
+    if side not in ('UP', 'DOWN'):
+        # La dirección histórica no decide qué requisitos se inspeccionan.
+        # Sin candidatura válida, mostrar el lado de mayor evidencia ACTUAL,
+        # sin convertirlo en señal oficial.
+        current_score = sig.get('final_score')
+        if current_score is not None:
+            try:
+                value = float(current_score)
+                if np.isfinite(value) and value != 0:
+                    side = 'UP' if value > 0 else 'DOWN'
+            except (TypeError, ValueError):
+                pass
     if side not in ('UP', 'DOWN') and view['valid']:
         side = max(('UP', 'DOWN'), key=lambda d: max(r['met']/r['total'] for r in view['sides'][d]))
     checks = []
@@ -4127,7 +4139,6 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None):
     _TRACE_CONTEXT.build_id = None
     _TRACE_CONTEXT.build_payload = None
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
-    sig = _apply_ai_signal_gate(sig)
     sig["price_source"] = price_source
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
