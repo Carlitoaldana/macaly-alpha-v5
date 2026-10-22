@@ -2100,6 +2100,56 @@ def _retention_supported(state, signal, seconds_left):
     return sum(votes) >= 2
 
 
+def _exit_watch_update(state, sig, market, now):
+    """Aviso independiente de la señal: cotización Kalshi + desaceleración BTC.
+    No opera ni cambia UP/DOWN. Historial breve en memoria de la ronda.
+    """
+    side = state.get("active_direction")
+    if side not in ("UP", "DOWN") or sig.get("data_valid") is False:
+        return state.get("exit_watch_text", "") if side in ("UP", "DOWN") else ""
+    price = _plan_number(sig.get("price"))
+    if price is None:
+        return state.get("exit_watch_text", "")
+    sign = 1 if side == "UP" else -1
+    samples = state.setdefault("exit_watch_prices", [])
+    ts = now.timestamp()
+    if not samples or ts > samples[-1][0]:
+        samples.append([ts, price])
+    samples[:] = [x for x in samples if ts - x[0] <= 45][-45:]
+    if len(samples) < 3 or ts - samples[0][0] < 8:
+        return state.get("exit_watch_text", "")
+    favorable = [sign * x[1] for x in samples]
+    best = max(favorable)
+    current = favorable[-1]
+    peak_pullback = best - current
+    early = favorable[0]
+    progress = best - early
+    recent = next((x for x in samples if ts - x[0] >= 8), samples[0])
+    recent_move = sign * (price - recent[1])
+    distance = _plan_number(sig.get("distance"))
+    distance_favorable = distance is not None and sign * distance > 0
+    # Retroceso real después de un avance, o pérdida de velocidad tras avanzar.
+    reversing = progress >= 5 and peak_pullback >= max(3.0, progress * 0.25)
+    stalling = progress >= 8 and recent_move <= 1 and (best - current >= 1 or recent_move <= 0)
+    bid = plan_bid(market, side)
+    entry = _plan_number(state.get("first_signal_price")) if state.get("first_direction") == side else None
+    high_quote = bid is not None and bid >= 0.90
+    # Precio alto del contrato no equivale a ganancia sin conocer la entrada.
+    gain_known = high_quote and entry is not None and bid > entry
+    if (reversing or stalling) and distance_favorable:
+        if gain_known:
+            msg = f"⚠ {side} PERDIENDO FUERZA · KALSHI {bid*100:.0f}¢ (entrada orientativa {entry*100:.0f}¢). REVISA ASEGURAR GANANCIA."
+        elif high_quote:
+            msg = f"⚠ {side} PERDIENDO FUERZA · KALSHI {bid*100:.0f}¢. REVISA SALIDA; ganancia no verificada."
+        else:
+            msg = f"⚠ {side} PERDIENDO FUERZA · el impulso se frena o retrocede. REVISA SALIDA."
+        state["exit_watch_text"] = msg
+        state["exit_watch_at"] = now.isoformat()
+        return msg
+    # Conservar brevemente la alerta ya emitida para que un refresco no la borre.
+    return state.get("exit_watch_text", "")
+
+
 def _round_opening_crosscheck(state, candidate, signal, now):
     """Use fresh, same-round observations to reject a contradicted *first* entry.
 
@@ -2188,7 +2238,17 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_count"] = 0
         state["pending_since"] = None
         state["pending_last_at"] = None
-        if not _retention_supported(state, signal, seconds_left):
+        retain = _retention_supported(state, signal, seconds_left)
+        if not retain and signal and state.get("active_direction") in ("UP", "DOWN"):
+            side = state["active_direction"]
+            sign = 1 if side == "UP" else -1
+            dist = _plan_number(signal.get("distance"))
+            score = _plan_number(signal.get("final_score"))
+            # Retroceso breve no invalida una dirección aún ampliamente respaldada.
+            # No afecta la confirmación de un candidato opuesto.
+            retain = (dist is not None and score is not None
+                      and sign * dist >= 30 and sign * score >= 2.0)
+        if not retain:
             state["active_direction"] = None
             state["active_since"] = None
         return
@@ -2371,6 +2431,11 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
             reversal = True
             reversal_text = "DOWN PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
 
+    # El aviso no depende de retirar la señal ni de los puntos de reversión.
+    exit_watch = _exit_watch_update(state, sig, market, now)
+    if exit_watch:
+        reversal = True
+        reversal_text = exit_watch
     state["reversal_warning"] = reversal
     state["reversal_text"] = reversal_text
 
@@ -3925,9 +3990,10 @@ def live_dashboard():
     requirements_html = render_signal_requirements(sig, round_signal, market, seconds_left)
 
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
+    warning_text = round_signal.get("reversal_text") or ""
     weakness_html = (
-        '<div class="weakness-inline" role="status">⚠ ' +
-        html.escape(round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
+        '<div class="weakness-inline" role="status">' +
+        html.escape(warning_text if warning_text.startswith("⚠") else "⚠ " + warning_text) +
         '</div>'
         if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
     )
