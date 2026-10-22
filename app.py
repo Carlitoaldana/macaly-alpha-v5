@@ -1739,11 +1739,12 @@ def estimated_probabilities(
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-BRAIN_REVISION = "current_round_v4_validated_observations"
+BRAIN_REVISION = "current_round_v5_range_context"
 BRAIN_OBSERVE_SECONDS = 12.0
 BRAIN_SAMPLE_INTERVAL = 2.0
 BRAIN_MAX_GAP = 10.0
 BRAIN_WINDOW_SECONDS = 24.0
+BRAIN_CONTEXT_SECONDS = 90.0
 
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
@@ -1933,10 +1934,18 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if samples and stamp < samples[-1][0]:
         suspend("OBSERVACIÓN FUERA DE ORDEN")
         return
-    samples = [x for x in samples if stamp - x[0] <= BRAIN_WINDOW_SECONDS]
+    samples = [x for x in samples if stamp - x[0] <= BRAIN_CONTEXT_SECONDS]
     if not samples or stamp - samples[-1][0] >= BRAIN_SAMPLE_INTERVAL:
         samples.append([stamp, price])
     tapes[source] = samples
+    context_samples = samples
+    # Longer context distinguishes repeated travel inside a range from net progress.
+    # Never mix feeds or carry context across rounds / long observation outages.
+    for i in range(len(context_samples)-1, 0, -1):
+        if context_samples[i][0]-context_samples[i-1][0] > LIVE_PRICE_MAX_AGE:
+            context_samples = context_samples[i:]
+            break
+    samples = [x for x in context_samples if stamp-x[0] <= BRAIN_WINDOW_SECONDS]
     state["brain_samples"] = samples
     state["brain_source"] = source
     signal["brain_decision_source"] = source
@@ -1988,6 +1997,28 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         "samples": len(samples), "net": float(net), "efficiency": efficiency,
         "earlier_speed": float(earlier_speed), "recent_speed": float(recent_speed),
         "fading": bool(fading), "supported": bool(supported)}
+    context_prices = np.array([x[1] for x in context_samples], dtype=float)
+    context_travel = float(np.abs(np.diff(context_prices)).sum())
+    context_net = float(context_prices[-1]-context_prices[0])
+    context_range = float(context_prices.max()-context_prices.min())
+    context_efficiency = abs(context_net)/max(context_travel, 1e-8)
+    # A full return within a bounded range gives travel without directional progress.
+    # A breakout may provide new evidence in EITHER direction, without a hold timer.
+    prior_prices = [x[1] for x in context_samples if stamp-x[0] >= BRAIN_WINDOW_SECONDS]
+    breakout = bool(prior_prices and side is not None and
+                    (price > max(prior_prices)+minimum if side == "UP"
+                     else price < min(prior_prices)-minimum))
+    ranging = bool(context_range >= minimum and context_travel >= 1.8*context_range
+                   and context_efficiency < .35 and not (breakout and supported))
+    state["brain_market_regime"] = "RANGE" if ranging else "EVALUATING"
+    signal["round_evidence"].update(context_seconds=float(context_samples[-1][0]-context_samples[0][0]),
+        context_net=context_net, context_travel=context_travel,
+        context_efficiency=context_efficiency, context_range=context_range,
+        ranging=ranging, breakout=breakout)
+    if ranging:
+        signal["round_evidence"]["supported"] = False
+        clear("MERCADO LATERAL • ANALIZANDO FUERZA DOMINANTE")
+        return
     active = state.get("active_direction")
     retained = False
     proposal = side if supported else None
@@ -2168,7 +2199,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#e64b4b"
         current_entry_price = get_no_ask(market)
     else:
-        decision, signal, icon, color = "ESPERANDO",(sig.get("quality") if state.get("brain_suspended") else "SIN CONFIRMACIÓN"),"•","#38bdf8"
+        decision, signal, icon, color = "ESPERANDO",(sig.get("quality") if state.get("brain_suspended") or state.get("brain_market_regime") == "RANGE" else "SIN CONFIRMACIÓN"),"•","#38bdf8"
         current_entry_price = None
 
     quality, quality_color = entry_quality(current_entry_price, seconds_left)
@@ -2192,7 +2223,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "current_round_brain_v4"
+BACKGROUND_DATA_REVISION = "current_round_brain_v5"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2529,6 +2560,13 @@ def closing_reader(sig, round_signal, seconds_left, micro):
             "border":"rgba(148,163,184,.45)",
             "bg":"linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))",
         }
+
+    if state and state.get("brain_market_regime") == "RANGE" and not state.get("brain_suspended"):
+        return {"percent":50, "headline":"MERCADO LATERAL • ANALIZANDO",
+                "note":"Sin fuerza dominante confirmada. La preseñal sigue evaluando la presión inmediata.",
+                "micro":"SIN VENTAJA DIRECCIONAL", "color":"#38bdf8",
+                "border":"rgba(56,189,248,.45)",
+                "bg":"linear-gradient(135deg,rgba(11,64,91,.30),rgba(9,23,34,.72))"}
 
     if state and state.get("brain_suspended"):
         return {"percent":50, "headline":"EVALUACIÓN NO DISPONIBLE",
@@ -3614,7 +3652,7 @@ def live_dashboard():
         hero_arrow, hero_word = "", "DOWN"
         btc_delta = f"{sig['mom3']:+.2f}%"
     else:
-        hero_arrow, hero_word = "•", "ESPERANDO"
+        hero_arrow, hero_word = "•", ("ANALIZANDO" if state and state.get("brain_market_regime") == "RANGE" else "ESPERANDO")
         btc_delta = f"{sig['mom3']:+.2f}%"
 
     ema_class = "green" if sig["ema"] == "BULL" else "red"
