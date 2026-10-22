@@ -2095,6 +2095,45 @@ def _retention_supported(state, signal, seconds_left):
             or (direction == "DOWN" and signal.get("ema") == "BEAR" and mom5 < 0 and distance < 0))
 
 
+def _round_opening_crosscheck(state, candidate, signal, now):
+    """Use fresh, same-round observations to reject a contradicted *first* entry.
+
+    This does not change the signal engine, block reversals, or impose a timer.
+    Historical indicators remain available; only current-round prices are used
+    to detect a meaningful move against an unconfirmed opening candidate.
+    """
+    if not signal or signal.get("data_valid") is False:
+        return candidate
+    try:
+        price = float(signal.get("price"))
+        distance = float(signal.get("distance"))
+        if not (np.isfinite(price) and np.isfinite(distance)):
+            return candidate
+    except (TypeError, ValueError, OverflowError):
+        return candidate
+    samples = state.setdefault("opening_price_samples", [])
+    # One reading per timestamp; no carry-over between ticker states.
+    stamp = now.isoformat()
+    if not samples or samples[-1][0] != stamp:
+        samples.append([stamp, price])
+    if len(samples) > 12:
+        del samples[:-12]
+    if state.get("first_direction") in ("UP", "DOWN"):
+        return candidate  # Never interfere with subsequent UP/DOWN changes.
+    if candidate not in ("UP", "DOWN") or len(samples) < 2:
+        return candidate
+    # Close to the strike, a significant fresh move against the proposed side
+    # deserves another reading rather than an inherited-trend entry.
+    if abs(distance) > 30:
+        return candidate
+    change = price - float(samples[0][1])
+    if (candidate == "DOWN" and change >= 5.0) or (candidate == "UP" and change <= -5.0):
+        state["opening_conflict"] = "Precio de la ronda contradice " + candidate
+        return None
+    state["opening_conflict"] = None
+    return candidate
+
+
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
     """Confirmación compartida por la pantalla y el registrador de fondo.
 
@@ -2102,6 +2141,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
     la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
     """
+    candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
