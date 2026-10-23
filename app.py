@@ -1739,7 +1739,7 @@ def estimated_probabilities(
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-BRAIN_REVISION = "current_round_v6_target_continuity"
+BRAIN_REVISION = "current_round_v7_pressure_stability"
 BRAIN_OBSERVE_SECONDS = 12.0
 BRAIN_SAMPLE_INTERVAL = 2.0
 BRAIN_MAX_GAP = 10.0
@@ -1776,50 +1776,82 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
 
 
 def build_presignal(sig, seconds_left, ticker=None, now=None):
-    """Independent live-price evaluation; no official candidate or candle-validity gate."""
-    empty = {"direction": "UNAVAILABLE", "percent": 50, "bull": 0.0, "bear": 0.0,
-             "status": "SIN DATOS ACTUALES"}
+    """Independent confirmed pressure. Pauses do not erase a confirmed side."""
+    empty = {"direction":"UNAVAILABLE", "percent":50, "bull":0.0, "bear":0.0,
+             "status":"SIN DATOS ACTUALES", "weakening":False}
     now_ts = (now or datetime.now(timezone.utc)).timestamp()
-    source = sig.get("price_source")
-    store = st.session_state.setdefault("independent_presignal", {})
-    for key in list(store):
-        if key[0] != ticker:
-            del store[key]
+    book = st.session_state.setdefault("independent_presignal_v2", {})
+    if book.get("ticker") != ticker:
+        book.clear()
+        book.update(ticker=ticker, tapes={}, active=None, pending=None, count=0)
     if not ticker or ticker == "--" or seconds_left is None or seconds_left <= 0:
-        return {**empty, "status": "SIN RONDA ACTIVA"}
+        book.clear()
+        return {**empty, "status":"SIN RONDA ACTIVA"}
+    source = sig.get("price_source")
     price = _plan_number(sig.get("price"))
     stamp = _plan_number(sig.get("price_observed_at"))
     if (source not in ("COINBASE", "KALSHI LIVE") or price is None or price <= 0
-            or stamp is None or not -5 <= now_ts - stamp <= LIVE_PRICE_MAX_AGE):
+            or stamp is None or not -5 <= now_ts-stamp <= LIVE_PRICE_MAX_AGE):
+        book.update(pending=None, count=0)
         return empty
-    key = (ticker, source)
-    saved_tape = store.get(key, [])
-    if saved_tape and stamp < saved_tape[-1][0]:
-        return {**empty, "status":"ESPERANDO OBSERVACIÓN ACTUAL"}
-    tape = [x for x in saved_tape if 0 <= stamp-x[0] <= 90]
+    authority = book.get("source")
+    if authority != source:
+        if authority and 0 <= stamp-book.get("last_at", 0) <= BRAIN_MAX_GAP:
+            return dict(book.get("public", empty))
+        book.update(source=source, pending=None, count=0)
+    tape = book["tapes"].get(source, [])
+    if tape and stamp < tape[-1][0]:
+        return dict(book.get("public", empty))
+    if tape and stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE:
+        tape = []
+        book.update(active=None, pending=None, count=0)
+    book["last_at"] = stamp
+    tape = [x for x in tape if stamp-x[0] <= 90]
     if not tape or stamp > tape[-1][0]:
         tape.append([stamp, price])
-    store[key] = tape
-    # Keep each feed's history. A sparse refresh must not erase all observations.
+    book["tapes"][source] = tape
     recent = [x for x in tape if stamp-x[0] <= 30]
-    for i in range(len(recent)-1, 0, -1):
-        if recent[i][0]-recent[i-1][0] > LIVE_PRICE_MAX_AGE:
-            recent = recent[i:]
-            break
     if len(recent) < 3 or recent[-1][0]-recent[0][0] < 6:
-        return {**empty, "direction": "OBSERVING", "status": "REUNIENDO MUESTRAS"}
+        return {**empty, "direction":"OBSERVING", "status":"REUNIENDO MUESTRAS"}
     net = recent[-1][1]-recent[0][1]
     travel = sum(abs(y[1]-x[1]) for x,y in zip(recent,recent[1:]))
+    width = max(x[1] for x in recent)-min(x[1] for x in recent)
     efficiency = abs(net)/max(travel, 1e-8)
-    # Normalization uses only this independent price tape, not the official score.
-    scale = max(1.0, travel)
-    if abs(net) < 1.0 or efficiency < .4:
-        return {"direction":"NEUTRAL", "percent":50, "bull":0.0, "bear":0.0,
-                "status":"PRESIÓN EQUILIBRADA"}
-    strength = min(5.0, abs(net)/scale*5*efficiency)
-    return {"direction":"UP" if net > 0 else "DOWN", "percent":round(50+strength*8),
-            "bull":strength if net>0 else 0.0, "bear":strength if net<0 else 0.0,
-            "status":"PRESIÓN ACTUAL"}
+    minimum = max(2.0, .25*width)
+    proposal = ("UP" if net > 0 else "DOWN") if abs(net) >= minimum and efficiency >= .65 else None
+    active = book.get("active")
+    if proposal and proposal != active:
+        last = book.get("pending_at")
+        if (book.get("pending") != proposal or last is None
+                or not 0 <= stamp-last <= LIVE_PRICE_MAX_AGE):
+            book.update(pending=proposal, count=1, pending_since=stamp, pending_at=stamp)
+        elif stamp-last >= BRAIN_SAMPLE_INTERVAL:
+            book["count"] += 1
+            book["pending_at"] = stamp
+        required = 3 if active in ("UP", "DOWN") else 2
+        if book["count"] >= required and stamp-book["pending_since"] >= (required-1)*BRAIN_SAMPLE_INTERVAL:
+            book.update(active=proposal, pending=None, count=0)
+            active = proposal
+    else:
+        book.update(pending=None, count=0)
+    if active not in ("UP", "DOWN"):
+        result = {**empty, "direction":"OBSERVING" if proposal else "NEUTRAL",
+                  "status":"CONFIRMANDO PRESIÓN" if proposal else "PRESIÓN EQUILIBRADA"}
+    else:
+        weakening = proposal != active
+        measured = round(50+min(5.0, efficiency*efficiency*5)*8)
+        # Keep the confirmed direction, but never carry a strong percentage
+        # through a pause or an unconfirmed opposite proposal.
+        percent = min(book.get("percent", 60), 60) if weakening else measured
+        strength = (percent-50)/8
+        result = {"direction":active, "percent":percent,
+                  "bull":strength if active == "UP" else 0.0,
+                  "bear":strength if active == "DOWN" else 0.0,
+                  "status":"PRESIÓN CONFIRMADA • PERDIENDO FUERZA" if weakening else "PRESIÓN CONFIRMADA",
+                  "weakening":weakening}
+        book["percent"] = percent
+    book["public"] = dict(result)
+    return result
 
 
 def entry_quality(price, seconds_left):
@@ -1894,6 +1926,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                      active_direction=None, active_since=None, pending_direction=None,
                      pending_count=0, pending_since=None, pending_last_at=None,
                      brain_invalid_count=0, brain_invalid_at=0, brain_authority=None)
+    prior_warning = state.get("brain_warning")
     state["brain_warning"] = None
     state["brain_suspended"] = False
     def clear(reason):
@@ -1949,6 +1982,15 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if source not in ("KALSHI LIVE", "COINBASE"):
         suspend("ESPERANDO PRECIO EN VIVO")
         return
+    def reuse_current_decision():
+        previous = state.get("brain_last_decision") or {}
+        if (state.get("active_direction") in ("UP", "DOWN") and previous.get("public")
+                and 0 <= now.timestamp()-previous.get("at", 0) <= LIVE_PRICE_MAX_AGE):
+            signal.update(previous["public"])
+            signal["brain_decision_source"] = previous.get("source")
+            state["brain_warning"] = prior_warning
+            return True
+        return False
     def publish_active(reason):
         side = state.get("active_direction")
         if side not in ("UP", "DOWN"):
@@ -1967,7 +2009,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     authority_at = state.get("brain_authority_at", 0)
     if authority != source:
         if authority and 0 <= stamp - authority_at <= BRAIN_MAX_GAP:
-            publish_active("EVALUANDO CON FUENTE ACTIVA")
+            if not reuse_current_decision():
+                signal.update(candidate=None, quality="OBSERVANDO FUENTE ACTIVA", final_score=0.0)
             signal["brain_decision_source"] = authority
             return
         state.update(brain_authority=source, pending_direction=None, pending_count=0,
@@ -1979,7 +2022,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     tapes = state.setdefault("brain_tapes", {})
     samples = tapes.get(source, [])
     if samples and stamp < samples[-1][0]:
-        suspend("OBSERVACIÓN FUERA DE ORDEN")
+        if not reuse_current_decision():
+            suspend("OBSERVACIÓN FUERA DE ORDEN")
         return
     samples = [x for x in samples if stamp - x[0] <= BRAIN_CONTEXT_SECONDS]
     if not samples or stamp - samples[-1][0] >= BRAIN_SAMPLE_INTERVAL:
@@ -2253,7 +2297,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "current_round_brain_v6"
+BACKGROUND_DATA_REVISION = "current_round_brain_v7"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3672,6 +3716,8 @@ def live_dashboard():
                     else "No hay un precio actual verificable para evaluar la presión.")
         pre_label = "NEUTRAL" if pre_direction == "NEUTRAL" else pre["status"]
 
+    if pre.get("weakening"):
+        pre_note = "Presión confirmada perdiendo fuerza. Se mantiene mientras se evalúa la presión contraria."
     pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
     pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
 
@@ -4135,7 +4181,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     update_exit_plan(state, signal, seconds_left, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v6", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"current_round_brain_v7", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
