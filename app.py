@@ -2079,57 +2079,124 @@ def entry_quality(price, seconds_left):
 # CONTROL DE RONDA — EL CEREBRO MANDA
 # =========================================================
 
+def _retention_assessment(state, signal):
+    """Separate affirmative, opposite and unknown evidence for an active side."""
+    side = state.get("active_direction")
+    if side not in ("UP", "DOWN") or not signal or signal.get("data_valid") is False:
+        return 0, 0
+    sign = 1 if side == "UP" else -1
+    support = contrary = 0
+    ema = signal.get("ema")
+    if ema in ("BULL", "BEAR"):
+        if ema == ("BULL" if sign == 1 else "BEAR"):
+            support += 1
+        else:
+            contrary += 1
+    for name in ("mom5", "distance"):
+        value = _plan_number(signal.get(name))
+        if value is None:
+            continue
+        if value * sign > 0:
+            support += 1
+        elif value * sign < 0:
+            contrary += 1
+    return support, contrary
+
+
 def _retention_supported(state, signal, seconds_left):
-    """Retain only a previously confirmed side with current finite support."""
-    if not signal or seconds_left is None or seconds_left <= 0:
+    """Partial weakening is not sufficient to withdraw an existing signal."""
+    if seconds_left is None or seconds_left <= 0:
         return False
-    try:
-        mom5 = float(signal["mom5"])
-        distance = float(signal["distance"])
-        if not np.isfinite(mom5) or not np.isfinite(distance):
-            return False
-    except (KeyError, TypeError, ValueError, OverflowError):
-        return False
-    direction = state.get("active_direction")
-    return ((direction == "UP" and signal.get("ema") == "BULL" and mom5 > 0 and distance > 0)
-            or (direction == "DOWN" and signal.get("ema") == "BEAR" and mom5 < 0 and distance < 0))
+    support, _ = _retention_assessment(state, signal)
+    return support >= 2
+
+
+def _reset_withdrawal(state):
+    state.update(withdraw_direction=None, withdraw_source=None, withdraw_count=0,
+                 withdraw_since=None, withdraw_last_at=None, retention_warning=None)
+
+
+def _review_active_retention(state, signal, seconds_left, now):
+    """Withdraw only after two opposite conditions persist in spaced readings.
+
+    Neutral/missing evidence never counts as an opposite vote. This helper is
+    only for candidate=None; entry and reversal confirmation are unchanged.
+    """
+    side = state.get("active_direction")
+    if side not in ("UP", "DOWN"):
+        _reset_withdrawal(state)
+        return
+    support, contrary = _retention_assessment(state, signal)
+    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if support < 3 else None
+    if contrary < 2:
+        _reset_withdrawal(state)
+        state["retention_warning"] = warning
+        return
+    source = (signal or {}).get("price_source")
+    stamp = now.timestamp()
+    last = state.get("withdraw_last_at")
+    same = (state.get("withdraw_direction") == side and state.get("withdraw_source") == source
+            and last is not None and 0 <= stamp-last <= SIGNAL_CONFIRM_MAX_GAP)
+    if not same:
+        state.update(withdraw_direction=side, withdraw_source=source, withdraw_count=1,
+                     withdraw_since=stamp, withdraw_last_at=stamp)
+    elif stamp-last >= SIGNAL_CONFIRM_INTERVAL:
+        state["withdraw_count"] += 1
+        state["withdraw_last_at"] = stamp
+    state["retention_warning"] = warning
+    if (state["withdraw_count"] >= SIGNAL_CONFIRM_READINGS and
+            stamp-state["withdraw_since"] >= SIGNAL_CONFIRM_INTERVAL*(SIGNAL_CONFIRM_READINGS-1)):
+        state["active_direction"] = None
+        state["active_since"] = None
+        _reset_withdrawal(state)
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
-    """Use fresh, same-round observations to reject a contradicted *first* entry.
+    """Require fresh directional evidence before the first entry of this ticker.
 
-    This does not change the signal engine, block reversals, or impose a timer.
-    Historical indicators remain available; only current-round prices are used
-    to detect a meaningful move against an unconfirmed opening candidate.
+    Old candles remain context, never sufficient evidence for an opening entry.
+    Each live feed has a separate short tape. Later reversals are unrestricted.
     """
-    if not signal or signal.get("data_valid") is False:
-        return candidate
-    try:
-        price = float(signal.get("price"))
-        distance = float(signal.get("distance"))
-        if not (np.isfinite(price) and np.isfinite(distance)):
-            return candidate
-    except (TypeError, ValueError, OverflowError):
-        return candidate
-    samples = state.setdefault("opening_price_samples", [])
-    # One reading per timestamp; no carry-over between ticker states.
-    stamp = now.isoformat()
-    if not samples or samples[-1][0] != stamp:
-        samples.append([stamp, price])
-    if len(samples) > 12:
-        del samples[:-12]
     if state.get("first_direction") in ("UP", "DOWN"):
-        return candidate  # Never interfere with subsequent UP/DOWN changes.
-    if candidate not in ("UP", "DOWN") or len(samples) < 2:
         return candidate
-    # Close to the strike, a significant fresh move against the proposed side
-    # deserves another reading rather than an inherited-trend entry.
-    if abs(distance) > 30:
-        return candidate
-    change = price - float(samples[0][1])
-    if (candidate == "DOWN" and change >= 5.0) or (candidate == "UP" and change <= -5.0):
-        state["opening_conflict"] = "Precio de la ronda contradice " + candidate
+    def wait(reason):
+        state["opening_conflict"] = reason
         return None
+    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
+        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
+    if not signal or signal.get("data_valid") is False:
+        return wait("Esperando datos actuales para la primera señal")
+    price = _plan_number(signal.get("price"))
+    atr = _plan_number(signal.get("atr"))
+    source = signal.get("price_source")
+    if (price is None or price <= 0 or atr is None or atr <= 0
+            or source not in ("COINBASE", "KALSHI LIVE")):
+        return wait("Esperando precio en vivo para la primera señal")
+    stamp = now.timestamp()
+    tapes = state.setdefault("opening_live_tapes", {})
+    tape = tapes.get(source, [])
+    if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
+        tape = []
+    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
+    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
+        tape.append([stamp, price])
+    tapes[source] = tape
+    if candidate not in ("UP", "DOWN"):
+        return wait("Analizando fuerza actual antes de la primera señal")
+    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
+        return wait("Observando movimiento actual antes de la primera señal")
+    prices = [float(x[1]) for x in tape]
+    sign = 1 if candidate == "UP" else -1
+    split = len(prices)//2
+    net = sign*(prices[-1]-prices[0])
+    recent = sign*(prices[-1]-prices[split])
+    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
+    efficiency = net/max(travel, 1e-8)
+    minimum = max(2.0, .10*atr)
+    latest = sign*(prices[-1]-prices[-2])
+    if (net < minimum or recent < .5*minimum or efficiency < .60
+            or latest < -.25*minimum):
+        return wait("Sin fuerza actual suficiente para " + candidate)
     state["opening_conflict"] = None
     return candidate
 
@@ -2154,12 +2221,14 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
             closed = seconds_left <= 0
     if closed:
+        _reset_withdrawal(state)
         for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
                     "active_direction", "active_since"):
             state[key] = None
         state["pending_count"] = 0
         return
     if signal is not None and signal.get("data_valid") is False:
+        _reset_withdrawal(state)
         # Una interrupción no demuestra neutralidad ni permite confirmar.
         state["pending_direction"] = None
         state["pending_count"] = 0
@@ -2183,11 +2252,10 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_count"] = 0
         state["pending_since"] = None
         state["pending_last_at"] = None
-        if not _retention_supported(state, signal, seconds_left):
-            state["active_direction"] = None
-            state["active_since"] = None
+        _review_active_retention(state, signal, seconds_left, now)
         return
 
+    _reset_withdrawal(state)
     if candidate == state.get("active_direction"):
         state["pending_direction"] = None
         state["pending_count"] = 0
@@ -2338,6 +2406,9 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
             reversal = True
             reversal_text = "DOWN PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
 
+    if active and state.get("retention_warning"):
+        reversal = True
+        reversal_text = state["retention_warning"]
     state["reversal_warning"] = reversal
     state["reversal_text"] = reversal_text
 
@@ -2348,7 +2419,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#e64b4b"
         current_entry_price = get_no_ask(market)
     else:
-        decision, signal, icon, color = "ESPERANDO","SIN CONFIRMACIÓN","•","#38bdf8"
+        decision, signal, icon, color = "ESPERANDO",(state.get("opening_conflict") or "SIN CONFIRMACIÓN"),"•","#38bdf8"
         current_entry_price = None
 
     quality, quality_color = entry_quality(current_entry_price, seconds_left)
@@ -2372,7 +2443,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v3"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v3_opening_and_retention"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
