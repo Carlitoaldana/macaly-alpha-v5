@@ -3706,7 +3706,6 @@ def live_dashboard():
     except Exception:
         order_book = None
     order_flow = get_order_flow_advisory(whale)
-    reversal_detector_html = render_intelligent_market_panel(order_book, order_flow, active)
 
     if active == "UP":
         accent = "#00dfb5"
@@ -3932,7 +3931,6 @@ def live_dashboard():
   </section>
 
 
-  {reversal_detector_html}
 
 
   <section class="rcard tech">
