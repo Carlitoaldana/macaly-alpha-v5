@@ -9,6 +9,9 @@ import sqlite3
 import json
 import threading
 import time
+import copy
+import random
+from email.utils import parsedate_to_datetime
 
 # =========================================================
 # MACALY + ALPHA BOT v4.6.1 • MOBILE PRO UI
@@ -1185,6 +1188,94 @@ def verified_binary_outcome(market, ticker, now=None):
     return 'UP' if result == 'yes' else 'DOWN'
 
 
+class _KalshiPublicReads:
+    """Una consulta por recurso para todas las sesiones e hilos del proceso."""
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cache = {}
+        self.failures = {}
+        self.retry_at = 0.0
+        self.rate_failures = 0
+
+    def get(self, path, params=None, ttl=2.0, timeout=6):
+        params = dict(params or {})
+        key = (path, json.dumps(params, sort_keys=True))
+        with self.lock:
+            now = time.monotonic()
+            cached = self.cache.get(key)
+            if cached and now < cached[0]:
+                return copy.deepcopy(cached[1])
+            if now < self.retry_at:
+                raise requests.HTTPError(
+                    "Kalshi 429: límite temporal; reintento en "
+                    + str(max(1, int(self.retry_at - now + 0.999))) + " s.")
+            failed = self.failures.get(key)
+            if failed and now < failed[0]:
+                raise requests.RequestException(failed[1])
+            try:
+                response = requests.get(
+                    "https://external-api.kalshi.com/trade-api/v2" + path,
+                    params=params,
+                    headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
+                    timeout=timeout,
+                )
+                if response.status_code == 429:
+                    self.rate_failures = min(self.rate_failures + 1, 5)
+                    delay = min(30.0, 2.0 ** self.rate_failures) + random.uniform(0, 0.5)
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            requested_delay = float(retry_after)
+                        except (TypeError, ValueError):
+                            try:
+                                stamp = parsedate_to_datetime(retry_after)
+                                if stamp.tzinfo is None:
+                                    stamp = stamp.replace(tzinfo=timezone.utc)
+                                requested_delay = (stamp - datetime.now(timezone.utc)).total_seconds()
+                            except (TypeError, ValueError, OverflowError):
+                                requested_delay = 0.0
+                        if np.isfinite(requested_delay):
+                            delay = max(delay, requested_delay)
+                    self.retry_at = time.monotonic() + delay
+                response.raise_for_status()
+                payload = response.json()
+            except (requests.RequestException, ValueError) as exc:
+                # Los errores tampoco se vuelven a consultar por cada sesión.
+                if len(self.failures) >= 256:
+                    self.failures.pop(next(iter(self.failures)))
+                self.failures[key] = (time.monotonic() + 2.0, str(exc))
+                raise
+            self.rate_failures = 0
+            self.retry_at = 0.0
+            self.failures.pop(key, None)
+            if len(self.cache) >= 256:
+                self.cache.pop(next(iter(self.cache)))
+            effective_ttl = float(ttl)
+            if path == "/markets":
+                # No reutilizar el listado de la ronda cerrada en el cambio de ronda.
+                for market in payload.get("markets", []):
+                    try:
+                        close = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
+                        remaining = (close - datetime.now(timezone.utc)).total_seconds()
+                        if remaining > 0:
+                            effective_ttl = min(effective_ttl, remaining)
+                        else:
+                            effective_ttl = 0.0
+                    except (KeyError, TypeError, ValueError):
+                        pass
+            self.cache[key] = (time.monotonic() + effective_ttl, copy.deepcopy(payload))
+            return payload
+
+
+@st.cache_resource
+def _kalshi_public_reads():
+    return _KalshiPublicReads()
+
+
+def _kalshi_public_json(path, params=None, ttl=2.0, timeout=6):
+    return _kalshi_public_reads().get(path, params=params, ttl=ttl, timeout=timeout)
+
+
 def reconcile_history_once(limit=4, fetch_market=None):
     """Consulta resultados públicos fuera del motor de señales."""
     with _history_db() as conn:
@@ -1198,11 +1289,8 @@ def reconcile_history_once(limit=4, fetch_market=None):
                 conn.execute('UPDATE round_history SET last_verification_attempt=? WHERE ticker=?',
                              (datetime.now(timezone.utc).isoformat(), ticker))
             if fetch_market is None:
-                response = requests.get(
-                    'https://external-api.kalshi.com/trade-api/v2/markets/' + ticker,
-                    headers={'User-Agent': 'MacalyAlphaBot/4.6.1'}, timeout=5)
-                response.raise_for_status()
-                market = response.json().get('market')
+                market = _kalshi_public_json(
+                    '/markets/' + ticker, ttl=30.0, timeout=5).get('market')
             else:
                 market = fetch_market(ticker)
             outcome = verified_binary_outcome(market, ticker)
@@ -1495,20 +1583,11 @@ def get_btc_live_price():
 # KALSHI BTC 15 MIN
 # =========================================================
 
-@st.cache_data(ttl=2)
 def get_kalshi_btc_market():
-    response = requests.get(
-        "https://external-api.kalshi.com/trade-api/v2/markets",
-        params={
-            "limit": 100,
-            "status": "open",
-            "series_ticker": "KXBTC15M",
-        },
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    markets = response.json().get("markets", [])
+    data = _kalshi_public_json("/markets", params={
+        "limit": 100, "status": "open", "series_ticker": "KXBTC15M",
+    }, ttl=2.0, timeout=10)
+    markets = data.get("markets", [])
     if not markets:
         return None
     markets.sort(key=lambda m: str(m.get("close_time") or "9999"))
@@ -1562,22 +1641,11 @@ def get_kalshi_live_btc(market):
     event_ticker = get_event_ticker_from_market(market)
     if not event_ticker:
         raise ValueError("La ronda no entregó event_ticker.")
-
-    response = requests.get(
-        "https://external-api.kalshi.com/trade-api/v2/live_data/events/"
-        f"{event_ticker}",
-        params={
-            "range": "15min",
-            "_": int(datetime.now(timezone.utc).timestamp()),
-        },
-        headers={
-            "User-Agent": "MacalyAlphaBot/4.6.1",
-            "Cache-Control": "no-cache",
-        },
-        timeout=6,
-    )
-    response.raise_for_status()
-    price = extract_kalshi_btc_price(response.json())
+    data = _kalshi_public_json(
+        "/live_data/events/" + str(event_ticker),
+        params={"range": "15min"}, ttl=2.0, timeout=6)
+    # Siempre se valida la fecha original, incluso al compartir una respuesta.
+    price = extract_kalshi_btc_price(data)
     if price is None:
         raise ValueError("Kalshi live respondió sin precio BTC válido.")
     return float(price)
@@ -2380,7 +2448,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v4_bidirectional_routes"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v5_shared_kalshi_reads"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2388,35 +2456,15 @@ def _background_get_btc_data():
     return get_btc_data()
 
 def _background_get_market():
-    response = requests.get(
-        "https://external-api.kalshi.com/trade-api/v2/markets",
-        params={"limit": 100, "status": "open", "series_ticker": "KXBTC15M"},
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        timeout=10,
-    )
-    response.raise_for_status()
-    markets = response.json().get("markets", [])
-    if not markets:
-        return None
-    markets.sort(key=lambda m: str(m.get("close_time") or "9999"))
-    return markets[0]
+    return get_kalshi_btc_market()
 
 def _background_get_live_price(market):
     _BACKGROUND_PRICE_SOURCE.value = None
     try:
-        event_ticker = get_event_ticker_from_market(market)
-        if event_ticker:
-            response = requests.get(
-                "https://external-api.kalshi.com/trade-api/v2/live_data/events/" + str(event_ticker),
-                params={"range": "15min", "_": int(datetime.now(timezone.utc).timestamp())},
-                headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
-                timeout=6,
-            )
-            response.raise_for_status()
-            price = extract_kalshi_btc_price(response.json())
-            if price is not None:
-                _BACKGROUND_PRICE_SOURCE.value = "KALSHI LIVE"
-                return float(price)
+        if market:
+            price = get_kalshi_live_btc(market)
+            _BACKGROUND_PRICE_SOURCE.value = "KALSHI LIVE"
+            return float(price)
     except Exception:
         pass
     response = requests.get(
