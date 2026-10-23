@@ -3870,8 +3870,6 @@ def live_dashboard():
       </div>
     </div>'''
 
-    requirements_html = render_signal_requirements(sig, round_signal, market, seconds_left)
-
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
     weakness_html = (
         '<div class="weakness-inline" role="status">⚠ ' +
@@ -3933,7 +3931,6 @@ def live_dashboard():
     {final_panel}
   </section>
 
-  {requirements_html}
 
   {reversal_detector_html}
 
