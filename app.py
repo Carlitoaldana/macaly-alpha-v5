@@ -1773,6 +1773,85 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 
+def _entry_route_checks(sig, seconds_left):
+    """Evaluate both sides from the same evidence; shared by engine and UI."""
+    required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
+                "vol_ratio", "mom3", "mom5", "target_atr", "price_ema9_atr")
+    if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
+        return {"valid":False, "sides":{}, "noise_ok":False}
+    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion,live_ema = (float(sig[k]) for k in required)
+    d3,d5 = sig.get("trend3"), sig.get("trend5")
+    impulse = sig.get("impulse_internal") or {}
+    noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
+    sides = {}
+    for side,sign,other in (("UP",1,"DOWN"),("DOWN",-1,"UP")):
+        up = sign == 1
+        exhausted = bool(impulse.get("exhaust_up" if up else "exhaust_down"))
+        strength = float(impulse.get("up" if up else "down", 0))
+        reliable = bool(impulse.get("reliable"))
+        current = [
+            ("EMA de 1 minuto y precio actual a favor", sig.get("ema") == ("BULL" if up else "BEAR") and live_ema*sign>0),
+            ("RSI y momentum actuales a favor", (r1>=53 if up else r1<=47) and mom*sign>=.025),
+            ("MACD de 1 minuto y VWAP a favor", m1*sign>0 and vw*sign>=.03),
+            ("Impulso actual sin agotamiento detectado", not exhausted),
+        ]
+        early_five = d5 != other or (reliable and strength>=.75 and mom*sign>.04 and vol>=.9)
+        rsi_vwap = (r1>=52 and vw>=.05) if up else (r1<=48 and vw<=-.05)
+        routes = [
+            ("IMPULSO ACTUAL", current),
+            ("TENDENCIA ALINEADA", [
+                ("Tendencias de 3 y 5 minutos a favor", d3==side and d5==side),
+                ("Fuerza de tendencia o RSI suficientes", adx>=20 or ((r3>=52 and r5>=50) if up else (r3<=48 and r5<=50))),
+                ("VWAP y momentum actual respaldan la tendencia", (vw>-.15 if up else vw<.15) and mom*sign>=.012),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("TEMPRANA", [
+                ("MACD de 3 minutos a favor", m3*sign>0),
+                ("RSI de 1 minuto y VWAP a favor", rsi_vwap),
+                ("Momentum de 3 minutos a favor", mom*sign>.015),
+                ("Contexto de 5 minutos respaldado o superado por fuerza actual", early_five),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("TEMPRANA ACELERADA", [
+                ("MACD y momentum a favor", m3*sign>0 and mom*sign>.015),
+                ("Contexto de 5 minutos no contrario", d5!=other),
+                ("Impulso fuerte con volumen y ADX", reliable and strength>=.65 and adx>=20 and vol>=.8),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("GIRO TEMPRANO", [
+                ("MACD y momentum respaldan el giro", m3*sign>0 and mom*sign>.04),
+                ("RSI de 1 y 3 minutos respaldan el giro", (r1>=54 and r3>=50) if up else (r1<=46 and r3<=50)),
+                ("VWAP y distancia suficientes", vw*sign>=.08 and abs(cushion)>=.30),
+                ("Impulso y volumen suficientes", reliable and strength>=.70 and vol>=.9),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+        ]
+        flow = sig.get("flow_context_internal") or {}
+        flow_ok = flow.get("direction")==side and flow.get("valid",False)
+        routes.append(("FLUJO + IMPULSO", [
+            ("Flujo agresor significativo a favor", flow_ok),
+            ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and live_ema*sign>0),
+            ("Momentum y VWAP a favor", mom*sign>=.012 and vw*sign>=-.04),
+            ("Contexto contrario corroborado por momentum", d5!=other or (mom5*sign>=.025 and abs(mom)>=.025)),
+            ("Impulso fiable sin agotamiento", reliable and not exhausted),
+        ]))
+        target_ok = True
+        if sig.get("distance") is not None and seconds_left is not None:
+            remaining = float(np.clip(seconds_left,0,900))
+            weight = .12+.88*(1-remaining/900)**1.6
+            tolerance = 1.8-1.4*weight
+            if -sign*cushion>tolerance:
+                target_ok = (reliable and strength>=.75 and mom*sign>.04 and not exhausted
+                             and (all(ok for _,ok in current) or d3==side or d5==side))
+        sides[side] = []
+        for name,checks in routes:
+            checks = checks+[("Fuera de la zona de ruido",noise_ok),
+                            ("Distancia al target y tiempo respaldan la dirección",target_ok)]
+            sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
+                                "total":len(checks),"complete":all(bool(ok) for _,ok in checks)})
+    return {"valid":True,"sides":sides,"noise_ok":noise_ok}
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -1791,171 +1870,27 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
     trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
     impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
-    candidate=None; quality="SIN CONFIRMACIÓN"
-    if aligned=="UP" and (trend_strong or (rsi3>=52 and rsi5>=50)) and vwap_atr>-0.15:
-        candidate="UP"
-    elif aligned=="DOWN" and (trend_strong or (rsi3<=48 and rsi5<=50)) and vwap_atr<0.15:
-        candidate="DOWN"
-    # V5 TEST: tres requisitos esenciales para la ruta temprana:
-    # 1) MACD 3m orientado; 2) RSI 1m + posición VWAP; 3) momentum 3m.
-    # RSI 3m, volumen y alineación completa de 5m quedan como contexto,
-    # no como bloqueos adicionales. Una tendencia 5m claramente opuesta
-    # sigue vetando la entrada para evitar giros contra tendencia sin respaldo.
-    elif ((d5 != "DOWN" or
-           (impulse["reliable"] and impulse["up"] >= 0.75
-            and mom3 > 0.04 and rvol >= 0.9))
-          and l3["macd_hist"] > 0
-          and rsi1 >= 52 and vwap_atr >= 0.05 and mom3 > 0.015):
-        candidate="UP"
-        quality="TEMPRANA"
-    elif ((d5 != "UP" or
-           (impulse["reliable"] and impulse["down"] >= 0.75
-            and mom3 < -0.04 and rvol >= 0.9))
-          and l3["macd_hist"] < 0
-          and rsi1 <= 48 and vwap_atr <= -0.05 and mom3 < -0.015):
-        candidate="DOWN"
-        quality="TEMPRANA"
-    # V5 EXPERIMENTAL: 3/4 accelerated entry, only when the missing
-    # early-route check is RSI/VWAP (not MACD, momentum or noise veto).
-    # Momentum and MACD must agree; a clearly opposite 5m trend vetoes.
-    # Two distinct timed readings remain mandatory in this V5 test.
-    if candidate is None and not near_noise and impulse["reliable"]:
-        for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
-            macd_ok = float(l3["macd_hist"]) * sign > 0 and d5 != opposite
-            momentum_ok = mom3 * sign > 0.015
-            rsi_vwap_ok = (rsi1 >= 52 and vwap_atr >= .05) if sign == 1 else (rsi1 <= 48 and vwap_atr <= -.05)
-            strength = impulse["up"] if sign == 1 else impulse["down"]
-            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
-            # Requires evidence stronger than the ordinary early route;
-            # never skip a missing momentum or MACD requirement.
-            if (macd_ok and momentum_ok and not rsi_vwap_ok
-                    and strength >= 0.65 and not exhausted
-                    and adx5 >= 20 and rvol >= 0.8):
-                candidate = side
-                quality = "TEMPRANA ACELERADA"
-                break
-    # V5 TEST: candidatura rápida basada en evidencias ACTUALES de 1m.
-    # Las tendencias 3m/5m son contexto, no bloqueos absolutos. El precio
-    # en vivo y la EMA de 1m deben apoyar la misma dirección; una sola
-    # subida/bajada aislada no basta. La confirmación temporal permanece.
-    if candidate is None and impulse["reliable"] and not near_noise:
-        ema_fast = float(l1["ema9"])
-        ema_slow = float(l1["ema21"])
-        macd_1m = float(l1["macd_hist"])
-        # Movimiento mínimo relativo a la volatilidad real, no dólares fijos.
-        candle_delta_atr = (price - float(one.iloc[-2]["close"])) / atr
-        for side, sign, opposite in (("UP", 1, "DOWN"), ("DOWN", -1, "UP")):
-            fast_ema_ok = (ema_fast - ema_slow) * sign > 0
-            live_ok = (price - ema_fast) * sign > 0
-            short_macd_ok = macd_1m * sign > 0
-            rsi_ok = (rsi1 >= 53) if sign == 1 else (rsi1 <= 47)
-            price_impulse_ok = candle_delta_atr * sign >= 0.12
-            three_min_ok = mom3 * sign >= 0.012
-            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
-            # Contra 5m pedimos corroboración adicional; NO vetamos giros.
-            against_five = d5 == opposite
-            reversal_ok = (not against_five or
-                           (three_min_ok and abs(candle_delta_atr) >= 0.28
-                            and rvol >= 0.9))
-            if (fast_ema_ok and live_ok and short_macd_ok and rsi_ok
-                    and price_impulse_ok and reversal_ok and not exhausted
-                    and (three_min_ok or abs(candle_delta_atr) >= 0.22)):
-                candidate = side
-                quality = "REACCIÓN RÁPIDA"
-                break
-    # V5 LAB: detect a possible reversal before the slower 5m trend flips.
-    # This path does not force a trade or bypass the three timed readings.
-    # Demand independent short-horizon agreement and meaningful impulse.
-    # Avoid tiny price moves near the contract target.
-    if candidate is None and impulse["reliable"] and not near_noise:
-        for side, sign in (("UP", 1), ("DOWN", -1)):
-            if d5 != ("DOWN" if side == "UP" else "UP"):
-                continue  # ordinary early paths handle non-opposing 5m trends
-            short_macd = float(l3["macd_hist"]) * sign > 0
-            short_momentum = mom3 * sign > 0.04
-            short_rsi = (rsi1 >= 54 and rsi3 >= 50) if sign == 1 else (rsi1 <= 46 and rsi3 <= 50)
-            vwap_ok = vwap_atr * sign >= 0.08
-            support = impulse["up"] if sign == 1 else impulse["down"]
-            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
-            if (short_macd and short_momentum and short_rsi and vwap_ok
-                    and support >= 0.70 and not exhausted
-                    and rvol >= 0.9 and abs(target_atr) >= 0.30):
-                candidate = side
-                quality = "GIRO TEMPRANO"
-                break
-    # LAB V5: el flujo agresor de Coinbase es APOYO, nunca orden ni veto.
-    # Se exige una muestra significativa, dirección coherente en 10s/30s,
-    # y corroboración técnica independiente. Una captura aislada no decide.
-    flow_support = {"used": False, "direction": None, "reason": "SIN APOYO FIABLE"}
-    if whale and isinstance(whale, dict):
-        flow_side = whale.get("flow_direction")
-        flow_imb = float(whale.get("flow_strength") or 0)
-        buy30 = float(whale.get("buy30") or 0)
-        sell30 = float(whale.get("sell30") or 0)
-        flow_total = buy30 + sell30
-        flow_ok = (flow_side in ("UP", "DOWN") and flow_total >= 500_000
-                   and flow_imb >= 0.20)
-        flow_support = {"used": False, "direction": flow_side if flow_ok else None,
-                        "reason": "FLUJO DISPONIBLE" if flow_ok else "MUESTRA INSUFICIENTE"}
-        if candidate is None and flow_ok and not near_noise and impulse["reliable"]:
-            sign = 1 if flow_side == "UP" else -1
-            rsi_ok = rsi1 >= 50 if sign == 1 else rsi1 <= 50
-            macd_ok = float(l1["macd_hist"]) * sign > 0
-            mom_ok = mom3 * sign >= 0.012
-            price_ok = (price - float(l1["ema9"])) * sign > 0
-            vwap_ok = vwap_atr * sign >= -0.04
-            exhausted = impulse["exhaust_up"] if sign == 1 else impulse["exhaust_down"]
-            # Contra una tendencia 5m opuesta se exige también momentum 5m.
-            against_5m = d5 == ("DOWN" if sign == 1 else "UP")
-            turn_ok = (not against_5m or
-                       (mom5 * sign >= 0.025 and abs(mom3) >= 0.025))
-            if (rsi_ok and macd_ok and mom_ok and price_ok and vwap_ok
-                    and turn_ok and not exhausted):
-                candidate = flow_side
-                quality = "FLUJO + IMPULSO"
-                flow_support = {"used": True, "direction": flow_side,
-                                "reason": "FLUJO CORROBORADO POR PRECIO Y MOMENTUM"}
-    # Contexto temporal continuo (ronda de 15 minutos).
-    # El tiempo restante interviene en CADA lectura, sin activar una regla
-    # especial a los 3 minutos ni fijar UP/DOWN para el resto de la ronda.
-    # Cuando el precio está claramente del otro lado del target y queda
-    # poco tiempo, exigir corroboración real antes de aceptar un giro contrario.
-    if candidate in ("UP", "DOWN") and distance is not None and seconds_left is not None:
-        remaining = float(np.clip(seconds_left, 0.0, 900.0))
-        progress = 1.0 - remaining / 900.0
-        time_weight = 0.12 + 0.88 * progress ** 1.6
-        direction_sign = 1 if candidate == "UP" else -1
-        opposite_target_atr = -direction_sign * target_atr
-        # Umbral continuo: al principio tolera rebotes; hacia el cierre
-        # se vuelve más exigente con una dirección contraria al target.
-        tolerance_atr = 1.8 - 1.4 * time_weight
-        if opposite_target_atr > tolerance_atr:
-            impulse_support = (impulse["up"] if candidate == "UP" else impulse["down"])
-            strong_reversal = (
-                impulse["reliable"]
-                and impulse_support >= 0.75
-                and mom3 * direction_sign > 0.04
-                and (d3 == candidate or d5 == candidate)
-                and not (impulse["exhaust_up"] if candidate == "UP" else impulse["exhaust_down"])
-            )
-            if not strong_reversal:
-                candidate = None
-                quality = "GIRO SIN RESPALDO FRENTE AL TARGET"
-    # Early entry: reject an already fading impulse, not a direction forever.
-    # Next reading can immediately reconsider either UP or DOWN.
-    if quality in ("TEMPRANA", "TEMPRANA ACELERADA", "REACCIÓN RÁPIDA") and candidate in ("UP", "DOWN") and impulse["reliable"]:
-        fading = impulse["exhaust_up"] if candidate == "UP" else impulse["exhaust_down"]
-        support = impulse["up"] if candidate == "UP" else impulse["down"]
-        if fading and support < 0.45:
-            candidate = None
-            quality = "IMPULSO EN REVISIÓN"
-    # A confirmed aligned trend may also exhaust: keep the 3-reading confirmation,
-    # but do not invent a direction from the exhaustion signal alone.
-    if near_noise and not trend_strong: candidate=None
-    if candidate:
-        confirmations=(d3==candidate)+(d5==candidate)+((l3["macd_hist"]>0) if candidate=="UP" else (l3["macd_hist"]<0))+((l5["plus_di"]>l5["minus_di"]) if candidate=="UP" else (l5["minus_di"]>l5["plus_di"]))
-        if quality not in ("TEMPRANA", "TEMPRANA ACELERADA", "GIRO TEMPRANO", "REACCIÓN RÁPIDA"):
-            quality="CONFIRMADA" if confirmations>=3 else "EN FORMACIÓN"
+    # Evaluate all routes for both directions before choosing any candidate.
+    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
+    flow_context = {"direction":flow_side, "valid":False}
+    if isinstance(whale,dict):
+        flow_context["valid"] = (flow_side in ("UP","DOWN") and
+            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
+            float(whale.get("flow_strength") or 0)>=.20)
+    route_input = {"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
+        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
+        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
+        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
+        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
+        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
+    route_view = _entry_route_checks(route_input, seconds_left)
+    eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
+                for side in ("UP","DOWN")}
+    choices = [side for side in ("UP","DOWN") if eligible[side]]
+    candidate = choices[0] if len(choices)==1 else None
+    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
+    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
+                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
     evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
     # Closing support adapts continuously; it is NOT a calibrated win probability.
@@ -1964,7 +1899,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
@@ -2158,6 +2093,7 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     Each live feed has a separate short tape. Later reversals are unrestricted.
     """
     if state.get("first_direction") in ("UP", "DOWN"):
+        state["opening_conflict"] = None
         return candidate
     def wait(reason):
         state["opening_conflict"] = reason
@@ -2419,7 +2355,8 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#e64b4b"
         current_entry_price = get_no_ask(market)
     else:
-        decision, signal, icon, color = "ESPERANDO",(state.get("opening_conflict") or "SIN CONFIRMACIÓN"),"•","#38bdf8"
+        decision, signal, icon, color = "ESPERANDO",(state.get("opening_conflict") or
+            ("CONFIRMANDO " + state["pending_direction"] if state.get("pending_direction") in ("UP","DOWN") else "SIN CONFIRMACIÓN")),"•","#38bdf8"
         current_entry_price = None
 
     quality, quality_color = entry_quality(current_entry_price, seconds_left)
@@ -2443,7 +2380,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v3_opening_and_retention"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v4_bidirectional_routes"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3586,34 +3523,7 @@ draw();
 
 
 def signal_requirement_view(sig, seconds_left):
-    """Read-only explanation of the existing three alternative entry paths."""
-    keys = ('rsi', 'rsi3', 'rsi5', 'adx', 'vwap_atr', 'macd3', 'vol_ratio', 'mom3', 'target_atr')
-    valid = sig.get('data_valid') is not False and all(_plan_number(sig.get(k)) is not None for k in keys)
-    valid = valid and sig.get('trend3') in ('UP', 'DOWN', 'NEUTRAL') and sig.get('trend5') in ('UP', 'DOWN', 'NEUTRAL')
-    if not valid:
-        return {'valid': False, 'sides': {}, 'noise_ok': None}
-    r1, r3, r5, adx, vw, macd, volume, mom, cushion = (float(sig[k]) for k in keys)
-    d3, d5 = sig['trend3'], sig['trend5']
-    noise_ok = not (abs(vw) < .18 and (sig.get('distance') is None or abs(cushion) < .22) and adx < 20)
-    sides = {}
-    for side, sign, other in (('UP', 1, 'DOWN'), ('DOWN', -1, 'UP')):
-        up = sign == 1
-        routes = [
-            ('Tendencia alineada', [
-                ('Tendencias de 3 y 5 minutos en ' + side, d3 == side and d5 == side),
-                ('Fuerza de tendencia o RSI suficientes', adx >= 20 or (r3 >= 52 and r5 >= 50 if up else r3 <= 48 and r5 <= 50)),
-                ('Precio bien situado frente al promedio VWAP', vw > -.15 if up else vw < .15),
-            ]),
-            ('Señal temprana', [
-                ('MACD 3m a favor y tendencia 5m no contraria', macd * sign > 0 and d5 != other),
-                ('RSI de 1 minuto y VWAP a favor',
-                 (r1 >= 52 and vw >= .05) if up else (r1 <= 48 and vw <= -.05)),
-                ('Momentum de 3 minutos a favor', mom > .015 if up else mom < -.015),
-            ]),
-        ]
-        sides[side] = [{'name': name, 'checks': checks, 'met': sum(bool(ok) for _, ok in checks),
-                        'total': len(checks), 'complete': all(bool(ok) for _, ok in checks)} for name, checks in routes]
-    return {'valid': True, 'sides': sides, 'noise_ok': noise_ok}
+    return _entry_route_checks(sig, seconds_left)
 
 
 def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
@@ -3647,7 +3557,7 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
         # Mostrar solo rutas de tendencia y entrada temprana.
         complete = [r for r in routes if r['complete']]
         route = complete[0] if complete else max(routes, key=lambda r: r['met']/r['total'])
-        checks = route['checks'] + [('Fuera de la zona de ruido', view['noise_ok'])]
+        checks = route['checks']
     total = len(checks)
     met = sum(bool(ok) for _, ok in checks) if ready else 0
     # Cada nombre corresponde al mismo booleano que controla su barra.
