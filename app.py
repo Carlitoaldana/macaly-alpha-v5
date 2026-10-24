@@ -1196,6 +1196,106 @@ class _KalshiPublicReads:
         self.failures = {}
         self.retry_at = 0.0
         self.rate_failures = 0
+        self.current_round = None
+
+    @staticmethod
+    def _is_current(market, now=None):
+        if not isinstance(market, dict) or not str(market.get("ticker", "")).startswith("KXBTC15M-"):
+            return False
+        if market.get("status") not in (None, "open", "active"):
+            return False
+        now = now or datetime.now(timezone.utc)
+        try:
+            close = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
+            # Nunca seleccionar la ronda futura ni conservar la anterior.
+            if close.tzinfo is None or not 0 < (close - now).total_seconds() <= 900:
+                return False
+            if market.get("open_time"):
+                opened = datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00"))
+                if opened.tzinfo is None or opened > now:
+                    return False
+            return True
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _has_target(market):
+        return any(_KalshiPublicReads._valid_strike(market.get(key))
+                   for key in ("floor_strike", "cap_strike"))
+
+    @staticmethod
+    def _valid_strike(value):
+        try:
+            return np.isfinite(float(value)) and float(value) > 1000
+        except (TypeError, ValueError):
+            return False
+
+    def _round_metadata(self):
+        # El target y el cierre verificados siguen siendo válidos para ESTE ticker.
+        # Las cotizaciones no: no reutilizar bids/asks ni precios de contrato antiguos.
+        keys = ("ticker", "event_ticker", "open_time", "close_time", "status",
+                "floor_strike", "cap_strike")
+        return {key: copy.deepcopy(self.current_round[key]) for key in keys
+                if key in self.current_round}
+
+    def current_market(self):
+        with self.lock:
+            if not self._is_current(self.current_round):
+                self.current_round = None
+            try:
+                if self.current_round:
+                    ticker = self.current_round["ticker"]
+                    market = self.get("/markets/" + ticker, ttl=2.0, timeout=6).get("market")
+                    if not isinstance(market, dict) or market.get("ticker") != ticker:
+                        raise ValueError("Kalshi devolvió una respuesta incompleta para la ronda actual.")
+                    market = copy.deepcopy(market)
+                    for key in ("open_time", "close_time", "event_ticker"):
+                        if not market.get(key) and key in self.current_round:
+                            market[key] = self.current_round[key]
+                    if not self._is_current(market):
+                        self.current_round = None
+                        return None
+                    market = copy.deepcopy(market)
+                    # Un detalle parcial no borra un strike ya verificado del mismo ticker.
+                    if not self._has_target(market):
+                        for key in ("floor_strike", "cap_strike"):
+                            if key in self.current_round:
+                                market[key] = self.current_round[key]
+                else:
+                    # El filtro status=open puede omitir una ronda que figura como active.
+                    # Acotar por cierre y validar estado/horario localmente.
+                    minute = int(datetime.now(timezone.utc).timestamp()) // 60 * 60
+                    data = self.get("/markets", params={"limit": 100,
+                                    "series_ticker": "KXBTC15M",
+                                    "min_close_ts": minute,
+                                    "max_close_ts": minute + 960}, ttl=2.0, timeout=10)
+                    markets = [m for m in data.get("markets", []) if self._is_current(m)]
+                    if not markets:
+                        return None
+                    markets.sort(key=lambda m: str(m["close_time"]))
+                    market = copy.deepcopy(markets[0])
+                    if not self._has_target(market):
+                        ticker = market["ticker"]
+                        detail = self.get("/markets/" + ticker, ttl=2.0, timeout=6).get("market")
+                        if not isinstance(detail, dict) or detail.get("ticker") != ticker:
+                            raise ValueError("Kalshi no entregó el detalle de la ronda actual.")
+                        market = detail
+                if not self._is_current(market):
+                    self.current_round = None
+                    return None
+                if not self._has_target(market):
+                    raise ValueError("La ronda actual todavía no entregó un target verificable.")
+                self.current_round = copy.deepcopy(market)
+                return copy.deepcopy(market)
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status in (404, 410) or not self._is_current(self.current_round):
+                    self.current_round = None
+                    raise
+                # El reloj se calcula desde close_time, nunca desde un contador guardado.
+                result = self._round_metadata()
+                result["_round_refresh_error"] = str(exc)
+                return result
 
     def get(self, path, params=None, ttl=2.0, timeout=6):
         params = dict(params or {})
@@ -1239,6 +1339,8 @@ class _KalshiPublicReads:
                     self.retry_at = time.monotonic() + delay
                 response.raise_for_status()
                 payload = response.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Kalshi devolvió una respuesta incompleta.")
             except (requests.RequestException, ValueError) as exc:
                 # Los errores tampoco se vuelven a consultar por cada sesión.
                 if len(self.failures) >= 256:
@@ -1259,17 +1361,17 @@ class _KalshiPublicReads:
                         remaining = (close - datetime.now(timezone.utc)).total_seconds()
                         if remaining > 0:
                             effective_ttl = min(effective_ttl, remaining)
-                        else:
-                            effective_ttl = 0.0
                     except (KeyError, TypeError, ValueError):
                         pass
             self.cache[key] = (time.monotonic() + effective_ttl, copy.deepcopy(payload))
             return payload
 
 
-@st.cache_resource
+@st.cache_resource(validate=lambda reader: callable(getattr(reader, "current_market", None)) and hasattr(reader, "current_round"))
 def _kalshi_public_reads():
-    return _KalshiPublicReads()
+    # Cambiar el cuerpo también invalida el recurso de versiones anteriores.
+    reader = _KalshiPublicReads()
+    return reader
 
 
 def _kalshi_public_json(path, params=None, ttl=2.0, timeout=6):
@@ -1584,14 +1686,7 @@ def get_btc_live_price():
 # =========================================================
 
 def get_kalshi_btc_market():
-    data = _kalshi_public_json("/markets", params={
-        "limit": 100, "status": "open", "series_ticker": "KXBTC15M",
-    }, ttl=2.0, timeout=10)
-    markets = data.get("markets", [])
-    if not markets:
-        return None
-    markets.sort(key=lambda m: str(m.get("close_time") or "9999"))
-    return markets[0]
+    return _kalshi_public_reads().current_market()
 
 
 def get_event_ticker_from_market(market):
@@ -2448,7 +2543,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v5_shared_kalshi_reads"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3639,6 +3734,8 @@ def live_dashboard():
     try:
         market = get_kalshi_btc_market()
         kalshi_ok = market is not None
+        if market and market.get("_round_refresh_error"):
+            kalshi_error = market["_round_refresh_error"]
     except Exception as error:
         kalshi_ok = False
         kalshi_error = str(error)
@@ -3899,8 +3996,8 @@ def live_dashboard():
     if seconds_left is not None and seconds_left <= 0:
         final_status = "RESULTADO OFICIAL PENDIENTE"
         final_note = "El precio mostrado al terminar no confirma la liquidación del contrato."
-    final_distance = abs(distance) if distance is not None else 0.0
-    final_dist_pct = abs(distance_pct) if distance_pct is not None else 0.0
+    final_distance_label = f"${abs(distance):,.0f}" if distance is not None else "—"
+    final_dist_pct_label = f"{abs(distance_pct):.2f}%" if distance_pct is not None else "SIN TARGET"
     final_panel = f'''<div class="finalclose">
       <div class="finalgrid">
         <div class="finalcard motion"><div class="finaltitle">▥ &nbsp; MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motionrow">
@@ -3908,7 +4005,7 @@ def live_dashboard():
           <div><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
           <div><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
         </div><div class="finalnote">Cambio de precio en los últimos segundos.</div></div>
-        <div class="finalcard distance"><div class="finaltitle">▥ &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">${final_distance:,.0f}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct:.2f}%</div></div>
+        <div class="finalcard distance"><div class="finaltitle">▥ &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">{final_distance_label}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct_label}</div></div>
         <div class="finalcard speed"><div class="finaltitle">VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div><div class="finalnote">En los últimos 10 s.</div></div>
       </div>
       <div class="finalanalysis">
@@ -4046,7 +4143,10 @@ def live_dashboard():
             "Kalshi BTC live falló temporalmente; usando Coinbase."
         )
     if kalshi_error:
-        st.error("Error Kalshi: " + kalshi_error)
+        if market and market.get("_round_refresh_error"):
+            st.warning("Kalshi no pudo refrescar: se conserva el target verificado de esta ronda y se reintentará. Cotización de contrato no disponible.")
+        else:
+            st.error("Error Kalshi: " + kalshi_error)
 
 
 import zlib
