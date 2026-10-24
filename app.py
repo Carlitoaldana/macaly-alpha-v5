@@ -19,7 +19,7 @@ from email.utils import parsedate_to_datetime
 # =========================================================
 
 st.set_page_config(
-    page_title="BTC Signal v4.6.1",
+    page_title="ALPHA Experimental · BTC 15M",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -929,8 +929,8 @@ def new_round_state(ticker, seconds_left):
 # Solo guarda el estado de la ronda; NO cambia el cerebro.
 # =========================================================
 
-LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
-ROUND_STATE_DB = 'btc_signal_round_state_v2.db'
+LEGACY_ROUND_STATE_DB = 'alpha_experimental_round_state.db'
+ROUND_STATE_DB = 'alpha_experimental_round_state_v2.db'
 _ROUND_TRANSACTION = threading.local()
 
 
@@ -1058,8 +1058,8 @@ def _background_update_state(state, sig, market, seconds_left):
 # No modifica build_signal(), preseñal, lector, ballenas ni gráfico.
 # =========================================================
 
-LEGACY_HISTORY_DB = "btc_signal_history.db"
-HISTORY_DB = "btc_signal_history_v2.db"
+LEGACY_HISTORY_DB = "alpha_experimental_history.db"
+HISTORY_DB = "alpha_experimental_history_v2.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
@@ -2579,7 +2579,7 @@ def _background_get_live_price(market):
 # Stores one immutable decision-time snapshot per ticker.
 # Training labels must come from official Kalshi settlement.
 # =========================================================
-SHADOW_AI_DB = "alpha_ai_shadow.db"
+SHADOW_AI_DB = "alpha_experimental_shadow.db"
 SHADOW_FEATURES = ("rsi", "rsi3", "rsi5", "mom3", "mom5", "mom15", "vol_ratio",
                    "technical_score", "target_score", "adx", "macd3", "macd5",
                    "atr", "vwap_atr", "target_atr", "distance_pct")
@@ -3716,442 +3716,130 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
     return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars .sq-item{flex:1;min-width:0;text-align:center}.sq-bars i{display:block;height:7px;width:100%;background:#1d3038;border-radius:9px}.sq-bars .sq-item span{display:block;margin-top:7px;font-size:9px;line-height:1.25;color:#a5b6be;overflow-wrap:anywhere}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
 
 
+def experimental_model(sig):
+    """Índice heurístico propio; no es probabilidad calibrada ni motor Robin."""
+    votes = [
+        float(np.clip((sig.get('rsi', 50)-50)/12, -1, 1)),
+        float(np.clip(sig.get('mom3', 0)/.04, -1, 1)),
+        float(np.clip(sig.get('mom5', 0)/.06, -1, 1)),
+        float(np.clip(sig.get('vwap_atr', 0)/.5, -1, 1)),
+        1.0 if sig.get('macd1', 0)>0 else -1.0 if sig.get('macd1', 0)<0 else 0.0,
+        1.0 if sig.get('ema')=='BULL' else -1.0 if sig.get('ema')=='BEAR' else 0.0,
+    ]
+    edge = sum(votes)/len(votes)
+    side = 'UP' if edge >= .30 else 'DOWN' if edge <= -.30 else None
+    return side, int(round(50+45*abs(edge)))
+
+
+def experimental_decision(state, ticker, now, seconds_left, target, price, sig, whale, tape, valid=True):
+    """Tres condiciones independientes; una ronda nueva borra toda confirmación."""
+    if state.get('ticker') != ticker:
+        state.clear()
+        state['ticker'] = ticker
+    model, support = experimental_model(sig)
+    atr = max(float(sig.get('atr', 1)), 1)
+    distance = price-target if target is not None and price is not None else None
+    position = ('UP' if distance > .10*atr else 'DOWN' if distance < -.10*atr else None) if distance is not None else None
+    whale = whale or {}
+    # Solo operaciones observadas, sin inferir intenciones ni rellenar huecos.
+    recent = [x for x in tape if 0 <= now-float(x['t']) <= 30]
+    coverage = bool(recent and now-min(x['t'] for x in recent)>=10 and now-max(x['t'] for x in recent)<=10)
+    volume = float(whale.get('buy30', 0))+float(whale.get('sell30', 0))
+    flow = whale.get('flow_direction') if coverage and volume>=500000 and float(whale.get('flow_strength',0))>=.18 else None
+    flow = flow if flow in ('UP','DOWN') else None
+    directions = [model, position, flow]
+    count = sum(x==model for x in directions) if model else 0
+    ready = valid and ticker not in ('--','',None) and target is not None and seconds_left is not None and seconds_left>0
+    aligned = ready and model is not None and count==3
+    if not aligned:
+        state.update(pending=None, count=0, last=None, since=None, active=None)
+        if not ready: reason='Esperando datos actuales y target verificado de la ronda.'
+        elif not model: reason='El modelo aún no encuentra una dirección clara.'
+        elif position!=model: reason='BTC frente al target todavía no respalda '+model+'.'
+        elif not coverage: reason='Reuniendo operaciones recientes para validar el flujo.'
+        elif not flow: reason='Flujo comprador/vendedor sin predominio suficiente.'
+        else: reason='El flujo va en dirección contraria al modelo.'
+    else:
+        if state.get('pending')!=model or state.get('last') is None or now-state['last']>15 or now-state['last']<0:
+            state.update(pending=model,count=1,last=now,since=now,active=None)
+        elif now-state['last']>=2:
+            state['count']=min(3,state['count']+1);state['last']=now
+        if state['count']>=3 and now-state['since']>=4:
+            state['active']=model
+            reason='Modelo, BTC frente al target y flujo coinciden con datos recientes.'
+        else:reason=f"Tres condiciones alineadas; comprobando continuidad ({state['count']}/3 lecturas)."
+    return dict(direction=state.get('active'), model=model, support=support, position=position, flow=flow, count=count if ready else 0, reason=reason)
+
+
+def render_experimental_panel(result, price, target, seconds_left, ticker, valid):
+    import html
+    escape=lambda x:html.escape(str(x))
+    side=result['direction'];color='#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#9eafbb'
+    def row(label, direction):
+        tone='#00dfb5' if direction=='UP' else '#ef5059' if direction=='DOWN' else '#9eafbb'
+        return f'<div class="ex-row"><span>{label}</span><b style="color:{tone}">{direction or "NEUTRAL / SIN DATOS"}</b></div>'
+    bars=''.join('<i style="background:'+('#00dfb5' if result['model']=='UP' else '#ef5059')+'"></i>' if i<result['count'] else '<i></i>' for i in range(3))
+    target_label=f'${target:,.2f}' if target is not None else '—'
+    price_label=f'${price:,.2f}' if price is not None else '—'
+    model_color='#00dfb5' if result['model']=='UP' else '#ef5059' if result['model']=='DOWN' else '#9eafbb'
+    return f'''<style>
+    .ex-wrap{{font-family:system-ui,sans-serif;color:#edf5f8;background:#06121a;padding:22px;border:1px solid #20665f;border-radius:20px;max-width:880px;margin:auto}}.ex-head{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #233039;padding:0 0 22px;gap:10px}}.ex-brand{{color:#00dfb5;font-size:12px;font-weight:800;letter-spacing:2px}}.ex-title{{font-size:25px;font-weight:800;margin-top:8px}}.ex-live{{color:#00dfb5;font-size:12px;white-space:nowrap}}.ex-card{{background:#0b1821;border:1px solid #263640;border-radius:20px;padding:24px;margin-top:18px}}.ex-label{{font-size:12px;font-weight:800;letter-spacing:1.6px;color:#8c9faa}}.ex-main{{font-size:44px;line-height:1.2;font-weight:850;margin:16px 0 12px}}.ex-note{{color:#a9bbc5;font-size:14px;line-height:1.5}}.ex-number{{font-size:29px;font-weight:800;margin-top:15px}}.ex-bars{{display:flex;gap:9px;margin-top:22px}}.ex-bars i{{height:9px;border-radius:8px;flex:1;background:#24323b}}.ex-row{{display:flex;justify-content:space-between;gap:12px;padding:19px 15px;margin-top:12px;border:1px solid #263640;border-radius:13px;font-size:13px;color:#a9bbc5}}.ex-row b{{text-align:right}}.ex-small{{margin-top:20px;color:#8295a3;font-size:11px;line-height:1.5;overflow-wrap:anywhere}}@media(max-width:450px){{.ex-wrap{{padding:16px}}.ex-card{{padding:21px}}.ex-main{{font-size:36px}}.ex-title{{font-size:22px}}}}
+    </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA EXPERIMENTAL · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
+    <section class="ex-card"><div class="ex-label">SEÑAL EXPERIMENTAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
+    <section class="ex-card"><div class="ex-label">APOYO DEL MODELO PROPIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if valid else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
+    <section class="ex-card"><div class="ex-label">CONFIRMACIONES A FAVOR DEL MODELO</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div></section>
+    <section class="ex-card"><div class="ex-label">TARGET</div><div class="ex-number">{target_label}</div><div class="ex-note">Kalshi · ronda vigente</div></section>
+    <section class="ex-card"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-number">{format_countdown(seconds_left)}</div><div class="ex-note">BTC actual: {price_label}</div></section>
+    {row('MODELO ALPHA',result['model'])}{row('BTC / TARGET',result['position'])}{row('FLUJO COMPRADOR / VENDEDOR',result['flow'])}
+    <div class="ex-small">{escape(ticker)} · Solo señales · Experimental<br>El flujo representa operaciones observadas en Coinbase; no identifica personas y puede ser incompleto.</div></div>'''
+
+
 @st.fragment(run_every="2s")
 def live_dashboard():
-    btc_error = ""
-    live_price_error = ""
-    kalshi_error = ""
-    kalshi_live_error = ""
-
-    try:
-        btc_df = add_indicators(get_btc_data())
-        btc_ok = True
-    except Exception as error:
-        btc_ok = False
-        btc_error = str(error)
-        btc_df = None
-
-    try:
-        market = get_kalshi_btc_market()
-        kalshi_ok = market is not None
-        if market and market.get("_round_refresh_error"):
-            kalshi_error = market["_round_refresh_error"]
-    except Exception as error:
-        kalshi_ok = False
-        kalshi_error = str(error)
-        market = None
-
-    try:
-        coinbase_live_price = get_btc_live_price()
-        coinbase_live_ok = True
-    except Exception as error:
-        coinbase_live_ok = False
-        live_price_error = str(error)
-        coinbase_live_price = (
-            float(btc_df.iloc[-1]["close"]) if btc_ok else None
-        )
-
-    kalshi_live_price = None
-    kalshi_live_ok = False
-
-    if market:
+    errors=[];market=None;btc_df=None;price=None;whale=None;sig={};source='COINBASE'
+    try:market=get_kalshi_btc_market()
+    except Exception as exc:errors.append('Kalshi: '+str(exc))
+    try:btc_df=add_indicators(get_btc_data())
+    except Exception as exc:errors.append('Velas: '+str(exc))
+    try:price=get_btc_live_price()
+    except Exception as exc:errors.append('Precio en vivo: '+str(exc))
+    try:whale=get_coinbase_whale_flow()
+    except Exception as exc:errors.append('Flujo: '+str(exc))
+    ticker=market.get('ticker','--') if market else '--'
+    target=get_target_from_market(market);seconds_left=get_seconds_remaining(market)
+    now=datetime.now(timezone.utc)
+    valid=btc_df is not None and price is not None and market is not None and _KalshiPublicReads._is_current(market,now) and target is not None
+    if valid:
+        candle_age=(pd.Timestamp(now)-btc_df.iloc[-1]['time']).total_seconds()
+        observations=getattr(_PRICE_OBSERVATIONS,'values',{})
+        valid=-5<=candle_age<=120 and -5<=now.timestamp()-observations.get('COINBASE',0)<=LIVE_PRICE_MAX_AGE
+    if valid:
+        try:sig=_signal_engine_without_trace(btc_df,target,seconds_left,price,whale=None)
+        except Exception as exc:valid=False;errors.append('Modelo: '+str(exc))
+    state=st.session_state.setdefault('alpha_experimental_confirmation_v1',{})
+    result=experimental_decision(state,ticker,now.timestamp(),seconds_left,target,price,sig,whale,st.session_state.get('whale_flow_tape',[]) if whale is not None else [],valid)
+    if not valid:result.update(model=None,position=None,flow=None)
+    sig['up_probability'] = result['support'] if result['model']=='UP' else 100-result['support'] if result['model']=='DOWN' else 50
+    sig['down_probability'] = 100-sig['up_probability']
+    panel_html=render_experimental_panel(result,price,target,seconds_left,ticker,valid)
+    panel_data=json.dumps(panel_html,ensure_ascii=False).replace('<','\\u003c')
+    st.html('<script>window.__alphaUpdatePanel('+panel_data+');</script>',unsafe_allow_javascript=True)
+    if btc_df is not None:
+        chart_timeframe=st.radio('Temporalidad del gráfico',['1m','3m','5m','15m','1h','4h','1D'],horizontal=True,key='chart_timeframe',label_visibility='collapsed')
         try:
-            kalshi_live_price = get_kalshi_live_btc(market)
-            kalshi_live_ok = True
-        except Exception as error:
-            kalshi_live_error = str(error)
-
-    if kalshi_live_price is not None:
-        live_btc_price = kalshi_live_price
-        source = "KALSHI LIVE"
-    else:
-        live_btc_price = coinbase_live_price
-        source = (
-            "COINBASE"
-            if coinbase_live_ok else
-            "COINBASE CANDLE" if live_btc_price is not None else "SIN DATOS"
-        )
-
-    if market:
-        ticker = market.get("ticker", "--")
-        target = get_target_from_market(market)
-        seconds_left = get_seconds_remaining(market)
-    else:
-        ticker = "--"
-        target = None
-        seconds_left = None
-
-    # Una sola lectura de Whale Flow por ciclo; la misma alimenta el panel.
-    try:
-        whale = get_coinbase_whale_flow()
-    except Exception:
-        whale = None
-
-    if btc_ok:
-        sig = build_signal(
-            btc_df, target, seconds_left, live_btc_price, source, whale=whale
-        )
-    else:
-        _TRACE_CONTEXT.build_id = None
-        _TRACE_CONTEXT.build_payload = None
-        sig = {
-            "data_valid": False,
-            "data_error": btc_error,
-            "price": live_btc_price if live_btc_price is not None else 0,
-            "candle_price": 0,
-            "rsi": 50,
-            "mom3": 0,
-            "mom5": 0,
-            "mom15": 0,
-            "vol_ratio": 0,
-            "ema": "N/A",
-            "technical_score": 0,
-            "target_score": 0,
-            "final_score": 0,
-            "distance": None,
-            "distance_pct": None,
-            "momentum": "NEUTRAL",
-            "up_probability": 50,
-            "down_probability": 50,
-        }
-
-    round_signal = process_round_signal(
-        ticker, sig, market, seconds_left
-    )
-    # Cinta live de segundos para el Lector de Cierre.
-    update_micro_tape(ticker, live_btc_price, source)
-    micro = micro_reading()
-    reader = closing_reader(sig, round_signal, seconds_left, micro)
-    if not btc_ok:
-        reader = {**reader, "percent":0, "headline":"SIN DATOS ACTUALES",
-                  "note":"No se puede validar la señal hasta recuperar las velas."}
-    reader_percent_label = f"{reader['percent']}%" if reader.get("direction") else "—"
-    if round_signal.get("decision") not in ("UP", "DOWN"):
-        reader_percent_label = "—"
-    if seconds_left is not None and seconds_left <= 0:
-        # El reloj y el precio instantáneo no prueban la liquidación oficial.
-        reader = {**reader, "percent": 0,
-                  "headline": "RONDA TERMINADA · RESULTADO PENDIENTE",
-                  "note": "Esperando verificación del resultado oficial de Kalshi."}
-        reader_percent_label = "—"
-
-    # Whale Flow: panel visual y apoyo opcional a candidatura en el laboratorio.
-    # No se consulta por segunda vez ni modifica las confirmaciones temporales.
-
-    state = round_signal.get("round_state")
-    active = (
-        state.get("active_direction")
-        if state and btc_ok
-        else None
-    )
-
-    # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
-    try:
-        order_book = get_coinbase_order_book()
-    except Exception:
-        order_book = None
-    order_flow = get_order_flow_advisory(whale)
-
-    if active == "UP":
-        accent = "#00dfb5"
-        glow = "rgba(0,223,181,.46)"
-        soft = "rgba(0,223,181,.10)"
-        hero = "↑ UP"
-        confidence = sig["up_probability"]
-    elif active == "DOWN":
-        accent = "#e64b4b"
-        glow = "rgba(230,75,75,.45)"
-        soft = "rgba(230,75,75,.10)"
-        hero = "↓ DOWN"
-        confidence = sig["down_probability"]
-    else:
-        accent = "#38bdf8"
-        glow = "rgba(56,189,248,.30)"
-        soft = "rgba(56,189,248,.09)"
-        hero = None
-        confidence = max(
-            sig["up_probability"], sig["down_probability"]
-        )
-
-    market_live = kalshi_ok and live_btc_price is not None
-
-    distance = sig["distance"]
-    distance_pct = sig.get("distance_pct")
-    up = int(sig["up_probability"])
-    down = int(sig["down_probability"])
-    target_text = f"${target:,.0f}" if target is not None else "--"
-    countdown = format_countdown(seconds_left)
-
-    if distance is None:
-        distance_text, distance_sub = "--", "SIN TARGET"
-        distance_color = "#94a3b8"
-    else:
-        distance_text = f"${abs(distance):,.0f}"
-        distance_sub = f"{abs(distance_pct):.2f}%"
-        distance_color = "#00dfb5" if distance > 0 else "#e64b4b" if distance < 0 else "#94a3b8"
-    first_signal = (state.get("first_direction") if state else None) or "--"
-    first_time = "--"
-    if state and state.get("first_signal_time"):
-        signal_dt = state["first_signal_time"]
-        if signal_dt.tzinfo is None:
-            signal_dt = signal_dt.replace(tzinfo=timezone.utc)
-        first_time = signal_dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p")
-
-    # Etiqueta visual en español; el motor conserva internamente BULL/BEAR.
-    ema_display = "ALCISTA" if sig.get("ema") == "BULL" else "BAJISTA" if sig.get("ema") == "BEAR" else sig.get("ema", "N/A")
-
-    # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
-    # las probabilidades oficiales.
-    pre = build_presignal(sig, seconds_left)
-    pre_direction = pre["direction"]
-    pre_percent = pre["percent"]
-
-    if pre_direction == "UP":
-        pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
-        pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE UP"
-    elif pre_direction == "DOWN":
-        pre_color, pre_bg, pre_glow = "#e64b4b", "rgba(104,25,37,.28)", "rgba(230,75,75,.20)"
-        pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE DOWN"
-    else:
-        pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
-        pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
-        pre_label = "NEUTRAL"
-
-    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
-    pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
-
-    pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
-      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
-      <div class="prebar"><b style="width:{pre_percent}%"></b></div>
-      <div class="prenote">{pre_note}</div>
-    </section>'''
-
-    if active == "UP":
-        hero_arrow, hero_word = "", "UP"
-        btc_delta = f"{sig['mom3']:+.2f}%"
-    elif active == "DOWN":
-        hero_arrow, hero_word = "", "DOWN"
-        btc_delta = f"{sig['mom3']:+.2f}%"
-    else:
-        hero_arrow, hero_word = "•", "ESPERANDO"
-        btc_delta = f"{sig['mom3']:+.2f}%"
-
-    ema_class = "green" if sig["ema"] == "BULL" else "red"
-    rsi_class = "green" if sig["rsi"] >= 55 else "red" if sig["rsi"] <= 45 else ""
-    mom_class = "green" if sig["mom3"] > 0 else "red" if sig["mom3"] < 0 else ""
-    time_pct = max(0, min(100, int((seconds_left or 0) / 900 * 100)))
-
-    # Panel de cierre de últimos segundos — solo lectura; NO cambia la señal principal.
-    c30 = float(micro.get("change_30s", 0.0) or 0.0)
-    c10 = float(micro.get("change_10s", 0.0) or 0.0)
-    c5 = float(micro.get("change_5s", 0.0) or 0.0)
-    motion_labels = {}
-    for window in (5, 10, 30):
-        value = micro.get(f"change_{window}s")
-        motion_labels[window] = "—" if value is None else f"{'↑' if value > 0 else '↓' if value < 0 else '→'}<br>{value:+.0f}"
-    speed_ready = micro.get("change_10s") is not None
-    speed10 = c10 / 10.0
-    speed_word = "SUBIENDO" if speed10 > 0.15 else "BAJANDO" if speed10 < -0.15 else "ESTABLE"
-    speed_arrow = "↑" if speed10 > 0.15 else "↓" if speed10 < -0.15 else "→"
-    speed_value = f"{speed10:+.1f}/s" if speed_ready else "—"
-    if not speed_ready:
-        speed_word, speed_arrow = "REUNIENDO DATOS", ""
-    speed_color = "#00dfb5" if speed10 > 0.15 else "#e64b4b" if speed10 < -0.15 else "#94a3b8"
-    market_side = "UP" if (distance or 0) > 0 else "DOWN" if (distance or 0) < 0 else "NEUTRAL"
-    abs_final_distance = abs(distance or 0)
-
-    # En el tramo final, tiempo + posición REAL frente al target mandan en este cuadro.
-    # Así no muestra "CIERRE MUY DISPUTADO" solo porque la señal vieja o la velocidad
-    # contradigan el lado que realmente está ganando a segundos del cierre.
-    if seconds_left is not None and seconds_left <= 60 and market_side != "NEUTRAL":
-        if active in ("UP", "DOWN") and market_side != active:
-            final_status = f"GIRO FINAL HACIA {market_side}"
-        else:
-            final_status = f"VENTAJA FINAL {market_side}"
-        final_note = (
-            f"Quedan {seconds_left}s · BTC está ${abs_final_distance:,.0f} "
-            f"{'arriba' if distance > 0 else 'abajo'} del target · "
-            f"ahora favorece {market_side}."
-        )
-    elif active in ("UP", "DOWN"):
-        if market_side == active and ((active == "UP" and speed10 >= -0.15) or (active == "DOWN" and speed10 <= 0.15)):
-            final_status = f"AÚN FAVORABLE A {active}"
-            final_note = f"El precio se mantiene {'sobre' if active == 'UP' else 'bajo'} el target, con presión inmediata controlada."
-        elif market_side != "NEUTRAL" and market_side != active and abs_final_distance >= 5:
-            final_status = f"GIRO HACIA {market_side}"
-            final_note = f"BTC está al otro lado del target y la lectura actual favorece {market_side}."
-        else:
-            final_status = f"AÚN FAVORABLE A {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA CLARA"
-            final_note = "La lectura sigue el lado actual del target y el movimiento reciente."
-    else:
-        final_status = f"VENTAJA FINAL {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA FINAL"
-        final_note = "Lectura independiente basada en distancia, tiempo restante y movimiento de los últimos segundos."
-    if seconds_left is None or seconds_left > 60:
-        # Fuera del tramo final, esto describe posición, no pronostica cierre.
-        final_status = f"POSICIÓN ACTUAL {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA ACTUAL"
-        final_note = "Posición actual frente al target; todavía no es una lectura del cierre final."
-    if seconds_left is not None and seconds_left <= 0:
-        final_status = "RESULTADO OFICIAL PENDIENTE"
-        final_note = "El precio mostrado al terminar no confirma la liquidación del contrato."
-    final_distance_label = f"${abs(distance):,.0f}" if distance is not None else "—"
-    final_dist_pct_label = f"{abs(distance_pct):.2f}%" if distance_pct is not None else "SIN TARGET"
-    final_panel = f'''<div class="finalclose">
-      <div class="finalgrid">
-        <div class="finalcard motion"><div class="finaltitle">▥ &nbsp; MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motionrow">
-          <div><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
-          <div><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
-          <div><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
-        </div><div class="finalnote">Cambio de precio en los últimos segundos.</div></div>
-        <div class="finalcard distance"><div class="finaltitle">▥ &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">{final_distance_label}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct_label}</div></div>
-        <div class="finalcard speed"><div class="finaltitle">VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div><div class="finalnote">En los últimos 10 s.</div></div>
-      </div>
-      <div class="finalanalysis">
-        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b>{final_status}</b><span>{final_note}</span></div></div>
-        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
-      </div>
-    </div>'''
-
-    # Advertencia compacta únicamente visual; usa el aviso existente del motor.
-    weakness_html = (
-        '<div class="weakness-inline" role="status">⚠ ' +
-        html.escape(round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
-        '</div>'
-        if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
-    )
-
-    panel_html = f"""
-<div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
-  <header class="rhead">
-    <div class="rtitle">BTC Signal</div>
-    <div class="rver">v4.6.1</div>
-    <a class="gear" href="?page=settings" target="_self" aria-label="Ajustes">⚙</a>
-    <div class="rlive"><i></i>{'Mercado en vivo' if market_live else 'Conexión parcial'}</div>
-  </header>
-
-  <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}">
-    <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
-    <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
-  </section>
-
-  {weakness_html}
-
-  {pre_html}
-
-  <div class="rgrid">
-    <div class="rcard keycard">
-      <div class="bigicon btcicon">₿</div>
-      <div><div class="rlabel">BTC</div><div class="rvalue">${sig["price"]:,.0f}</div>
-      <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
-    </div>
-    <div class="rcard keycard">
-      <div class="bigicon targeticon">◎</div>
-      <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
-    </div>
-    <div class="rcard keycard">
-      <div class="bars" style="--accent:{distance_color}"><b></b><b></b><b></b></div>
-      <div><div class="rlabel">DISTANCIA AL TARGET</div><div class="rvalue" style="color:{distance_color}">{distance_text}</div>
-      <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
-    </div>
-    <div class="rcard keycard">
-      <div class="clock">◷</div>
-      <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
-      <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
-    </div>
-  </div>
-
-  <section class="rcard probs">
-    <div class="rlabel">APOYO CALCULADO · UP / DOWN</div>
-    <div class="pbar"><div class="pup" style="width:{up}%">{up}%</div><div class="pdown" style="width:{down}%">{down}%</div></div>
-    <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
-  </section>
-
-  <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{reader['note']}</small></div>
-    <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
-    {final_panel}
-  </section>
-
-
-
-
-  <section class="rcard tech">
-    <div class="techhead"><span>DETALLES TÉCNICOS</span><span>⌃</span></div>
-    <div class="techrow">
-      <div><small>1ª SEÑAL</small><b style="color:var(--accent)">{first_signal}</b><i>{first_time}</i></div>
-      <div><small>KALSHI · PRECIO</small><b>{f"{round_signal['entry_price'] * 100:.0f}¢" if round_signal['entry_price'] is not None else "—"}</b><i>{round_signal["entry_quality"]}</i></div>
-      <div><small>EMA</small><b class="{ema_class}">{ema_display}</b><i>9 / 21</i></div>
-      <div><small>RSI</small><b class="{rsi_class}">{sig["rsi"]:.0f}</b><i>14</i></div>
-      <div><small>MOMENTUM</small><b class="{mom_class}">{sig["mom3"]:+.2f}</b><i>3 MIN</i></div>
-    </div>
-  </section>
-
-  <footer><span>BTC SIGNAL v4.6.1 &nbsp; | &nbsp; DISEÑADO PARA TRADERS REALES</span><span>MENOS RUIDO. MÁS RESULTADOS.</span></footer>
-</div>
-<div class="ticker">{ticker} • SCORE {sig["final_score"]:+.2f}</div>
-"""
-    # Cambia solo texto y atributos, manteniendo nodos existentes.
-    # La UI vive fuera del fragmento; este fragmento sigue calculando cada 2 s.
-    panel_data = json.dumps(panel_html, ensure_ascii=False).replace("<", "\\u003c")
-    st.html(
-        "<script>window.__alphaUpdatePanel(" + panel_data + ");</script>",
-        unsafe_allow_javascript=True,
-    )
-
-    # Panel neón: capa visual independiente. No altera el motor de señales.
-    if btc_ok:
-        chart_timeframe = st.radio(
-            "Temporalidad del gráfico",
-            ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
-            horizontal=True, key="chart_timeframe", label_visibility="collapsed",
-        )
-        try:
-            chart_df = btc_df if chart_timeframe in ("1m", "3m", "5m") else _neon_chart_history(chart_timeframe)
-            chart_html = render_neon_chart(
-                chart_df, coinbase_live_price if coinbase_live_ok else None,
-                target, active, chart_timeframe, sig, whale, market, btc_df,
-            )
-            # Keep the chart in its permanent host outside this 2-second fragment.
-            # Send only new JSON payload; never recreate the iframe on each refresh.
-            chart_payload = _neon_payload(
-                chart_df, coinbase_live_price if coinbase_live_ok else None,
-                target, active, chart_timeframe, sig, whale, market, btc_df,
-            )
-            st.session_state["_alpha_chart_html_initial"] = chart_html
-            payload_script = json.dumps(chart_payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
-            st.html(
-                "<script>window.__alphaNextChart=" + payload_script + ";"
-                "if(window.__alphaPushChart)window.__alphaPushChart(window.__alphaNextChart);</script>",
-                unsafe_allow_javascript=True,
-            )
-        except Exception:
-            st.warning("No se pudo cargar esta temporalidad. Prueba 1m o vuelve a seleccionarla.")
-
-    if target is None and kalshi_ok:
-        st.warning(
-            "Kalshi está conectado, pero esta ronda no entregó un target numérico."
-        )
-    if btc_error:
-        st.error("Error Coinbase velas: " + btc_error)
-    if live_price_error and live_btc_price is None:
-        st.warning("Coinbase live: " + live_price_error)
-    if kalshi_live_error and coinbase_live_price is not None:
-        st.warning(
-            "Kalshi BTC live falló temporalmente; usando Coinbase."
-        )
-    if kalshi_error:
-        if market and market.get("_round_refresh_error"):
-            st.warning("Kalshi no pudo refrescar: se conserva el target verificado de esta ronda y se reintentará. Cotización de contrato no disponible.")
-        else:
-            st.error("Error Kalshi: " + kalshi_error)
+            chart_df=btc_df if chart_timeframe in ('1m','3m','5m') else _neon_chart_history(chart_timeframe)
+            chart_html=render_neon_chart(chart_df,price,target,result['direction'],chart_timeframe,sig,whale,market,btc_df)
+            chart_payload=_neon_payload(chart_df,price,target,result['direction'],chart_timeframe,sig,whale,market,btc_df)
+            st.session_state['_alpha_chart_html_initial']=chart_html
+            payload_script=json.dumps(chart_payload,ensure_ascii=False,allow_nan=False).replace('<','\\u003c')
+            st.html('<script>window.__alphaNextChart='+payload_script+';if(window.__alphaPushChart)window.__alphaPushChart(window.__alphaNextChart);</script>',unsafe_allow_javascript=True)
+        except Exception as exc:errors.append('Gráfica: '+str(exc))
+    for error in errors:st.caption(error)
 
 
 import zlib
 
-SIGNAL_TRACE_DB = "btc_signal_decisions.db"
+SIGNAL_TRACE_DB = "alpha_experimental_decisions.db"
 _TRACE_CONTEXT = threading.local()
 
 
@@ -4527,10 +4215,9 @@ _ALPHA_STABLE_PANEL = r"""
 """
 
 # Inicia una sola vez el registrador autónomo continuo.
-start_continuous_history_worker()
-start_history_verifier()
 
-page = str(st.query_params.get("page", "signal"))
+
+page = "signal"
 if page == "signal_trace":
     render_signal_trace_page()
 elif page == "settings":
