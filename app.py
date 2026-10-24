@@ -3752,7 +3752,7 @@ def experimental_model(frame, price, target, seconds_left, now):
         trend='UP' if drift>.12*volatility else 'DOWN' if drift<-.12*volatility else None
         position=None  # La posición frente al target se calcula solo para mostrarla.
         return dict(valid=True,up=up,model=direction,trend=trend,position=position,
-                    support=int(round(max(up,100-up))),forecast=forecast,volatility=volatility)
+                    support=int(round(max(up,100-up))),forecast=forecast,volatility=volatility,price=float(price))
     except (ValueError,TypeError,KeyError,IndexError) as exc:
         return {'valid':False,'error':'No se pudo validar el contexto: '+str(exc)}
 
@@ -3779,13 +3779,34 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
     up=reading['up'];active=state.get('active')
     candidate='UP' if up>=68 else 'DOWN' if up<=32 else None
     desired=candidate
-    # Una señal activa tolera pérdida parcial de apoyo; no se retira por un tick.
+    # Debilitamiento y giro usan evidencia distinta de la entrada inicial.
     if active:
         support=up if active=='UP' else 100-up
-        if candidate==active or (candidate is None and support>=55):
-            desired=active;reset_pending()
-        elif candidate is None:
-            desired='RETIRAR'
+        opposite='DOWN' if active=='UP' else 'UP'
+        price=reading.get('price')
+        volatility=reading.get('volatility')
+        if price is not None and volatility is not None and volatility>0:
+            peak=state.get('direction_extreme') or price
+            peak=max(peak,price) if active=='UP' else min(peak,price)
+            state['direction_extreme']=peak
+            retreat=(peak-price if active=='UP' else price-peak)/volatility
+        else:
+            retreat=0
+        weakening=support<55
+        state['weakening']=weakening
+        if candidate==opposite:
+            # Un giro necesita contexto contrario y desplazamiento normalizado.
+            if reading.get('trend')==opposite and retreat>=0.6:
+                desired=opposite
+            else:
+                desired=active
+        elif weakening:
+            # Retirar exige evidencia contraria y desplazamiento, no un reloj.
+            desired='RETIRAR' if reading.get('model')==opposite and reading.get('trend')==opposite and retreat>=0.35 else active
+        else:
+            desired=active
+        if desired==active:
+            reset_pending()
     stamp=float(observed_at) if observed_at is not None else now
     new_observation=stamp>state.get('last_observation',-1)
     if new_observation:state['last_observation']=stamp
@@ -3793,15 +3814,19 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
         if state.get('pending')!=desired or now-state.get('last',now)>15:
             reset_pending()
             if new_observation:state.update(pending=desired,count=1,since=now,last=now)
-        elif new_observation and now-state.get('last',now)>=2:
+        elif new_observation:
             state['count']=min(3,state.get('count',0)+1);state['last']=now
-        if state.get('count',0)>=3 and now-state.get('since',now)>=4:
-            state['active']=None if desired=='RETIRAR' else desired;reset_pending()
+        if state.get('count',0)>=3:
+            state['active']=None if desired=='RETIRAR' else desired
+            state['direction_extreme']=reading.get('price')
+            state['weakening']=False
+            reset_pending()
     elif desired is None:reset_pending()
     active=state.get('active')
     if active:
         if state.get('pending')=='RETIRAR':reason=active+' perdiendo respaldo; comprobando si el debilitamiento persiste.'
         elif state.get('pending') in ('UP','DOWN'):reason='Señal '+active+' activa; evaluando posible cambio a '+state['pending']+'.'
+        elif state.get('weakening'):reason=active+' perdiendo fuerza; el giro contrario aún no tiene respaldo suficiente.'
         else:reason='Se mantiene '+active+': el movimiento del precio conserva respaldo.'
     elif state.get('pending') in ('UP','DOWN'):
         reason='Comprobando '+state['pending']+f" en precios nuevos ({state['count']}/3 lecturas)."
@@ -3815,7 +3840,7 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     def row(label, direction):
         tone='#00dfb5' if direction=='UP' else '#ef5059' if direction=='DOWN' else '#9eafbb'
         return f'<div class="ex-row"><span>{label}</span><b style="color:{tone}">{direction or ('NEUTRAL' if valid else 'SIN DATOS')}</b></div>'
-    bars=''.join('<i style="background:'+('#00dfb5' if result['model']=='UP' else '#ef5059')+'"></i>' if i<result['count'] else '<i></i>' for i in range(3))
+    bars=''.join('<i style="background:'+('#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#00dfb5' if result['model']=='UP' else '#ef5059' if result['model']=='DOWN' else '#9eafbb')+'"></i>' if i<result['count'] else '<i></i>' for i in range(3))
     target_label=f'${target:,.2f}' if target is not None else '—'
     price_label=f'${price:,.2f}' if price is not None else '—'
     model_color='#00dfb5' if result['model']=='UP' else '#ef5059' if result['model']=='DOWN' else '#9eafbb'
@@ -3824,7 +3849,7 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
     <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
     <section class="ex-card"><div class="ex-label">FUERZA DIRECCIONAL DEL PRECIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
-    <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Tres lecturas nuevas, separadas por al menos 2 segundos.</div></section>
+    <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Tres lecturas nuevas; sin espera mínima por reloj. Retirada y giro requieren contexto contrario y retroceso frente a la volatilidad. Las barras muestran la señal activa o la candidatura.</div></section>
     <section class="ex-card"><div class="ex-label">TARGET</div><div class="ex-number">{target_label}</div><div class="ex-note">Kalshi · ronda vigente</div></section>
     <section class="ex-card"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-number">{format_countdown(seconds_left)}</div><div class="ex-note">BTC actual: {price_label}</div></section>
     {row('DIRECCIÓN DEL PRECIO',result['model'])}{row('BTC / TARGET',result['position'])}{row('CONTEXTO DE VARIOS MINUTOS',result['flow'])}
