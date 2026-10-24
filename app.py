@@ -3759,22 +3759,41 @@ def experimental_model(frame, price, target, seconds_left, now):
 
 def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None):
     """Entrada/flip en tres observaciones; retirada sostenida, sin fijar dirección."""
-    if state.get('ticker')!=ticker:
-        state.clear();state['ticker']=ticker
+    def audit(event, detail):
+        events=state.setdefault('events',[])
+        events.append(dict(at=now,event=event,detail=detail,ticker=state.get('ticker')))
+        del events[:-100]
+        state['last_event']=detail
     def reset_pending():
         state.update(pending=None,count=0,since=None,last=None)
-    if seconds_left is not None and seconds_left<=0:
-        state.clear();state['ticker']=ticker
-        return dict(direction=None,model=None,support=None,position=None,flow=None,count=0,valid=False,reason='Ronda terminada; esperando el nuevo target.')
-    ready=reading.get('valid',False) and ticker not in ('--','',None) and seconds_left is not None
+    known_ticker=ticker not in ('--','',None)
+    round_valid=known_ticker and seconds_left is not None and reading.get('round_valid',True)
+    if round_valid and state.get('ticker')!=ticker:
+        events=state.get('events',[])
+        state.clear();state.update(ticker=ticker,events=events)
+        audit('ROUND_CHANGED','Nueva ronda verificada: '+str(ticker))
+    if round_valid:
+        state['round_deadline']=now+max(0,seconds_left)
+    deadline=state.get('round_deadline')
+    expired=(round_valid and seconds_left<=0) or (deadline is not None and now>=deadline)
+    if expired:
+        if state.get('active'):
+            audit('ROUND_ENDED','Señal retirada: terminó la ronda verificada.')
+        state['active']=None;reset_pending()
+        return dict(direction=None,model=None,support=None,position=None,flow=None,count=0,valid=False,reason='Ronda terminada; esperando una nueva ronda verificada.')
+    ready=reading.get('valid',False) and round_valid
     if not ready:
         reset_pending()
-        if now-state.get('last_valid',now)>20:state['active']=None
         old=state.get('active')
+        if not state.get('data_suspended'):
+            audit('DATA_SUSPENDED','Lectura suspendida por datos incompletos; estado conservado.')
+        state['data_suspended']=True
         return dict(direction=None,model=None,support=None,position=None,flow=None,count=0,valid=False,
-                    reason=reading.get('error','Esperando datos actuales.')+(' Señal previa '+old+' suspendida hasta recuperar datos.' if old else ''))
-    if now-state.get('last_valid',now)>20 or now<state.get('last_valid',now):
-        state['active']=None;reset_pending()
+                    reason=reading.get('error','Esperando datos actuales.')+(' Última señal confirmada: '+old+'; suspendida, no retirada por giro.' if old else ''))
+    if state.pop('data_suspended',False):
+        audit('DATA_RESUMED','Datos recuperados en la misma ronda; reevaluando la señal conservada.')
+    if now<state.get('last_valid',now):
+        reset_pending()
     state['last_valid']=now
     up=reading['up'];active=state.get('active')
     candidate='UP' if up>=68 else 'DOWN' if up<=32 else None
@@ -3802,7 +3821,7 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
                 desired=active
         elif weakening:
             # Retirar exige evidencia contraria y desplazamiento, no un reloj.
-            desired='RETIRAR' if reading.get('model')==opposite and reading.get('trend')==opposite and retreat>=0.35 else active
+            desired='RETIRAR' if reading.get('model')==opposite and reading.get('trend')==opposite and retreat>=0.75 else active
         else:
             desired=active
         if desired==active:
@@ -3815,8 +3834,11 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
             reset_pending()
             if new_observation:state.update(pending=desired,count=1,since=now,last=now)
         elif new_observation:
-            state['count']=min(3,state.get('count',0)+1);state['last']=now
-        if state.get('count',0)>=3:
+            state['count']=min(5,state.get('count',0)+1);state['last']=now
+        required_readings=5 if desired=='RETIRAR' else 3
+        if state.get('count',0)>=required_readings:
+            detail=('Señal retirada: cinco lecturas contrarias, contexto opuesto y retroceso ≥0.75 veces la volatilidad.' if desired=='RETIRAR' else 'Señal '+desired+' confirmada con tres lecturas nuevas.')
+            audit('WITHDRAWN' if desired=='RETIRAR' else 'CONFIRMED',detail)
             state['active']=None if desired=='RETIRAR' else desired
             state['direction_extreme']=reading.get('price')
             state['weakening']=False
@@ -3830,7 +3852,7 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
         else:reason='Se mantiene '+active+': el movimiento del precio conserva respaldo.'
     elif state.get('pending') in ('UP','DOWN'):
         reason='Comprobando '+state['pending']+f" en precios nuevos ({state['count']}/3 lecturas)."
-    else:reason='El precio todavía no muestra fuerza direccional suficiente.'
+    else:reason=state.get('last_event','El precio todavía no muestra fuerza direccional suficiente.')
     return dict(direction=active,model=reading['model'],support=reading['support'],position=reading['position'],flow=reading['trend'],count=3 if active else state.get('count',0),valid=True,reason=reason)
 
 def render_experimental_panel(result, price, target, seconds_left, ticker, valid):
@@ -3849,7 +3871,7 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
     <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
     <section class="ex-card"><div class="ex-label">FUERZA DIRECCIONAL DEL PRECIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
-    <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Tres lecturas nuevas; sin espera mínima por reloj. Retirada y giro requieren contexto contrario y retroceso frente a la volatilidad. Las barras muestran la señal activa o la candidatura.</div></section>
+    <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Entrada y giro: tres lecturas nuevas. Retirada: cinco lecturas contrarias y retroceso suficiente. Sin espera mínima por reloj. Las barras muestran la señal activa o la candidatura.</div></section>
     <section class="ex-card"><div class="ex-label">TARGET</div><div class="ex-number">{target_label}</div><div class="ex-note">Kalshi · ronda vigente</div></section>
     <section class="ex-card"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-number">{format_countdown(seconds_left)}</div><div class="ex-note">BTC actual: {price_label}</div></section>
     {row('DIRECCIÓN DEL PRECIO',result['model'])}{row('BTC / TARGET',result['position'])}{row('CONTEXTO DE VARIOS MINUTOS',result['flow'])}
@@ -3876,7 +3898,9 @@ def live_dashboard():
         observations=getattr(_PRICE_OBSERVATIONS,'values',{})
         valid=-5<=now.timestamp()-observations.get('COINBASE',0)<=LIVE_PRICE_MAX_AGE
     reading=experimental_model(btc_df,price,target,seconds_left,now)
+    round_valid=market is not None and _KalshiPublicReads._is_current(market,now)
     if not valid:reading={'valid':False,'error':'Precio en vivo o ronda no disponible; esperando datos actuales.'}
+    reading['round_valid']=round_valid
     state=st.session_state.setdefault('alpha_price_strength_v4',{})
     observations=getattr(_PRICE_OBSERVATIONS,'values',{})
     result=experimental_decision(state,ticker,now.timestamp(),seconds_left,reading,observations.get('COINBASE'))
