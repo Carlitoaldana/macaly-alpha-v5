@@ -3861,7 +3861,7 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     side=result['direction'];color='#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#9eafbb'
     def row(label, direction):
         tone='#00dfb5' if direction=='UP' else '#ef5059' if direction=='DOWN' else '#9eafbb'
-        return f'<div class="ex-row"><span>{label}</span><b style="color:{tone}">{direction or ('NEUTRAL' if valid else 'SIN DATOS')}</b></div>'
+        return f'<div class="ex-row"><span>{label}</span><b style="color:{tone}">{direction or ('SIN DATOS' if label=='BTC / TARGET' and price is None else 'NEUTRAL' if valid else 'SIN DATOS')}</b></div>'
     bars=''.join('<i style="background:'+('#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#00dfb5' if result['model']=='UP' else '#ef5059' if result['model']=='DOWN' else '#9eafbb')+'"></i>' if i<result['count'] else '<i></i>' for i in range(3))
     target_label=f'${target:,.2f}' if target is not None else '—'
     price_label=f'${price:,.2f}' if price is not None else '—'
@@ -3882,7 +3882,7 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     <div class="ex-round-cell"><div class="ex-label">TARGET</div><div class="ex-round-value">{target_label}</div><div class="ex-round-note">Kalshi · ronda vigente</div></div>
     <div class="ex-round-cell"><div class="ex-label">DISTANCIA AL TARGET</div><div class="ex-round-value ex-distance-value" style="color:{distance_color}"><span class="ex-distance-bars" aria-hidden="true">{distance_bars}</span><span>{distance_label}</span></div><div class="ex-round-note" style="color:{distance_color}">{distance_note}</div></div>
     <div class="ex-round-cell"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-round-value">{format_countdown(seconds_left)}</div><div class="ex-round-note">Para cerrar la ronda</div></div>
-    <div class="ex-round-cell"><div class="ex-label">BTC ACTUAL</div><div class="ex-round-value">{price_label}</div><div class="ex-round-note">Precio de referencia</div></div>
+    <div class="ex-round-cell"><div class="ex-label">BTC ACTUAL · KALSHI</div><div class="ex-round-value">{price_label}</div><div class="ex-round-note">{'Kalshi en vivo' if price is not None else 'Kalshi no disponible'}</div></div>
     </section>
     {row('DIRECCIÓN DEL PRECIO',result['model'])}{row('BTC / TARGET',result['position'])}{row('CONTEXTO DE VARIOS MINUTOS',result['flow'])}
     <div class="ex-small">{escape(ticker)} · Solo señales<br>Lectura de dirección y fuerza del precio; target solo como referencia visual. No estima la probabilidad de cerrar sobre el target.</div></div>'''
@@ -3920,8 +3920,18 @@ def live_dashboard():
         for key in ('mom3','mom5','mom15'):
             value=btc_df.iloc[-1].get(key)
             sig[key]=float(value) if value is not None and pd.notna(value) else None
-    result['position']='UP' if price is not None and target is not None and price>target else 'DOWN' if price is not None and target is not None and price<target else None
-    panel_html=render_experimental_panel(result,price,target,seconds_left,ticker,valid)
+    # El resumen de Kalshi no mezcla el precio de Coinbase con su strike.
+    # Coinbase conserva su ruta independiente para el motor y la gráfica.
+    kalshi_display_price=None
+    if round_valid and target is not None:
+        try:
+            kalshi_display_price=get_kalshi_live_btc(market)
+            if not _KalshiPublicReads._is_current(market,datetime.now(timezone.utc)):
+                kalshi_display_price=None
+        except Exception as exc:
+            errors.append('Precio Kalshi para distancia no disponible: '+str(exc))
+    result['position']='UP' if kalshi_display_price is not None and target is not None and kalshi_display_price>target else 'DOWN' if kalshi_display_price is not None and target is not None and kalshi_display_price<target else None
+    panel_html=render_experimental_panel(result,kalshi_display_price,target,seconds_left,ticker,valid)
     panel_data=json.dumps(panel_html,ensure_ascii=False).replace('<','\\u003c')
     st.html('<script>window.__alphaUpdatePanel('+panel_data+');</script>',unsafe_allow_javascript=True)
     if btc_df is not None:
