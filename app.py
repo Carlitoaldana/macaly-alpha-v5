@@ -3717,36 +3717,43 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
 
 
 def experimental_model(sig):
-    """Índice heurístico propio; no es probabilidad calibrada ni motor Robin."""
-    votes = [
-        float(np.clip((sig.get('rsi', 50)-50)/12, -1, 1)),
-        float(np.clip(sig.get('mom3', 0)/.04, -1, 1)),
-        float(np.clip(sig.get('mom5', 0)/.06, -1, 1)),
-        float(np.clip(sig.get('vwap_atr', 0)/.5, -1, 1)),
-        1.0 if sig.get('macd1', 0)>0 else -1.0 if sig.get('macd1', 0)<0 else 0.0,
-        1.0 if sig.get('ema')=='BULL' else -1.0 if sig.get('ema')=='BEAR' else 0.0,
-    ]
-    edge = sum(votes)/len(votes)
-    side = 'UP' if edge >= .30 else 'DOWN' if edge <= -.30 else None
-    return side, int(round(50+45*abs(edge)))
+    """Lectura propia de trayectoria live; sin EMA, RSI ni rutas del principal."""
+    tape = sig.get('live_path', [])
+    if len(tape)<4 or tape[-1][0]-tape[0][0]<20:
+        return None, 50
+    if any(b[0]-a[0]>10 for a,b in zip(tape,tape[1:])):
+        return None, 50
+    changes=[b[1]-a[1] for a,b in zip(tape,tape[1:])]
+    net=tape[-1][1]-tape[0][1]
+    travel=sum(abs(x) for x in changes)
+    efficiency=abs(net)/max(travel,1e-8)
+    noise=travel/max(len(changes),1)
+    side=('UP' if net>0 else 'DOWN') if abs(net)>=max(2,1.25*noise) and efficiency>=.25 else None
+    return side,int(round(50+45*min(efficiency,1)))
 
 
 def experimental_decision(state, ticker, now, seconds_left, target, price, sig, whale, tape, valid=True):
-    """Tres condiciones independientes; una ronda nueva borra toda confirmación."""
+    """Tres condiciones de precio; una ronda nueva borra toda confirmación."""
     if state.get('ticker') != ticker:
         state.clear()
         state['ticker'] = ticker
-    model, support = experimental_model(sig)
-    atr = max(float(sig.get('atr', 1)), 1)
+    path=state.setdefault('live_path', [])
+    if not valid or price is None or (path and (now-path[-1][0]>10 or now<path[-1][0])):
+        path.clear()
+    if valid and price is not None and (not path or now-path[-1][0]>=2):
+        path.append([now,float(price)])
+    path[:]=[x for x in path if 0<=now-x[0]<=30]
+    model, support = experimental_model({'live_path':path})
     distance = price-target if target is not None and price is not None else None
-    position = ('UP' if distance > .10*atr else 'DOWN' if distance < -.10*atr else None) if distance is not None else None
-    whale = whale or {}
-    # Solo operaciones observadas, sin inferir intenciones ni rellenar huecos.
-    recent = [x for x in tape if 0 <= now-float(x['t']) <= 30]
-    coverage = bool(recent and now-min(x['t'] for x in recent)>=10 and now-max(x['t'] for x in recent)<=10)
-    volume = float(whale.get('buy30', 0))+float(whale.get('sell30', 0))
-    flow = whale.get('flow_direction') if coverage and volume>=500000 and float(whale.get('flow_strength',0))>=.18 else None
-    flow = flow if flow in ('UP','DOWN') else None
+    position = ('UP' if distance > 1 else 'DOWN' if distance < -1 else None) if distance is not None else None
+    recent=[x for x in path if 0<=now-x[0]<=10]
+    coverage=len(recent)>=3 and recent[-1][0]-recent[0][0]>=6
+    flow=None
+    if coverage:
+        net=recent[-1][1]-recent[0][1]
+        travel=sum(abs(b[1]-a[1]) for a,b in zip(recent,recent[1:]))
+        if abs(net)>=1 and abs(net)/max(travel,1e-8)>=.30:
+            flow='UP' if net>0 else 'DOWN'
     directions = [model, position, flow]
     count = sum(x==model for x in directions) if model else 0
     ready = valid and ticker not in ('--','',None) and target is not None and seconds_left is not None and seconds_left>0
@@ -3754,11 +3761,11 @@ def experimental_decision(state, ticker, now, seconds_left, target, price, sig, 
     if not aligned:
         state.update(pending=None, count=0, last=None, since=None, active=None)
         if not ready: reason='Esperando datos actuales y target verificado de la ronda.'
-        elif not model: reason='El modelo aún no encuentra una dirección clara.'
-        elif position!=model: reason='BTC frente al target todavía no respalda '+model+'.'
-        elif not coverage: reason='Reuniendo operaciones recientes para validar el flujo.'
-        elif not flow: reason='Flujo comprador/vendedor sin predominio suficiente.'
-        else: reason='El flujo va en dirección contraria al modelo.'
+        elif not model: reason='Reuniendo 20 s de precios continuos o trayectoria sin dirección clara.'
+        elif position!=model: reason='La posición frente al target todavía no respalda '+model+'.'
+        elif not coverage: reason='Reuniendo precios recientes para medir continuidad.'
+        elif not flow: reason='Movimiento reciente sin continuidad suficiente.'
+        else: reason='El movimiento reciente contradice la trayectoria.'
     else:
         if state.get('pending')!=model or state.get('last') is None or now-state['last']>15 or now-state['last']<0:
             state.update(pending=model,count=1,last=now,since=now,active=None)
@@ -3766,7 +3773,7 @@ def experimental_decision(state, ticker, now, seconds_left, target, price, sig, 
             state['count']=min(3,state['count']+1);state['last']=now
         if state['count']>=3 and now-state['since']>=4:
             state['active']=model
-            reason='Modelo, BTC frente al target y flujo coinciden con datos recientes.'
+            reason='Trayectoria, BTC frente al target y movimiento reciente coinciden.'
         else:reason=f"Tres condiciones alineadas; comprobando continuidad ({state['count']}/3 lecturas)."
     return dict(direction=state.get('active'), model=model, support=support, position=position, flow=flow, count=count if ready else 0, reason=reason)
 
@@ -3786,12 +3793,12 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     .ex-wrap{{font-family:system-ui,sans-serif;color:#edf5f8;background:#06121a;padding:22px;border:1px solid #20665f;border-radius:20px;max-width:880px;margin:auto}}.ex-head{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #233039;padding:0 0 22px;gap:10px}}.ex-brand{{color:#00dfb5;font-size:12px;font-weight:800;letter-spacing:2px}}.ex-title{{font-size:25px;font-weight:800;margin-top:8px}}.ex-live{{color:#00dfb5;font-size:12px;white-space:nowrap}}.ex-card{{background:#0b1821;border:1px solid #263640;border-radius:20px;padding:24px;margin-top:18px}}.ex-label{{font-size:12px;font-weight:800;letter-spacing:1.6px;color:#8c9faa}}.ex-main{{font-size:44px;line-height:1.2;font-weight:850;margin:16px 0 12px}}.ex-note{{color:#a9bbc5;font-size:14px;line-height:1.5}}.ex-number{{font-size:29px;font-weight:800;margin-top:15px}}.ex-bars{{display:flex;gap:9px;margin-top:22px}}.ex-bars i{{height:9px;border-radius:8px;flex:1;background:#24323b}}.ex-row{{display:flex;justify-content:space-between;gap:12px;padding:19px 15px;margin-top:12px;border:1px solid #263640;border-radius:13px;font-size:13px;color:#a9bbc5}}.ex-row b{{text-align:right}}.ex-small{{margin-top:20px;color:#8295a3;font-size:11px;line-height:1.5;overflow-wrap:anywhere}}@media(max-width:450px){{.ex-wrap{{padding:16px}}.ex-card{{padding:21px}}.ex-main{{font-size:36px}}.ex-title{{font-size:22px}}}}
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
     <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
-    <section class="ex-card"><div class="ex-label">APOYO DEL MODELO PROPIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if valid else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
-    <section class="ex-card"><div class="ex-label">CONFIRMACIONES A FAVOR DEL MODELO</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div></section>
+    <section class="ex-card"><div class="ex-label">FUERZA DE LA TRAYECTORIA</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if valid else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
+    <section class="ex-card"><div class="ex-label">CONFIRMACIONES DE LA DIRECCIÓN</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div></section>
     <section class="ex-card"><div class="ex-label">TARGET</div><div class="ex-number">{target_label}</div><div class="ex-note">Kalshi · ronda vigente</div></section>
     <section class="ex-card"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-number">{format_countdown(seconds_left)}</div><div class="ex-note">BTC actual: {price_label}</div></section>
-    {row('MODELO ALPHA',result['model'])}{row('BTC / TARGET',result['position'])}{row('FLUJO COMPRADOR / VENDEDOR',result['flow'])}
-    <div class="ex-small">{escape(ticker)} · Solo señales<br>El flujo representa operaciones observadas en Coinbase; no identifica personas y puede ser incompleto.</div></div>'''
+    {row('TRAYECTORIA DEL PRECIO',result['model'])}{row('BTC / TARGET',result['position'])}{row('CONTINUIDAD RECIENTE',result['flow'])}
+    <div class="ex-small">{escape(ticker)} · Solo señales<br>Lectura basada en precios recientes de Coinbase; no es una probabilidad de acierto.</div></div>'''
 
 
 @st.fragment(run_every="2s")
@@ -3803,20 +3810,16 @@ def live_dashboard():
     except Exception as exc:errors.append('Velas: '+str(exc))
     try:price=get_btc_live_price()
     except Exception as exc:errors.append('Precio en vivo: '+str(exc))
-    try:whale=get_coinbase_whale_flow()
-    except Exception as exc:errors.append('Flujo: '+str(exc))
+
     ticker=market.get('ticker','--') if market else '--'
     target=get_target_from_market(market);seconds_left=get_seconds_remaining(market)
     now=datetime.now(timezone.utc)
-    valid=btc_df is not None and price is not None and market is not None and _KalshiPublicReads._is_current(market,now) and target is not None
+    valid=price is not None and market is not None and _KalshiPublicReads._is_current(market,now) and target is not None
     if valid:
-        candle_age=(pd.Timestamp(now)-btc_df.iloc[-1]['time']).total_seconds()
         observations=getattr(_PRICE_OBSERVATIONS,'values',{})
-        valid=-5<=candle_age<=120 and -5<=now.timestamp()-observations.get('COINBASE',0)<=LIVE_PRICE_MAX_AGE
-    if valid:
-        try:sig=_signal_engine_without_trace(btc_df,target,seconds_left,price,whale=None)
-        except Exception as exc:valid=False;errors.append('Modelo: '+str(exc))
-    state=st.session_state.setdefault('alpha_experimental_confirmation_v1',{})
+        valid=-5<=now.timestamp()-observations.get('COINBASE',0)<=LIVE_PRICE_MAX_AGE
+    sig={'price':price, 'price_source':'COINBASE'}
+    state=st.session_state.setdefault('alpha_price_path_confirmation_v2',{})
     result=experimental_decision(state,ticker,now.timestamp(),seconds_left,target,price,sig,whale,st.session_state.get('whale_flow_tape',[]) if whale is not None else [],valid)
     if not valid:result.update(model=None,position=None,flow=None)
     sig['up_probability'] = result['support'] if result['model']=='UP' else 100-result['support'] if result['model']=='DOWN' else 50
