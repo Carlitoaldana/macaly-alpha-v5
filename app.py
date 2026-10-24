@@ -3718,8 +3718,8 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
 
 def experimental_model(frame, price, target, seconds_left, now):
     """Estimación estadística heurística del cierre; no probabilidad calibrada."""
-    if frame is None or price is None or target is None or seconds_left is None:
-        return {'valid':False, 'error':'Esperando precio, velas y target de la ronda.'}
+    if frame is None or price is None:
+        return {'valid':False, 'error':'Esperando precio y velas actuales.'}
     try:
         data=frame[['time','close']].copy().sort_values('time').drop_duplicates('time')
         data['time']=pd.to_datetime(data['time'],utc=True)
@@ -3733,23 +3733,24 @@ def experimental_model(frame, price, target, seconds_left, now):
             return {'valid':False,'error':'El contexto de velas no está actualizado.'}
         if not (closed['time'].diff().dropna()==pd.Timedelta(minutes=1)).all():
             return {'valid':False,'error':'Hay huecos en las velas; esperando contexto continuo.'}
-        if not all(np.isfinite(float(x)) for x in (price,target,seconds_left)) or price<=0 or target<=0:
-            return {'valid':False,'error':'Precio o target inválido.'}
+        if not all(np.isfinite(float(x)) for x in (price,)) or price<=0:
+            return {'valid':False,'error':'Precio inválido.'}
         changes=np.diff(prices)
         volatility=max(float(np.std(changes,ddof=1)),float(np.median(np.abs(changes-np.median(changes))))*1.4826,price*.00005)
         # Recortar saltos aislados; el movimiento live no redefine todo el contexto.
         clipped=np.clip(changes[-12:],-2*volatility,2*volatility)
         drift=float(.5*np.mean(clipped[-3:])+.5*np.mean(clipped))
         drift=float(np.clip(drift,-.75*volatility,.75*volatility))
-        minutes=max(1/60,min(float(seconds_left)/60,15))
-        forecast=price+drift*minutes
-        # Incorporar incertidumbre del movimiento y de la estimación de deriva.
-        uncertainty=volatility*math.sqrt(minutes+minutes*minutes/12)
-        z=(forecast-target)/max(uncertainty,1)
-        up=float(np.clip(50*(1+math.erf(z/math.sqrt(2))),5,95))
+        # Fuerza direccional: deriva reciente, eficiencia y desplazamiento live.
+        recent=changes[-12:]
+        efficiency=float(np.sum(recent)/max(np.sum(np.abs(recent)),1))
+        live_move=float(np.clip((price-prices[-1])/volatility,-2,2))
+        strength=1.5*drift/volatility+.8*efficiency+.35*live_move
+        up=float(np.clip(50+45*math.tanh(strength),5,95))
+        forecast=price+drift
         direction='UP' if up>=60 else 'DOWN' if up<=40 else None
         trend='UP' if drift>.12*volatility else 'DOWN' if drift<-.12*volatility else None
-        position='UP' if price>target else 'DOWN' if price<target else None
+        position=None  # La posición frente al target se calcula solo para mostrarla.
         return dict(valid=True,up=up,model=direction,trend=trend,position=position,
                     support=int(round(max(up,100-up))),forecast=forecast,volatility=volatility)
     except (ValueError,TypeError,KeyError,IndexError) as exc:
@@ -3801,10 +3802,10 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
     if active:
         if state.get('pending')=='RETIRAR':reason=active+' perdiendo respaldo; comprobando si el debilitamiento persiste.'
         elif state.get('pending') in ('UP','DOWN'):reason='Señal '+active+' activa; evaluando posible cambio a '+state['pending']+'.'
-        else:reason='Se mantiene '+active+': la estimación de cierre conserva respaldo frente al target.'
+        else:reason='Se mantiene '+active+': el movimiento del precio conserva respaldo.'
     elif state.get('pending') in ('UP','DOWN'):
         reason='Comprobando '+state['pending']+f" en precios nuevos ({state['count']}/3 lecturas)."
-    else:reason='La estimación de cierre todavía no tiene ventaja suficiente frente al target.'
+    else:reason='El precio todavía no muestra fuerza direccional suficiente.'
     return dict(direction=active,model=reading['model'],support=reading['support'],position=reading['position'],flow=reading['trend'],count=3 if active else state.get('count',0),valid=True,reason=reason)
 
 def render_experimental_panel(result, price, target, seconds_left, ticker, valid):
@@ -3822,12 +3823,12 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     .ex-wrap{{font-family:system-ui,sans-serif;color:#edf5f8;background:#06121a;padding:22px;border:1px solid #20665f;border-radius:20px;max-width:880px;margin:auto}}.ex-head{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #233039;padding:0 0 22px;gap:10px}}.ex-brand{{color:#00dfb5;font-size:12px;font-weight:800;letter-spacing:2px}}.ex-title{{font-size:25px;font-weight:800;margin-top:8px}}.ex-live{{color:#00dfb5;font-size:12px;white-space:nowrap}}.ex-card{{background:#0b1821;border:1px solid #263640;border-radius:20px;padding:24px;margin-top:18px}}.ex-label{{font-size:12px;font-weight:800;letter-spacing:1.6px;color:#8c9faa}}.ex-main{{font-size:44px;line-height:1.2;font-weight:850;margin:16px 0 12px}}.ex-note{{color:#a9bbc5;font-size:14px;line-height:1.5}}.ex-number{{font-size:29px;font-weight:800;margin-top:15px}}.ex-bars{{display:flex;gap:9px;margin-top:22px}}.ex-bars i{{height:9px;border-radius:8px;flex:1;background:#24323b}}.ex-row{{display:flex;justify-content:space-between;gap:12px;padding:19px 15px;margin-top:12px;border:1px solid #263640;border-radius:13px;font-size:13px;color:#a9bbc5}}.ex-row b{{text-align:right}}.ex-small{{margin-top:20px;color:#8295a3;font-size:11px;line-height:1.5;overflow-wrap:anywhere}}@media(max-width:450px){{.ex-wrap{{padding:16px}}.ex-card{{padding:21px}}.ex-main{{font-size:36px}}.ex-title{{font-size:22px}}}}
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
     <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
-    <section class="ex-card"><div class="ex-label">APOYO ESTIMADO AL CIERRE</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
+    <section class="ex-card"><div class="ex-label">FUERZA DIRECCIONAL DEL PRECIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
     <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Tres lecturas nuevas, separadas por al menos 2 segundos.</div></section>
     <section class="ex-card"><div class="ex-label">TARGET</div><div class="ex-number">{target_label}</div><div class="ex-note">Kalshi · ronda vigente</div></section>
     <section class="ex-card"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-number">{format_countdown(seconds_left)}</div><div class="ex-note">BTC actual: {price_label}</div></section>
-    {row('ESTIMACIÓN DE CIERRE',result['model'])}{row('BTC / TARGET',result['position'])}{row('CONTEXTO DE VARIOS MINUTOS',result['flow'])}
-    <div class="ex-small">{escape(ticker)} · Solo señales<br>Estimación basada en precio, movimiento de varios minutos y volatilidad hasta el cierre; no es una probabilidad calibrada.</div></div>'''
+    {row('DIRECCIÓN DEL PRECIO',result['model'])}{row('BTC / TARGET',result['position'])}{row('CONTEXTO DE VARIOS MINUTOS',result['flow'])}
+    <div class="ex-small">{escape(ticker)} · Solo señales<br>Lectura de dirección y fuerza del precio; target solo como referencia visual. No estima la probabilidad de cerrar sobre el target.</div></div>'''
 
 
 @st.fragment(run_every="2s")
@@ -3845,13 +3846,13 @@ def live_dashboard():
     ticker=market.get('ticker','--') if market else '--'
     target=get_target_from_market(market);seconds_left=get_seconds_remaining(market)
     now=datetime.now(timezone.utc)
-    valid=price is not None and market is not None and _KalshiPublicReads._is_current(market,now) and target is not None
+    valid=price is not None and market is not None and _KalshiPublicReads._is_current(market,now)
     if valid:
         observations=getattr(_PRICE_OBSERVATIONS,'values',{})
         valid=-5<=now.timestamp()-observations.get('COINBASE',0)<=LIVE_PRICE_MAX_AGE
     reading=experimental_model(btc_df,price,target,seconds_left,now)
     if not valid:reading={'valid':False,'error':'Precio en vivo o ronda no disponible; esperando datos actuales.'}
-    state=st.session_state.setdefault('alpha_closing_estimate_v3',{})
+    state=st.session_state.setdefault('alpha_price_strength_v4',{})
     observations=getattr(_PRICE_OBSERVATIONS,'values',{})
     result=experimental_decision(state,ticker,now.timestamp(),seconds_left,reading,observations.get('COINBASE'))
     valid=result['valid']
@@ -3860,6 +3861,7 @@ def live_dashboard():
         for key in ('mom3','mom5','mom15'):
             value=btc_df.iloc[-1].get(key)
             sig[key]=float(value) if value is not None and pd.notna(value) else None
+    result['position']='UP' if price is not None and target is not None and price>target else 'DOWN' if price is not None and target is not None and price<target else None
     panel_html=render_experimental_panel(result,price,target,seconds_left,ticker,valid)
     panel_data=json.dumps(panel_html,ensure_ascii=False).replace('<','\\u003c')
     st.html('<script>window.__alphaUpdatePanel('+panel_data+');</script>',unsafe_allow_javascript=True)
