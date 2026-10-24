@@ -19,7 +19,7 @@ from email.utils import parsedate_to_datetime
 # =========================================================
 
 st.set_page_config(
-    page_title="ALPHA Experimental · BTC 15M",
+    page_title="ALPHA · BTC 15M",
     page_icon="⚡",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -3387,7 +3387,7 @@ def render_early_reversal_panel(result):
     title = result.get("status", "OBSERVANDO")
     detail = result.get("detail", "")
     return f'''<section style="margin:12px 0;padding:18px;min-height:300px;display:flex;flex-direction:column;justify-content:center;border:1px solid {color};border-radius:18px;background:#0b1520">
-      <div style="font-size:13px;font-weight:900;color:#dce7f3">DETECTOR DE REVERSIÓN · EXPERIMENTAL</div>
+      <div style="font-size:13px;font-weight:900;color:#dce7f3">DETECTOR DE REVERSIÓN</div>
       <div style="margin-top:14px;font-size:24px;line-height:1.3;font-weight:950;color:{color}">{title}{' → ' + direction if direction else ''}</div>
       <div style="margin-top:14px;font-size:14px;line-height:1.5;color:#cbd5e1">{detail}</div>
       <div style="margin-top:18px;font-size:12px;line-height:1.5;color:#94a3b8">Alerta informativa, no orden de compra ni predicción garantizada. No cambia la señal oficial.</div>
@@ -3784,14 +3784,14 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     model_color='#00dfb5' if result['model']=='UP' else '#ef5059' if result['model']=='DOWN' else '#9eafbb'
     return f'''<style>
     .ex-wrap{{font-family:system-ui,sans-serif;color:#edf5f8;background:#06121a;padding:22px;border:1px solid #20665f;border-radius:20px;max-width:880px;margin:auto}}.ex-head{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #233039;padding:0 0 22px;gap:10px}}.ex-brand{{color:#00dfb5;font-size:12px;font-weight:800;letter-spacing:2px}}.ex-title{{font-size:25px;font-weight:800;margin-top:8px}}.ex-live{{color:#00dfb5;font-size:12px;white-space:nowrap}}.ex-card{{background:#0b1821;border:1px solid #263640;border-radius:20px;padding:24px;margin-top:18px}}.ex-label{{font-size:12px;font-weight:800;letter-spacing:1.6px;color:#8c9faa}}.ex-main{{font-size:44px;line-height:1.2;font-weight:850;margin:16px 0 12px}}.ex-note{{color:#a9bbc5;font-size:14px;line-height:1.5}}.ex-number{{font-size:29px;font-weight:800;margin-top:15px}}.ex-bars{{display:flex;gap:9px;margin-top:22px}}.ex-bars i{{height:9px;border-radius:8px;flex:1;background:#24323b}}.ex-row{{display:flex;justify-content:space-between;gap:12px;padding:19px 15px;margin-top:12px;border:1px solid #263640;border-radius:13px;font-size:13px;color:#a9bbc5}}.ex-row b{{text-align:right}}.ex-small{{margin-top:20px;color:#8295a3;font-size:11px;line-height:1.5;overflow-wrap:anywhere}}@media(max-width:450px){{.ex-wrap{{padding:16px}}.ex-card{{padding:21px}}.ex-main{{font-size:36px}}.ex-title{{font-size:22px}}}}
-    </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA EXPERIMENTAL · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
-    <section class="ex-card"><div class="ex-label">SEÑAL EXPERIMENTAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
+    </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
+    <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
     <section class="ex-card"><div class="ex-label">APOYO DEL MODELO PROPIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if valid else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
     <section class="ex-card"><div class="ex-label">CONFIRMACIONES A FAVOR DEL MODELO</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div></section>
     <section class="ex-card"><div class="ex-label">TARGET</div><div class="ex-number">{target_label}</div><div class="ex-note">Kalshi · ronda vigente</div></section>
     <section class="ex-card"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-number">{format_countdown(seconds_left)}</div><div class="ex-note">BTC actual: {price_label}</div></section>
     {row('MODELO ALPHA',result['model'])}{row('BTC / TARGET',result['position'])}{row('FLUJO COMPRADOR / VENDEDOR',result['flow'])}
-    <div class="ex-small">{escape(ticker)} · Solo señales · Experimental<br>El flujo representa operaciones observadas en Coinbase; no identifica personas y puede ser incompleto.</div></div>'''
+    <div class="ex-small">{escape(ticker)} · Solo señales<br>El flujo representa operaciones observadas en Coinbase; no identifica personas y puede ser incompleto.</div></div>'''
 
 
 @st.fragment(run_every="2s")
