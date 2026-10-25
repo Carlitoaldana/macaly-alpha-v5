@@ -3906,10 +3906,93 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
         reason+=f" Cierre {close_side_label}: margen ${reading['distance']:+,.2f}, {int(reading['seconds_left'])} s restantes; movimiento {reading['model'] or 'NEUTRAL'}."
     return dict(direction=active,model=reading['model'],support=reading['support'],position=reading['position'],flow=reading['trend'],count=3 if active else state.get('count',0),valid=True,reason=reason)
 
+def experimental_exit_watch(state, ticker, direction, reading, observed_at, now):
+    """Aviso independiente de agotamiento. No escribe en el estado del motor.
+
+    Compara apoyo del movimiento y retroceso desde el extremo de la señal.
+    Requiere dos observaciones nuevas; no calcula P&L ni ejecuta operaciones.
+    """
+    def notice(status, title, note, color):
+        return dict(status=status,title=title,note=note,color=color)
+    unknown=lambda:notice('NO_DATA','ALERTA · SIN DATOS',
+                          'Esperando datos actuales para evaluar el impulso.','#9eafbb')
+    if ticker in (None,'','--') or not reading.get('round_valid',False):
+        state['suspended']=True
+        return unknown()
+    if not reading.get('valid',False):
+        state['suspended']=True
+        return unknown()
+    if direction not in ('UP','DOWN'):
+        state.clear()
+        return notice('WAITING','ALERTA · EN ESPERA',
+                      'Se activa al confirmarse una señal UP o DOWN.','#9eafbb')
+    try:
+        price=float(reading['price'])
+        volatility=float(reading['volatility'])
+        movement_up=float(reading.get('movement_up',reading['up']))
+        stamp=float(observed_at)
+        if not all(math.isfinite(x) for x in (price,volatility,movement_up,stamp,now)) or price<=0 or volatility<=0 or not 0<=movement_up<=100 or not -5<=now-stamp<=LIVE_PRICE_MAX_AGE:
+            raise ValueError('Lectura de movimiento inválida.')
+    except (ValueError,TypeError,KeyError):
+        state['suspended']=True
+        return unknown()
+    support=movement_up if direction=='UP' else 100.0-movement_up
+    reset=state.get('ticker')!=ticker or state.get('direction')!=direction
+    if reset:
+        state.clear()
+        state.update(ticker=ticker,direction=direction,extreme=price,
+                     peak_support=support,level=0,pending=None,count=0,last_stamp=None)
+    last_stamp=state.get('last_stamp')
+    if last_stamp is not None and (stamp<last_stamp or stamp-last_stamp>15):
+        # Un hueco no constituye evidencia nueva de continuidad o giro.
+        state.update(pending=None,count=0,level=0,extreme=price,peak_support=support)
+    if state.pop('suspended',False):
+        state.update(pending=None,count=0)
+    new_observation=last_stamp is None or stamp>last_stamp
+    if new_observation:
+        extreme=state['extreme']
+        extreme=max(extreme,price) if direction=='UP' else min(extreme,price)
+        retreat=max(0.0,(extreme-price if direction=='UP' else price-extreme)/volatility)
+        peak_support=max(state['peak_support'],support)
+        drop=peak_support-support
+        opposite='DOWN' if direction=='UP' else 'UP'
+        # El aviso usa el movimiento, no el sesgo al cierre ni estar sobre el target.
+        turn=(support<=45 and retreat>=0.25) or (reading.get('model')==opposite and retreat>=0.35)
+        weakening=support<60 or (drop>=12 and retreat>=0.15)
+        desired=2 if turn else 1 if weakening else 0
+        if desired==state['level']:
+            state.update(pending=None,count=0)
+        else:
+            count=state.get('count',0)+1 if state.get('pending')==desired else 1
+            state.update(pending=desired,count=count)
+            if count>=2:
+                state.update(level=desired,pending=None,count=0)
+                if desired==0:peak_support=support
+        state.update(extreme=extreme,peak_support=peak_support,last_stamp=stamp)
+    level=state.get('level',0)
+    if level==2:
+        return notice('TURN','ALERTA · '+direction+' POSIBLE GIRO',
+                      direction+': presión contraria y retroceso detectados. Revisa tu salida.','#ef5059')
+    if level==1:
+        return notice('WEAKENING','ALERTA · '+direction+' PERDIENDO FUERZA',
+                      direction+': el impulso pierde respaldo. Revisa tu salida.','#f2b84b')
+    if state.get('pending') in (1,2) or support<60:
+        return notice('WATCH','VIGILANDO DEBILIDAD · '+direction,
+                      'Esperando otra lectura nueva para confirmar el aviso.','#9eafbb')
+    return notice('CLEAR','IMPULSO CON RESPALDO · '+direction,
+                  'Sin alerta de agotamiento confirmada.','#00dfb5')
+
+
 def render_experimental_panel(result, price, target, seconds_left, ticker, valid):
     import html
     escape=lambda x:html.escape(str(x))
     side=result['direction'];color='#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#9eafbb'
+    exit_watch=result.get('exit_watch',{})
+    exit_color=exit_watch.get('color','#9eafbb')
+    exit_html=(f'<section class="ex-exit" role="status" aria-live="polite" style="border-color:{exit_color}">'
+               f'<div class="ex-label">VIGILANCIA DE SALIDA</div>'
+               f'<div class="ex-exit-title" style="color:{exit_color}">{escape(exit_watch.get("title",""))}</div>'
+               f'<div class="ex-exit-note">{escape(exit_watch.get("note",""))}</div></section>') if exit_watch.get('status') in ('WEAKENING','TURN') else ''
     def row(label, direction):
         tone='#00dfb5' if direction=='UP' else '#ef5059' if direction=='DOWN' else '#9eafbb'
         return f'<div class="ex-row"><span>{label}</span><b style="color:{tone}">{direction or ('SIN DATOS' if label=='BTC / TARGET' and price is None else 'NEUTRAL' if valid else 'SIN DATOS')}</b></div>'
@@ -3924,9 +4007,11 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     distance_bars=''.join(f'<i style="height:{height}px"></i>' for height in ((8,14,20) if distance is not None and distance>0 else (20,14,8) if distance is not None and distance<0 else (10,10,10)))
     return f'''<style>
     .ex-wrap{{font-family:system-ui,sans-serif;color:#edf5f8;background:#06121a;padding:22px;border:1px solid #20665f;border-radius:20px;max-width:880px;margin:auto}}.ex-head{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #233039;padding:0 0 22px;gap:10px}}.ex-brand{{color:#00dfb5;font-size:12px;font-weight:800;letter-spacing:2px}}.ex-title{{font-size:25px;font-weight:800;margin-top:8px}}.ex-live{{color:#00dfb5;font-size:12px;white-space:nowrap}}.ex-card{{background:#0b1821;border:1px solid #263640;border-radius:20px;padding:24px;margin-top:18px}}.ex-label{{font-size:12px;font-weight:800;letter-spacing:1.6px;color:#8c9faa}}.ex-main{{font-size:44px;line-height:1.2;font-weight:850;margin:16px 0 12px}}.ex-note{{color:#a9bbc5;font-size:14px;line-height:1.5}}.ex-number{{font-size:29px;font-weight:800;margin-top:15px}}.ex-bars{{display:flex;gap:9px;margin-top:22px}}.ex-bars i{{height:9px;border-radius:8px;flex:1;background:#24323b}}.ex-row{{display:flex;justify-content:space-between;gap:12px;padding:19px 15px;margin-top:12px;border:1px solid #263640;border-radius:13px;font-size:13px;color:#a9bbc5}}.ex-row b{{text-align:right}}.ex-small{{margin-top:20px;color:#8295a3;font-size:11px;line-height:1.5;overflow-wrap:anywhere}}@media(max-width:450px){{.ex-wrap{{padding:16px}}.ex-card{{padding:21px}}.ex-main{{font-size:36px}}.ex-title{{font-size:22px}}}}
+    .ex-exit{{background:#0b1821;border:1px solid;border-left-width:4px;border-radius:14px;padding:16px 18px;margin-top:12px}}.ex-exit-title{{font-size:17px;font-weight:850;line-height:1.35;margin-top:7px;overflow-wrap:anywhere}}.ex-exit-note{{font-size:13px;line-height:1.45;color:#a9bbc5;margin-top:5px}}
     .ex-round-grid{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 18px}}.ex-round-cell{{min-width:0;padding:0 0 18px}}.ex-round-cell:nth-child(n+3){{border-top:1px solid #263640;padding:18px 0 0}}.ex-round-cell .ex-label{{font-size:10px;letter-spacing:.8px}}.ex-round-value{{font-size:clamp(16px,4.8vw,25px);font-weight:800;line-height:1.3;margin:9px 0 5px;font-variant-numeric:tabular-nums;white-space:nowrap}}.ex-round-note{{font-size:11px;color:#8c9faa;line-height:1.5}}.ex-distance-value{{display:flex;align-items:center;gap:7px}}.ex-distance-bars{{display:inline-flex;align-items:flex-end;gap:3px;flex-shrink:0}}.ex-distance-bars i{{width:5px;background:currentColor;border-radius:2px}}
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
     <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
+    {exit_html}
     <section class="ex-card"><div class="ex-label">FUERZA DIRECCIONAL DEL PRECIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
     <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Entrada y giro: tres lecturas nuevas. Retirada: cinco lecturas contrarias con respaldo del movimiento o del cierre. Tiempo y distancia aportan contexto, sin fijar dirección. Las barras muestran la señal activa o la candidatura.</div></section>
     <section class="ex-card ex-round-grid" aria-label="Resumen de la ronda">
@@ -3985,6 +4070,9 @@ def live_dashboard():
     observations=getattr(_PRICE_OBSERVATIONS,'values',{})
     result=experimental_decision(state,ticker,now.timestamp(),seconds_left,reading,observations.get('COINBASE'))
     valid=result['valid']
+    # Estado propio del aviso: nunca modifica confirmaciones ni dirección oficial.
+    exit_state=st.session_state.setdefault('alpha_exit_watch_v1',{})
+    result['exit_watch']=experimental_exit_watch(exit_state,ticker,result['direction'],reading,observations.get('COINBASE'),now.timestamp())
     sig={'price':price,'price_source':'COINBASE','up_probability':reading.get('movement_up',reading.get('up',50)),'down_probability':100-reading.get('movement_up',reading.get('up',50))}
     if btc_df is not None and len(btc_df):
         for key in ('mom3','mom5','mom15'):
