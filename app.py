@@ -3983,6 +3983,57 @@ def experimental_exit_watch(state, ticker, direction, reading, observed_at, now)
                   'Sin alerta de agotamiento confirmada.','#00dfb5')
 
 
+def buying_selling_advantage(tape, now, available):
+    """Solo volumen ejecutado observado; lectura independiente del cerebro."""
+    import math
+    trades=[]
+    seen=set()
+    for item in tape:
+        try:
+            ident=str(item['id']);stamp=float(item['t']);amount=float(item['notional'])
+            side=item['side']
+            if (ident in seen or not math.isfinite(amount) or amount<=0
+                    or not math.isfinite(stamp) or not 0<=now-stamp<=30
+                    or side not in ('COMPRA','VENTA')):
+                continue
+            seen.add(ident);trades.append((stamp,amount,side))
+        except (KeyError,TypeError,ValueError):
+            continue
+    age=now-max((t[0] for t in trades),default=now-999)
+    if not available or age>10 or not trades:
+        return {'valid':False,'label':'SIN DATOS RECIENTES'}
+    windows={}
+    for seconds in (10,30):
+        selected=[t for t in trades if now-t[0]<=seconds]
+        buy=sum(t[1] for t in selected if t[2]=='COMPRA')
+        sell=sum(t[1] for t in selected if t[2]=='VENTA')
+        total=buy+sell
+        pct=100*buy/total if total else 50
+        windows[seconds]=dict(buy=buy,sell=sell,buy_pct=pct,sell_pct=100-pct,
+                              count=len(selected),delta=buy-sell)
+    pct=windows[10]['buy_pct']
+    label='VENTAJA COMPRADORA' if pct>55 else 'VENTAJA VENDEDORA' if pct<45 else 'EQUILIBRADO'
+    return dict(valid=True,label=label,windows=windows,age=age)
+
+def render_buying_selling_advantage(flow):
+    if not flow.get('valid'):
+        return '<section class="ex-card"><div class="ex-label">COMPRAS VS VENTAS · COINBASE</div><div class="ex-number">SIN DATOS RECIENTES</div><div class="ex-note">Esperando operaciones actuales.</div></section>'
+    short=flow['windows'][10];context=flow['windows'][30]
+    buy=short['buy_pct'];sell=short['sell_pct']
+    tone='#00dfb5' if buy>55 else '#ef5059' if buy<45 else '#9eafbb'
+    return f'''<section class="ex-card" aria-label="Presión compradora y vendedora">
+    <div class="ex-label">COMPRAS VS VENTAS · COINBASE</div>
+    <div class="ex-number" style="color:{tone}">{flow['label']}</div>
+    <div class="ex-note" style="display:flex;justify-content:space-between;gap:8px;margin-top:12px"><b style="color:#00dfb5">Compras {buy:.1f}%</b><b style="color:#ef5059">Ventas {sell:.1f}%</b></div>
+    <div style="position:relative;height:26px;border-radius:13px;overflow:hidden;margin:12px 0;background:#ef5059" role="meter" aria-label="Volumen de compras agresivas observado" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{buy:.1f}" aria-valuetext="Compras {buy:.1f} por ciento, ventas {sell:.1f} por ciento">
+    <span style="display:block;height:100%;width:{buy:.3f}%;background:linear-gradient(90deg,#008e78,#00dfb5);transition:width .8s ease-in-out"></span>
+    <span style="position:absolute;left:50%;top:0;height:100%;border-left:1px dashed #ffffff88"></span>
+    <span style="position:absolute;left:clamp(3px,{buy:.3f}%,calc(100% - 3px));top:2px;height:22px;width:4px;background:#fff;border-radius:3px;transform:translateX(-50%);box-shadow:0 0 8px #fff8;transition:left .8s ease-in-out"></span></div>
+    <div class="ex-note" style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#00dfb5">COMPRAS →</span><span style="color:#ef5059">← VENTAS</span></div>
+    <div class="ex-note">10 s · Compras {compact_usd(short['buy'])} · Ventas {compact_usd(short['sell'])}<br>30 s · Compras {context['buy_pct']:.1f}% · Ventas {context['sell_pct']:.1f}%</div>
+    <div class="ex-small" style="margin-top:10px">Volumen agresor observado en USD · muestra de operaciones BTC-USD.<br>Equilibrado: compras entre 45% y 55%. Última operación hace {flow['age']:.1f} s.<br>Puede omitir operaciones entre consultas. No es probabilidad ni señal UP/DOWN.</div></section>'''
+
+
 def render_experimental_panel(result, price, target, seconds_left, ticker, valid):
     import html
     escape=lambda x:html.escape(str(x))
@@ -4012,6 +4063,7 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
     <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
     {exit_html}
+    {render_buying_selling_advantage(result.get('buy_sell_advantage',{}))}
     <section class="ex-card"><div class="ex-label">FUERZA DIRECCIONAL DEL PRECIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
     <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Entrada y giro: tres lecturas nuevas. Retirada: cinco lecturas contrarias con respaldo del movimiento o del cierre. Tiempo y distancia aportan contexto, sin fijar dirección. Las barras muestran la señal activa o la candidatura.</div></section>
     <section class="ex-card ex-round-grid" aria-label="Resumen de la ronda">
@@ -4073,6 +4125,8 @@ def live_dashboard():
     # Estado propio del aviso: nunca modifica confirmaciones ni dirección oficial.
     exit_state=st.session_state.setdefault('alpha_exit_watch_v1',{})
     result['exit_watch']=experimental_exit_watch(exit_state,ticker,result['direction'],reading,observations.get('COINBASE'),now.timestamp())
+    result['buy_sell_advantage']=buying_selling_advantage(
+        st.session_state.get('whale_flow_tape',[]),now.timestamp(),whale is not None)
     sig={'price':price,'price_source':'COINBASE','up_probability':reading.get('movement_up',reading.get('up',50)),'down_probability':100-reading.get('movement_up',reading.get('up',50))}
     if btc_df is not None and len(btc_df):
         for key in ('mom3','mom5','mom15'):
