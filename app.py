@@ -4031,24 +4031,50 @@ def buying_selling_advantage(state, tape, now, available):
                 observed=now-state['first_stamp'],move=move)
 
 
-def estimate_price_control(state, price, observed_at, now):
+def estimate_price_control(state, price, observed_at, now, recent_trades=None):
     """Índice descriptivo del precio reciente, no atribución causal ni predicción."""
     import math
     try:
         price=float(price);stamp=float(observed_at)
-        if not math.isfinite(price) or price<=0 or not math.isfinite(stamp) or not 0<=now-stamp<=10:
+        if not math.isfinite(price) or price<=0 or not math.isfinite(stamp) or not -5<=now-stamp<=30:
             raise ValueError('Datos antiguos')
     except (TypeError,ValueError,OverflowError):
         return dict(valid=False,label='PRECIO SIN ACTUALIZAR')
     samples=state.setdefault('samples',[])
+    # Arrancar/recuperar con operaciones reales recientes, sin inventar precios.
+    # Una muestra por bloque de 2 s evita dar peso extra a ráfagas de trades.
+    if len(samples)<3 or samples[-1][0]-samples[0][0]<20:
+        buckets={}
+        for item in recent_trades or []:
+            try:
+                t=float(item['t']);p=float(item['price'])
+                if math.isfinite(t) and math.isfinite(p) and p>0 and 0<=stamp-t<=60:
+                    key=math.floor(t/2)
+                    if key not in buckets or t>buckets[key][0]:
+                        buckets[key]=(t,p)
+            except (KeyError,ValueError,TypeError,OverflowError):
+                continue
+        for t,p in samples:
+            if 0<=stamp-t<=60:
+                key=math.floor(t/2)
+                if key not in buckets or t>buckets[key][0]:
+                    buckets[key]=(t,p)
+        if buckets:
+            samples[:]=sorted(buckets.values())
     previous=samples[-1][0] if samples else None
-    if previous is not None and (stamp<previous or stamp-previous>15):
+    # Una respuesta fuera de orden no debe destruir observaciones más nuevas.
+    if previous is not None and stamp<previous:
+        if now-previous>30:
+            return dict(valid=False,label='PRECIO SIN ACTUALIZAR')
+        stamp,price=samples[-1]
+    if previous is not None and stamp-previous>30:
         samples.clear();state.pop('smooth',None);previous=None
     is_new=previous is None or stamp>previous
     if is_new:
         samples.append((stamp,price))
     samples[:]=[(t,p) for t,p in samples if stamp-t<=60]
-    if len(samples)<6 or samples[-1][0]-samples[0][0]<20:
+    # Tres observaciones en >=20 s también permiten leer ciclos de red lentos.
+    if len(samples)<3 or samples[-1][0]-samples[0][0]<20:
         return dict(valid=False,label='REUNIENDO LECTURA DEL PRECIO')
     prices=[p for _,p in samples]
     move=prices[-1]-prices[0]
@@ -4097,7 +4123,10 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     import html
     escape=lambda x:html.escape(str(x))
     side=result['direction'];color='#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#9eafbb'
-    side_label='UP ↑' if side=='UP' else 'DOWN ↓' if side=='DOWN' else 'ESPERANDO'
+    side_label=side or 'ESPERANDO'
+    arrow_rotation='rotate(180 50 50)' if side=='DOWN' else ''
+    signal_arrow=(f'<svg class="ex-hero-arrow" viewBox="0 0 100 100" aria-hidden="true"><path transform="{arrow_rotation}" d="M50 3 L97 47 H78 V95 Q78 98 75 98 H25 Q22 98 22 95 V47 H3 Z" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>') if side in ('UP','DOWN') else ''
+    signal_class='ex-hero-signal' if side in ('UP','DOWN') else 'ex-main'
     model_label='UP ↑' if result['model']=='UP' else 'DOWN ↓' if result['model']=='DOWN' else 'NEUTRAL'
     exit_watch=result.get('exit_watch',{})
     exit_color=exit_watch.get('color','#9eafbb')
@@ -4119,10 +4148,11 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     distance_bars=''.join(f'<i style="height:{height}px"></i>' for height in ((8,14,20) if distance is not None and distance>0 else (20,14,8) if distance is not None and distance<0 else (10,10,10)))
     return f'''<style>
     .ex-wrap{{font-family:system-ui,sans-serif;color:#edf5f8;background:#06121a;padding:22px;border:1px solid #20665f;border-radius:20px;max-width:880px;margin:auto}}.ex-head{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #233039;padding:0 0 22px;gap:10px}}.ex-brand{{color:#00dfb5;font-size:12px;font-weight:800;letter-spacing:2px}}.ex-title{{font-size:25px;font-weight:800;margin-top:8px}}.ex-live{{color:#00dfb5;font-size:12px;white-space:nowrap}}.ex-card{{background:#0b1821;border:1px solid #263640;border-radius:20px;padding:18px;margin-top:14px}}.ex-label{{font-size:12px;font-weight:800;letter-spacing:1.6px;color:#8c9faa}}.ex-main{{font-size:44px;line-height:1.2;font-weight:850;margin:16px 0 12px}}.ex-note{{color:#a9bbc5;font-size:14px;line-height:1.5}}.ex-number{{font-size:29px;font-weight:800;margin-top:15px}}.ex-bars{{display:flex;gap:9px;margin-top:22px}}.ex-bars i{{height:9px;border-radius:8px;flex:1;background:#24323b}}.ex-row{{display:flex;justify-content:space-between;gap:12px;padding:19px 15px;margin-top:12px;border:1px solid #263640;border-radius:13px;font-size:13px;color:#a9bbc5}}.ex-row b{{text-align:right}}.ex-small{{margin-top:20px;color:#8295a3;font-size:11px;line-height:1.5;overflow-wrap:anywhere}}@media(max-width:450px){{.ex-wrap{{padding:16px}}.ex-card{{padding:17px}}.ex-main{{font-size:36px}}.ex-title{{font-size:22px}}}}
+    .ex-hero-signal{{display:flex;align-items:center;justify-content:center;gap:12px;margin:20px 0 14px;font-size:clamp(44px,10vw,68px);line-height:1;font-weight:850;letter-spacing:-1px;text-shadow:0 0 12px currentColor,0 0 30px color-mix(in srgb,currentColor 50%,transparent)}}.ex-hero-arrow{{display:block;width:clamp(62px,17vw,92px);height:clamp(62px,17vw,92px);flex-shrink:0;filter:drop-shadow(0 0 8px currentColor) drop-shadow(0 0 15px color-mix(in srgb,currentColor 55%,transparent))}}
     .ex-exit{{background:#0b1821;border:1px solid;border-left-width:4px;border-radius:14px;padding:16px 18px;margin-top:12px}}.ex-exit-title{{font-size:17px;font-weight:850;line-height:1.35;margin-top:7px;overflow-wrap:anywhere}}.ex-exit-note{{font-size:13px;line-height:1.45;color:#a9bbc5;margin-top:5px}}
     .ex-round-grid{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 18px}}.ex-round-cell{{min-width:0;padding:0 0 18px}}.ex-round-cell:nth-child(n+3){{border-top:1px solid #263640;padding:18px 0 0}}.ex-round-cell .ex-label{{font-size:10px;letter-spacing:.8px}}.ex-round-value{{font-size:clamp(16px,4.8vw,25px);font-weight:800;line-height:1.3;margin:9px 0 5px;font-variant-numeric:tabular-nums;white-space:nowrap}}.ex-round-note{{font-size:11px;color:#8c9faa;line-height:1.5}}.ex-distance-value{{display:flex;align-items:center;gap:7px}}.ex-distance-bars{{display:inline-flex;align-items:flex-end;gap:3px;flex-shrink:0}}.ex-distance-bars i{{width:5px;background:currentColor;border-radius:2px}}
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
-    <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side_label}</div></section>
+    <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="{signal_class}" style="color:{color}">{signal_arrow}<span>{side_label}</span></div></section>
     {exit_html}
     {render_buying_selling_advantage(result.get('buy_sell_advantage',{}))}
     <section class="ex-card"><div class="ex-label">FUERZA · {model_label}</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div></section>
@@ -4190,7 +4220,8 @@ def live_dashboard():
         st.session_state.get('whale_flow_tape',[]),now.timestamp(),whale is not None)
     result['buy_sell_advantage']['price_control']=estimate_price_control(
         st.session_state.setdefault('alpha_price_control_v1',{}),
-        price,observations.get('COINBASE'),now.timestamp())
+        price,observations.get('COINBASE'),now.timestamp(),
+        st.session_state.get('whale_flow_tape',[]) if whale is not None else [])
     sig={'price':price,'price_source':'COINBASE','up_probability':reading.get('movement_up',reading.get('up',50)),'down_probability':100-reading.get('movement_up',reading.get('up',50))}
     if btc_df is not None and len(btc_df):
         for key in ('mom3','mom5','mom15'):
