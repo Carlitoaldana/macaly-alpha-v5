@@ -4074,37 +4074,37 @@ def estimate_price_control(state, price, observed_at, now):
 def render_buying_selling_advantage(flow):
     control=flow.get('price_control',{})
     ready=control.get('valid',False)
-    label=control.get('label','REUNIENDO LECTURA DEL PRECIO')
+    label={'REUNIENDO LECTURA DEL PRECIO':'ANALIZANDO',
+           'PRECIO SIN ACTUALIZAR':'SIN DATOS',
+           'COMPRADORES IMPULSAN':'COMPRADORES',
+           'VENDEDORES IMPULSAN':'VENDEDORES',
+           'CONTROL DISPUTADO':'EQUILIBRADO'}.get(control.get('label'),'ANALIZANDO')
     buy=control.get('index',50);sell=100-buy
     side=control.get('side')
     tone='#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#9eafbb'
-    movement=f"${control['move']:+,.2f}" if ready else '—'
-    volume=(f"Volumen acumulado observado: compras {compact_usd(flow['buy'])} · ventas {compact_usd(flow['sell'])}." if flow.get('valid') else 'Volumen no disponible.')
-    if flow.get('valid') and not flow.get('fresh'):
-        volume+=' Sin actualización reciente del volumen.'
-    detail=(f"Desplazamiento del precio en {int(control['duration'])} s: {movement}" if ready else 'Necesita al menos 20 s de precios actuales y continuos.')
     return f'''<section class="ex-card" aria-label="Control estimado del precio">
-    <div class="ex-label">QUIÉN MUEVE EL PRECIO · COINBASE</div>
-    <div class="ex-number" style="color:{tone}">{label}</div>
+    <div class="ex-label">CONTROL ESTIMADO</div>
+    <div class="ex-number" style="color:{tone};font-size:22px">{label}</div>
     <div class="ex-note" style="display:flex;justify-content:space-between;gap:8px;margin-top:12px"><b style="color:#00dfb5">COMPRADORES →</b><b style="color:#ef5059">← VENDEDORES</b></div>
     <div style="position:relative;height:26px;border-radius:13px;overflow:hidden;margin:12px 0;opacity:{1 if ready else .3};background:#ef5059" role="meter" aria-label="Índice estimado del control del precio" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{buy:.1f}" aria-valuetext="{label}">
     <span style="display:block;height:100%;width:{buy:.3f}%;background:linear-gradient(90deg,#008e78,#00dfb5);transition:width .8s ease-in-out"></span>
     <span style="position:absolute;left:50%;top:0;height:100%;border-left:1px dashed #ffffff88"></span>
     <span style="position:absolute;left:clamp(3px,{buy:.3f}%,calc(100% - 3px));top:2px;height:22px;width:4px;background:#fff;border-radius:3px;transform:translateX(-50%);transition:left .8s ease-in-out"></span></div>
-    <div class="ex-note">{detail}</div>
-    <div class="ex-small" style="margin-top:10px">{volume}<br>La barra estima presión mediante desplazamiento y continuidad del precio del último minuto, con suavizado. El volumen es contexto; no decide el color.<br>No representa porcentajes de compradores ni predice la próxima vela.</div></section>'''
+    </section>'''
 
 
 def render_experimental_panel(result, price, target, seconds_left, ticker, valid):
     import html
     escape=lambda x:html.escape(str(x))
     side=result['direction'];color='#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#9eafbb'
+    side_label='UP ↑' if side=='UP' else 'DOWN ↓' if side=='DOWN' else 'ESPERANDO'
+    model_label='UP ↑' if result['model']=='UP' else 'DOWN ↓' if result['model']=='DOWN' else 'NEUTRAL'
     exit_watch=result.get('exit_watch',{})
     exit_color=exit_watch.get('color','#9eafbb')
     exit_html=(f'<section class="ex-exit" role="status" aria-live="polite" style="border-color:{exit_color}">'
                f'<div class="ex-label">VIGILANCIA DE SALIDA</div>'
                f'<div class="ex-exit-title" style="color:{exit_color}">{escape(exit_watch.get("title",""))}</div>'
-               f'<div class="ex-exit-note">{escape(exit_watch.get("note",""))}</div></section>') if exit_watch.get('status') in ('WEAKENING','TURN') else ''
+               f'</section>') if exit_watch.get('status') in ('WEAKENING','TURN') else ''
     def row(label, direction):
         tone='#00dfb5' if direction=='UP' else '#ef5059' if direction=='DOWN' else '#9eafbb'
         return f'<div class="ex-row"><span>{label}</span><b style="color:{tone}">{direction or ('SIN DATOS' if label=='BTC / TARGET' and price is None else 'NEUTRAL' if valid else 'SIN DATOS')}</b></div>'
@@ -4118,23 +4118,22 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     distance_note='Por encima del target' if distance is not None and distance>0 else 'Por debajo del target' if distance is not None and distance<0 else 'En el target' if distance==0 else 'Esperando datos'
     distance_bars=''.join(f'<i style="height:{height}px"></i>' for height in ((8,14,20) if distance is not None and distance>0 else (20,14,8) if distance is not None and distance<0 else (10,10,10)))
     return f'''<style>
-    .ex-wrap{{font-family:system-ui,sans-serif;color:#edf5f8;background:#06121a;padding:22px;border:1px solid #20665f;border-radius:20px;max-width:880px;margin:auto}}.ex-head{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #233039;padding:0 0 22px;gap:10px}}.ex-brand{{color:#00dfb5;font-size:12px;font-weight:800;letter-spacing:2px}}.ex-title{{font-size:25px;font-weight:800;margin-top:8px}}.ex-live{{color:#00dfb5;font-size:12px;white-space:nowrap}}.ex-card{{background:#0b1821;border:1px solid #263640;border-radius:20px;padding:24px;margin-top:18px}}.ex-label{{font-size:12px;font-weight:800;letter-spacing:1.6px;color:#8c9faa}}.ex-main{{font-size:44px;line-height:1.2;font-weight:850;margin:16px 0 12px}}.ex-note{{color:#a9bbc5;font-size:14px;line-height:1.5}}.ex-number{{font-size:29px;font-weight:800;margin-top:15px}}.ex-bars{{display:flex;gap:9px;margin-top:22px}}.ex-bars i{{height:9px;border-radius:8px;flex:1;background:#24323b}}.ex-row{{display:flex;justify-content:space-between;gap:12px;padding:19px 15px;margin-top:12px;border:1px solid #263640;border-radius:13px;font-size:13px;color:#a9bbc5}}.ex-row b{{text-align:right}}.ex-small{{margin-top:20px;color:#8295a3;font-size:11px;line-height:1.5;overflow-wrap:anywhere}}@media(max-width:450px){{.ex-wrap{{padding:16px}}.ex-card{{padding:21px}}.ex-main{{font-size:36px}}.ex-title{{font-size:22px}}}}
+    .ex-wrap{{font-family:system-ui,sans-serif;color:#edf5f8;background:#06121a;padding:22px;border:1px solid #20665f;border-radius:20px;max-width:880px;margin:auto}}.ex-head{{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid #233039;padding:0 0 22px;gap:10px}}.ex-brand{{color:#00dfb5;font-size:12px;font-weight:800;letter-spacing:2px}}.ex-title{{font-size:25px;font-weight:800;margin-top:8px}}.ex-live{{color:#00dfb5;font-size:12px;white-space:nowrap}}.ex-card{{background:#0b1821;border:1px solid #263640;border-radius:20px;padding:18px;margin-top:14px}}.ex-label{{font-size:12px;font-weight:800;letter-spacing:1.6px;color:#8c9faa}}.ex-main{{font-size:44px;line-height:1.2;font-weight:850;margin:16px 0 12px}}.ex-note{{color:#a9bbc5;font-size:14px;line-height:1.5}}.ex-number{{font-size:29px;font-weight:800;margin-top:15px}}.ex-bars{{display:flex;gap:9px;margin-top:22px}}.ex-bars i{{height:9px;border-radius:8px;flex:1;background:#24323b}}.ex-row{{display:flex;justify-content:space-between;gap:12px;padding:19px 15px;margin-top:12px;border:1px solid #263640;border-radius:13px;font-size:13px;color:#a9bbc5}}.ex-row b{{text-align:right}}.ex-small{{margin-top:20px;color:#8295a3;font-size:11px;line-height:1.5;overflow-wrap:anywhere}}@media(max-width:450px){{.ex-wrap{{padding:16px}}.ex-card{{padding:17px}}.ex-main{{font-size:36px}}.ex-title{{font-size:22px}}}}
     .ex-exit{{background:#0b1821;border:1px solid;border-left-width:4px;border-radius:14px;padding:16px 18px;margin-top:12px}}.ex-exit-title{{font-size:17px;font-weight:850;line-height:1.35;margin-top:7px;overflow-wrap:anywhere}}.ex-exit-note{{font-size:13px;line-height:1.45;color:#a9bbc5;margin-top:5px}}
     .ex-round-grid{{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 18px}}.ex-round-cell{{min-width:0;padding:0 0 18px}}.ex-round-cell:nth-child(n+3){{border-top:1px solid #263640;padding:18px 0 0}}.ex-round-cell .ex-label{{font-size:10px;letter-spacing:.8px}}.ex-round-value{{font-size:clamp(16px,4.8vw,25px);font-weight:800;line-height:1.3;margin:9px 0 5px;font-variant-numeric:tabular-nums;white-space:nowrap}}.ex-round-note{{font-size:11px;color:#8c9faa;line-height:1.5}}.ex-distance-value{{display:flex;align-items:center;gap:7px}}.ex-distance-bars{{display:inline-flex;align-items:flex-end;gap:3px;flex-shrink:0}}.ex-distance-bars i{{width:5px;background:currentColor;border-radius:2px}}
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
-    <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
+    <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side_label}</div></section>
     {exit_html}
     {render_buying_selling_advantage(result.get('buy_sell_advantage',{}))}
-    <section class="ex-card"><div class="ex-label">FUERZA DIRECCIONAL DEL PRECIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
-    <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Entrada y giro: tres lecturas nuevas. Retirada: cinco lecturas contrarias con respaldo del movimiento o del cierre. Tiempo y distancia aportan contexto, sin fijar dirección. Las barras muestran la señal activa o la candidatura.</div></section>
+    <section class="ex-card"><div class="ex-label">FUERZA · {model_label}</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div></section>
+    <section class="ex-card"><div class="ex-label">CONFIRMACIÓN</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div></section>
     <section class="ex-card ex-round-grid" aria-label="Resumen de la ronda">
-    <div class="ex-round-cell"><div class="ex-label">TARGET</div><div class="ex-round-value">{target_label}</div><div class="ex-round-note">Kalshi · ronda vigente</div></div>
+    <div class="ex-round-cell"><div class="ex-label">TARGET</div><div class="ex-round-value">{target_label}</div></div>
     <div class="ex-round-cell"><div class="ex-label">DISTANCIA AL TARGET</div><div class="ex-round-value ex-distance-value" style="color:{distance_color}"><span class="ex-distance-bars" aria-hidden="true">{distance_bars}</span><span>{distance_label}</span></div><div class="ex-round-note" style="color:{distance_color}">{distance_note}</div></div>
-    <div class="ex-round-cell"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-round-value">{format_countdown(seconds_left)}</div><div class="ex-round-note">Para cerrar la ronda</div></div>
-    <div class="ex-round-cell"><div class="ex-label">BTC ACTUAL · KALSHI</div><div class="ex-round-value">{price_label}</div><div class="ex-round-note">{'Kalshi en vivo' if price is not None else 'Kalshi no disponible'}</div></div>
+    <div class="ex-round-cell"><div class="ex-label">TIEMPO RESTANTE</div><div class="ex-round-value">{format_countdown(seconds_left)}</div></div>
+    <div class="ex-round-cell"><div class="ex-label">BTC ACTUAL · KALSHI</div><div class="ex-round-value">{price_label}</div></div>
     </section>
-    {row('DIRECCIÓN DEL PRECIO',result['model'])}{row('BTC / TARGET',result['position'])}{row('CONTEXTO DE VARIOS MINUTOS',result['flow'])}
-    <div class="ex-small">{escape(ticker)} · Solo señales<br>Señal de ronda: combina movimiento, margen Kalshi, tiempo y volatilidad. Fuerza direccional: movimiento actual. Apoyo heurístico, no probabilidad de acierto.</div></div>'''
+    </div>'''
 
 
 @st.fragment(run_every="2s")
