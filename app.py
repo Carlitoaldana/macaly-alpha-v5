@@ -3717,7 +3717,7 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
 
 
 def experimental_model(frame, price, target, seconds_left, now):
-    """Estimación estadística heurística del cierre; no probabilidad calibrada."""
+    """Fuerza del movimiento; el cierre se calcula después con datos Kalshi."""
     if frame is None or price is None:
         return {'valid':False, 'error':'Esperando precio y velas actuales.'}
     try:
@@ -3752,16 +3752,59 @@ def experimental_model(frame, price, target, seconds_left, now):
         trend='UP' if drift>.12*volatility else 'DOWN' if drift<-.12*volatility else None
         position=None  # La posición frente al target se calcula solo para mostrarla.
         return dict(valid=True,up=up,model=direction,trend=trend,position=position,
-                    support=int(round(max(up,100-up))),forecast=forecast,volatility=volatility,price=float(price))
+                    support=int(round(max(up,100-up))),forecast=forecast,volatility=volatility,price=float(price),drift=drift,live_move=live_move)
     except (ValueError,TypeError,KeyError,IndexError) as exc:
         return {'valid':False,'error':'No se pudo validar el contexto: '+str(exc)}
+
+
+def experimental_round_context(reading, kalshi_price, target, seconds_left):
+    """Apoyo heurístico al cierre; no probabilidad calibrada ni dirección bloqueada.
+
+    La volatilidad y la deriva se miden en dólares por vela de un minuto.
+    La deriva se amortigua para no extrapolar quince minutos de caída constante.
+    El peso del cierre aumenta suavemente al acercarse el vencimiento.
+    """
+    result=dict(reading)
+    if not reading.get('valid'):
+        return result
+    try:
+        current, strike, remaining, volatility = map(float,
+            (kalshi_price, target, seconds_left, reading['volatility']))
+        if not all(math.isfinite(x) for x in (current,strike,remaining,volatility)) or current<=0 or strike<=0 or volatility<=0 or not 0<remaining<=900:
+            raise ValueError('Precio Kalshi, target o tiempo de ronda inválido.')
+        horizon=remaining/60.0
+        # Una incertidumbre mínima evita certeza artificial cerca del vencimiento.
+        uncertainty=volatility*math.sqrt(horizon+0.25)
+        effective_horizon=1.0-math.exp(-horizon)
+        drift=float(reading['drift'])
+        live_move=float(reading['live_move'])
+        if not all(math.isfinite(x) for x in (drift,live_move,float(reading['up']))):
+            raise ValueError('Movimiento o volatilidad inválidos.')
+        projected_move=(drift+0.25*volatility*live_move)*effective_horizon
+        distance=current-strike
+        projected_distance=distance+projected_move
+        close_up=50.0+45.0*math.tanh(projected_distance/uncertainty)
+        # Casi nulo al inicio; continuo, sin ventana que congele UP/DOWN.
+        weight=math.exp(-remaining/120.0)
+        decision_up=(1.0-weight)*float(reading['up'])+weight*close_up
+        result.update(up=decision_up,movement_up=reading['up'],close_up=close_up,
+                      close_weight=weight,kalshi_price=current,target=strike,
+                      seconds_left=remaining,distance=distance,
+                      projected_distance=projected_distance,close_uncertainty=uncertainty)
+    except (ValueError,TypeError,KeyError,OverflowError) as exc:
+        result.update(valid=False,error='Contexto de cierre no disponible: '+str(exc))
+    return result
 
 
 def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None):
     """Entrada/flip en tres observaciones; retirada sostenida, sin fijar dirección."""
     def audit(event, detail):
         events=state.setdefault('events',[])
-        events.append(dict(at=now,event=event,detail=detail,ticker=state.get('ticker')))
+        events.append(dict(at=now,event=event,detail=detail,ticker=state.get('ticker'),
+                           seconds_left=seconds_left,target=reading.get('target'),
+                           kalshi_price=reading.get('kalshi_price'),distance=reading.get('distance'),
+                           movement_up=reading.get('movement_up'),decision_up=reading.get('up'),
+                           close_up=reading.get('close_up'),close_weight=reading.get('close_weight')))
         del events[:-100]
         state['last_event']=detail
     def reset_pending():
@@ -3798,6 +3841,9 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
     up=reading['up'];active=state.get('active')
     candidate='UP' if up>=68 else 'DOWN' if up<=32 else None
     desired=candidate
+    close_weight=reading.get('close_weight',0.0)
+    close_up=reading.get('close_up',50.0)
+    close_side='UP' if close_up>=68 else 'DOWN' if close_up<=32 else None
     # Debilitamiento y giro usan evidencia distinta de la entrada inicial.
     if active:
         support=up if active=='UP' else 100-up
@@ -3815,13 +3861,15 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
         state['weakening']=weakening
         if candidate==opposite:
             # Un giro necesita contexto contrario y desplazamiento normalizado.
-            if reading.get('trend')==opposite and retreat>=0.6:
+            if (close_weight>=0.5 and close_side==opposite) or (reading.get('trend')==opposite and retreat>=0.6):
                 desired=opposite
             else:
                 desired=active
         elif weakening:
             # Retirar exige evidencia contraria y desplazamiento, no un reloj.
-            desired='RETIRAR' if reading.get('model')==opposite and reading.get('trend')==opposite and retreat>=0.75 else active
+            contrary_close=close_weight>=0.5 and close_side==opposite
+            contrary_movement=reading.get('model')==opposite and reading.get('trend')==opposite and retreat>=0.75
+            desired='RETIRAR' if contrary_close or contrary_movement else active
         else:
             desired=active
         if desired==active:
@@ -3837,7 +3885,7 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
             state['count']=min(5,state.get('count',0)+1);state['last']=now
         required_readings=5 if desired=='RETIRAR' else 3
         if state.get('count',0)>=required_readings:
-            detail=('Señal retirada: cinco lecturas contrarias, contexto opuesto y retroceso ≥0.75 veces la volatilidad.' if desired=='RETIRAR' else 'Señal '+desired+' confirmada con tres lecturas nuevas.')
+            detail=('Señal retirada: cinco lecturas contrarias con respaldo del movimiento o de la evaluación de cierre.' if desired=='RETIRAR' else 'Señal '+desired+' confirmada con tres lecturas nuevas.')
             audit('WITHDRAWN' if desired=='RETIRAR' else 'CONFIRMED',detail)
             state['active']=None if desired=='RETIRAR' else desired
             state['direction_extreme']=reading.get('price')
@@ -3849,10 +3897,13 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
         if state.get('pending')=='RETIRAR':reason=active+' perdiendo respaldo; comprobando si el debilitamiento persiste.'
         elif state.get('pending') in ('UP','DOWN'):reason='Señal '+active+' activa; evaluando posible cambio a '+state['pending']+'.'
         elif state.get('weakening'):reason=active+' perdiendo fuerza; el giro contrario aún no tiene respaldo suficiente.'
-        else:reason='Se mantiene '+active+': el movimiento del precio conserva respaldo.'
+        else:reason='Se mantiene '+active+': la evaluación de la ronda conserva respaldo.'
     elif state.get('pending') in ('UP','DOWN'):
         reason='Comprobando '+state['pending']+f" en precios nuevos ({state['count']}/3 lecturas)."
     else:reason=state.get('last_event','El precio todavía no muestra fuerza direccional suficiente.')
+    if reading.get('close_weight') is not None:
+        close_side_label='UP' if close_up>=60 else 'DOWN' if close_up<=40 else 'sin ventaja clara'
+        reason+=f" Cierre {close_side_label}: margen ${reading['distance']:+,.2f}, {int(reading['seconds_left'])} s restantes; movimiento {reading['model'] or 'NEUTRAL'}."
     return dict(direction=active,model=reading['model'],support=reading['support'],position=reading['position'],flow=reading['trend'],count=3 if active else state.get('count',0),valid=True,reason=reason)
 
 def render_experimental_panel(result, price, target, seconds_left, ticker, valid):
@@ -3877,7 +3928,7 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     </style><div class="ex-wrap"><div class="ex-head"><div><div class="ex-brand">ALPHA · BTC 15M</div><div class="ex-title">Lectura de la ronda</div></div><span class="ex-live">● {'EN VIVO' if valid else 'DATOS INCOMPLETOS'}</span></div>
     <section class="ex-card"><div class="ex-label">SEÑAL OFICIAL</div><div class="ex-main" style="color:{color}">{side or 'ESPERANDO'}</div><div class="ex-note">{escape(result['reason'])}</div></section>
     <section class="ex-card"><div class="ex-label">FUERZA DIRECCIONAL DEL PRECIO</div><div class="ex-main" style="color:{model_color}">{str(result['support'])+'%' if result['support'] is not None else '—'}</div><div class="ex-note">Dirección estimada: <b style="color:{model_color}">{result['model'] or 'NEUTRAL'}</b> · índice de apoyo, no probabilidad de acierto.</div></section>
-    <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Entrada y giro: tres lecturas nuevas. Retirada: cinco lecturas contrarias y retroceso suficiente. Sin espera mínima por reloj. Las barras muestran la señal activa o la candidatura.</div></section>
+    <section class="ex-card"><div class="ex-label">CONFIRMACIÓN DE SEÑAL</div><div class="ex-main">{result['count']}<small style="font-size:23px;color:#8c9faa">/3</small></div><div class="ex-bars">{bars}</div><div class="ex-note">Entrada y giro: tres lecturas nuevas. Retirada: cinco lecturas contrarias con respaldo del movimiento o del cierre. Tiempo y distancia aportan contexto, sin fijar dirección. Las barras muestran la señal activa o la candidatura.</div></section>
     <section class="ex-card ex-round-grid" aria-label="Resumen de la ronda">
     <div class="ex-round-cell"><div class="ex-label">TARGET</div><div class="ex-round-value">{target_label}</div><div class="ex-round-note">Kalshi · ronda vigente</div></div>
     <div class="ex-round-cell"><div class="ex-label">DISTANCIA AL TARGET</div><div class="ex-round-value ex-distance-value" style="color:{distance_color}"><span class="ex-distance-bars" aria-hidden="true">{distance_bars}</span><span>{distance_label}</span></div><div class="ex-round-note" style="color:{distance_color}">{distance_note}</div></div>
@@ -3885,7 +3936,7 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     <div class="ex-round-cell"><div class="ex-label">BTC ACTUAL · KALSHI</div><div class="ex-round-value">{price_label}</div><div class="ex-round-note">{'Kalshi en vivo' if price is not None else 'Kalshi no disponible'}</div></div>
     </section>
     {row('DIRECCIÓN DEL PRECIO',result['model'])}{row('BTC / TARGET',result['position'])}{row('CONTEXTO DE VARIOS MINUTOS',result['flow'])}
-    <div class="ex-small">{escape(ticker)} · Solo señales<br>Lectura de dirección y fuerza del precio; target solo como referencia visual. No estima la probabilidad de cerrar sobre el target.</div></div>'''
+    <div class="ex-small">{escape(ticker)} · Solo señales<br>Señal de ronda: combina movimiento, margen Kalshi, tiempo y volatilidad. Fuerza direccional: movimiento actual. Apoyo heurístico, no probabilidad de acierto.</div></div>'''
 
 
 @st.fragment(run_every="2s")
@@ -3902,26 +3953,8 @@ def live_dashboard():
     except Exception as exc:errors.append('Flujo de la gráfica: '+str(exc))
     ticker=market.get('ticker','--') if market else '--'
     target=get_target_from_market(market);seconds_left=get_seconds_remaining(market)
-    now=datetime.now(timezone.utc)
-    valid=price is not None and market is not None and _KalshiPublicReads._is_current(market,now)
-    if valid:
-        observations=getattr(_PRICE_OBSERVATIONS,'values',{})
-        valid=-5<=now.timestamp()-observations.get('COINBASE',0)<=LIVE_PRICE_MAX_AGE
-    reading=experimental_model(btc_df,price,target,seconds_left,now)
-    round_valid=market is not None and _KalshiPublicReads._is_current(market,now)
-    if not valid:reading={'valid':False,'error':'Precio en vivo o ronda no disponible; esperando datos actuales.'}
-    reading['round_valid']=round_valid
-    state=st.session_state.setdefault('alpha_price_strength_v4',{})
-    observations=getattr(_PRICE_OBSERVATIONS,'values',{})
-    result=experimental_decision(state,ticker,now.timestamp(),seconds_left,reading,observations.get('COINBASE'))
-    valid=result['valid']
-    sig={'price':price,'price_source':'COINBASE','up_probability':reading.get('up',50),'down_probability':100-reading.get('up',50)}
-    if btc_df is not None and len(btc_df):
-        for key in ('mom3','mom5','mom15'):
-            value=btc_df.iloc[-1].get(key)
-            sig[key]=float(value) if value is not None and pd.notna(value) else None
-    # El resumen de Kalshi no mezcla el precio de Coinbase con su strike.
-    # Coinbase conserva su ruta independiente para el motor y la gráfica.
+    round_valid=market is not None and _KalshiPublicReads._is_current(market,datetime.now(timezone.utc))
+    # Precio Kalshi del evento actual: mismo dato para cierre y distancia.
     kalshi_display_price=None
     if round_valid and target is not None:
         try:
@@ -3930,6 +3963,33 @@ def live_dashboard():
                 kalshi_display_price=None
         except Exception as exc:
             errors.append('Precio Kalshi para distancia no disponible: '+str(exc))
+    # Recalcular el reloj tras las llamadas de red.
+    seconds_left=get_seconds_remaining(market)
+    now=datetime.now(timezone.utc)
+    valid=price is not None and market is not None and _KalshiPublicReads._is_current(market,now)
+    if valid:
+        observations=getattr(_PRICE_OBSERVATIONS,'values',{})
+        valid=-5<=now.timestamp()-observations.get('COINBASE',0)<=LIVE_PRICE_MAX_AGE
+    reading=experimental_model(btc_df,price,target,seconds_left,now)
+    round_valid=market is not None and _KalshiPublicReads._is_current(market,now)
+    if not valid:reading={'valid':False,'error':'Precio en vivo o ronda no disponible; esperando datos actuales.'}
+    # Exigir mayor frescura de Kalshi cuando quedan pocos segundos.
+    kalshi_stamp=getattr(_PRICE_OBSERVATIONS,'values',{}).get('KALSHI LIVE')
+    kalshi_age=now.timestamp()-kalshi_stamp if kalshi_stamp is not None else float('inf')
+    max_kalshi_age=min(LIVE_PRICE_MAX_AGE,max(2.0,(seconds_left or 0)/4.0))
+    if not -5<=kalshi_age<=max_kalshi_age:
+        kalshi_display_price=None
+    reading=experimental_round_context(reading,kalshi_display_price,target,seconds_left)
+    reading['round_valid']=round_valid
+    state=st.session_state.setdefault('alpha_round_close_v5',{})
+    observations=getattr(_PRICE_OBSERVATIONS,'values',{})
+    result=experimental_decision(state,ticker,now.timestamp(),seconds_left,reading,observations.get('COINBASE'))
+    valid=result['valid']
+    sig={'price':price,'price_source':'COINBASE','up_probability':reading.get('movement_up',reading.get('up',50)),'down_probability':100-reading.get('movement_up',reading.get('up',50))}
+    if btc_df is not None and len(btc_df):
+        for key in ('mom3','mom5','mom15'):
+            value=btc_df.iloc[-1].get(key)
+            sig[key]=float(value) if value is not None and pd.notna(value) else None
     result['position']='UP' if kalshi_display_price is not None and target is not None and kalshi_display_price>target else 'DOWN' if kalshi_display_price is not None and target is not None and kalshi_display_price<target else None
     panel_html=render_experimental_panel(result,kalshi_display_price,target,seconds_left,ticker,valid)
     panel_data=json.dumps(panel_html,ensure_ascii=False).replace('<','\\u003c')
