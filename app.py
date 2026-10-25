@@ -4031,25 +4031,68 @@ def buying_selling_advantage(state, tape, now, available):
                 observed=now-state['first_stamp'],move=move)
 
 
+def estimate_price_control(state, price, observed_at, now):
+    """Índice descriptivo del precio reciente, no atribución causal ni predicción."""
+    import math
+    try:
+        price=float(price);stamp=float(observed_at)
+        if not math.isfinite(price) or price<=0 or not math.isfinite(stamp) or not 0<=now-stamp<=10:
+            raise ValueError('Datos antiguos')
+    except (TypeError,ValueError,OverflowError):
+        return dict(valid=False,label='PRECIO SIN ACTUALIZAR')
+    samples=state.setdefault('samples',[])
+    previous=samples[-1][0] if samples else None
+    if previous is not None and (stamp<previous or stamp-previous>15):
+        samples.clear();state.pop('smooth',None);previous=None
+    is_new=previous is None or stamp>previous
+    if is_new:
+        samples.append((stamp,price))
+    samples[:]=[(t,p) for t,p in samples if stamp-t<=60]
+    if len(samples)<6 or samples[-1][0]-samples[0][0]<20:
+        return dict(valid=False,label='REUNIENDO LECTURA DEL PRECIO')
+    prices=[p for _,p in samples]
+    move=prices[-1]-prices[0]
+    span=max(prices)-min(prices)
+    path=sum(abs(b-a) for a,b in zip(prices,prices[1:]))
+    # Un desplazamiento pequeño frente al precio o al rango no implica dominio.
+    floor=max(price*.00001,span*.12)
+    raw=0.0 if abs(move)<=floor else .65*move/max(span,floor)+.35*move/max(path,floor)
+    raw=max(-1.0,min(1.0,raw))
+    smooth=state.get('smooth',raw)
+    if is_new:
+        alpha=1-math.exp(-(stamp-previous)/8) if previous is not None else 1.0
+        smooth+=alpha*(raw-smooth)
+        state['smooth']=smooth
+    # Si el desplazamiento ya contradice al índice suavizado, mostrar disputa.
+    score=0.0 if raw==0 or raw*smooth<0 else smooth
+    side='UP' if score>.25 else 'DOWN' if score<-.25 else None
+    label='COMPRADORES IMPULSAN' if side=='UP' else 'VENDEDORES IMPULSAN' if side=='DOWN' else 'CONTROL DISPUTADO'
+    return dict(valid=True,label=label,side=side,index=50+50*score,move=move,
+                duration=samples[-1][0]-samples[0][0],age=now-stamp)
+
+
 def render_buying_selling_advantage(flow):
-    if not flow.get('valid'):
-        return '<section class="ex-card"><div class="ex-label">COMPRAS VS VENTAS · COINBASE</div><div class="ex-number">SIN DATOS RECIENTES</div><div class="ex-note">Esperando operaciones actuales.</div></section>'
-    short=flow
-    buy=short['buy_pct'];sell=short['sell_pct']
-    tone=('#00dfb5' if buy>55 else '#ef5059' if buy<45 else '#9eafbb') if flow['fresh'] else '#9eafbb'
-    movement=f"${flow['move']:+,.2f}" if flow['move'] is not None else '—'
-    status=flow['label'] if flow['fresh'] else 'DATOS SIN ACTUALIZAR'
-    return f'''<section class="ex-card" aria-label="Presión compradora y vendedora">
-    <div class="ex-label">COMPRAS VS VENTAS · COINBASE</div>
-    <div class="ex-number" style="color:{tone}">{status}</div>
-    <div class="ex-note" style="display:flex;justify-content:space-between;gap:8px;margin-top:12px"><b style="color:#00dfb5">Compras {buy:.1f}%</b><b style="color:#ef5059">Ventas {sell:.1f}%</b></div>
-    <div style="position:relative;height:26px;border-radius:13px;overflow:hidden;margin:12px 0;opacity:{1 if flow['fresh'] else .4};background:#ef5059" role="meter" aria-label="Volumen de compras agresivas observado" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{buy:.1f}" aria-valuetext="Compras {buy:.1f} por ciento, ventas {sell:.1f} por ciento">
+    control=flow.get('price_control',{})
+    ready=control.get('valid',False)
+    label=control.get('label','REUNIENDO LECTURA DEL PRECIO')
+    buy=control.get('index',50);sell=100-buy
+    side=control.get('side')
+    tone='#00dfb5' if side=='UP' else '#ef5059' if side=='DOWN' else '#9eafbb'
+    movement=f"${control['move']:+,.2f}" if ready else '—'
+    volume=(f"Volumen acumulado observado: compras {compact_usd(flow['buy'])} · ventas {compact_usd(flow['sell'])}." if flow.get('valid') else 'Volumen no disponible.')
+    if flow.get('valid') and not flow.get('fresh'):
+        volume+=' Sin actualización reciente del volumen.'
+    detail=(f"Desplazamiento del precio en {int(control['duration'])} s: {movement}" if ready else 'Necesita al menos 20 s de precios actuales y continuos.')
+    return f'''<section class="ex-card" aria-label="Control estimado del precio">
+    <div class="ex-label">QUIÉN MUEVE EL PRECIO · COINBASE</div>
+    <div class="ex-number" style="color:{tone}">{label}</div>
+    <div class="ex-note" style="display:flex;justify-content:space-between;gap:8px;margin-top:12px"><b style="color:#00dfb5">COMPRADORES →</b><b style="color:#ef5059">← VENDEDORES</b></div>
+    <div style="position:relative;height:26px;border-radius:13px;overflow:hidden;margin:12px 0;opacity:{1 if ready else .3};background:#ef5059" role="meter" aria-label="Índice estimado del control del precio" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{buy:.1f}" aria-valuetext="{label}">
     <span style="display:block;height:100%;width:{buy:.3f}%;background:linear-gradient(90deg,#008e78,#00dfb5);transition:width .8s ease-in-out"></span>
     <span style="position:absolute;left:50%;top:0;height:100%;border-left:1px dashed #ffffff88"></span>
-    <span style="position:absolute;left:clamp(3px,{buy:.3f}%,calc(100% - 3px));top:2px;height:22px;width:4px;background:#fff;border-radius:3px;transform:translateX(-50%);box-shadow:0 0 8px #fff8;transition:left .8s ease-in-out"></span></div>
-    <div class="ex-note" style="display:flex;justify-content:space-between;font-size:11px"><span style="color:#00dfb5">COMPRAS →</span><span style="color:#ef5059">← VENTAS</span></div>
-    <div class="ex-note">COMPRAS Y VENTAS · ACUMULADO<br>Compras {compact_usd(short['buy'])} · Ventas {compact_usd(short['sell'])}<br>Precio desde primera operación observada: {movement}</div>
-    <div class="ex-small" style="margin-top:10px">Suma las operaciones recibidas durante esta sesión, sin ventana móvil ni reinicio por velas.<br>Coinbase BTC-USD · muestra observada durante {int(flow['observed'])} s. Última operación hace {flow['age']:.1f} s.<br>Equilibrado: compras entre 45% y 55%. Puede omitir operaciones entre consultas; no garantiza el siguiente movimiento.</div></section>'''
+    <span style="position:absolute;left:clamp(3px,{buy:.3f}%,calc(100% - 3px));top:2px;height:22px;width:4px;background:#fff;border-radius:3px;transform:translateX(-50%);transition:left .8s ease-in-out"></span></div>
+    <div class="ex-note">{detail}</div>
+    <div class="ex-small" style="margin-top:10px">{volume}<br>La barra estima presión mediante desplazamiento y continuidad del precio del último minuto, con suavizado. El volumen es contexto; no decide el color.<br>No representa porcentajes de compradores ni predice la próxima vela.</div></section>'''
 
 
 def render_experimental_panel(result, price, target, seconds_left, ticker, valid):
@@ -4146,6 +4189,9 @@ def live_dashboard():
     result['buy_sell_advantage']=buying_selling_advantage(
         st.session_state.setdefault('alpha_accumulated_flow_v1',{}),
         st.session_state.get('whale_flow_tape',[]),now.timestamp(),whale is not None)
+    result['buy_sell_advantage']['price_control']=estimate_price_control(
+        st.session_state.setdefault('alpha_price_control_v1',{}),
+        price,observations.get('COINBASE'),now.timestamp())
     sig={'price':price,'price_source':'COINBASE','up_probability':reading.get('movement_up',reading.get('up',50)),'down_probability':100-reading.get('movement_up',reading.get('up',50))}
     if btc_df is not None and len(btc_df):
         for key in ('mom3','mom5','mom15'):
