@@ -3809,6 +3809,8 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
         state['last_event']=detail
     def reset_pending():
         state.update(pending=None,count=0,since=None,last=None)
+    def reset_candidate():
+        state.update(candidate_side=None,candidate_count=0,candidate_last=None)
     known_ticker=ticker not in ('--','',None)
     round_valid=known_ticker and seconds_left is not None and reading.get('round_valid',True)
     if round_valid and state.get('ticker')!=ticker:
@@ -3822,11 +3824,12 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
     if expired:
         if state.get('active'):
             audit('ROUND_ENDED','Señal retirada: terminó la ronda verificada.')
-        state['active']=None;reset_pending()
+        state['active']=None;reset_pending();reset_candidate()
         return dict(direction=None,model=None,support=None,position=None,flow=None,count=0,valid=False,reason='Ronda terminada; esperando una nueva ronda verificada.')
     ready=reading.get('valid',False) and round_valid
     if not ready:
         reset_pending()
+        reset_candidate()
         old=state.get('active')
         if not state.get('data_suspended'):
             audit('DATA_SUSPENDED','Lectura suspendida por datos incompletos; estado conservado.')
@@ -3837,6 +3840,7 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
         audit('DATA_RESUMED','Datos recuperados en la misma ronda; reevaluando la señal conservada.')
     if now<state.get('last_valid',now):
         reset_pending()
+        reset_candidate()
     state['last_valid']=now
     up=reading['up'];active=state.get('active')
     candidate='UP' if up>=68 else 'DOWN' if up<=32 else None
@@ -3877,12 +3881,27 @@ def experimental_decision(state,ticker,now,seconds_left,reading,observed_at=None
     stamp=float(observed_at) if observed_at is not None else now
     new_observation=stamp>state.get('last_observation',-1)
     if new_observation:state['last_observation']=stamp
+    # Evaluar la candidatura en paralelo a la retirada. Solo cuentan precios
+    # nuevos que cumplen el umbral direccional; una lectura débil la reinicia.
+    if new_observation:
+        candidate_last=state.get('candidate_last')
+        if candidate is None:
+            reset_candidate()
+        elif (state.get('candidate_side')!=candidate or candidate_last is None
+              or now-candidate_last>15):
+            state.update(candidate_side=candidate,candidate_count=1,candidate_last=now)
+        else:
+            state.update(candidate_count=min(3,state.get('candidate_count',0)+1),candidate_last=now)
     if desired!=active and desired is not None:
         if state.get('pending')!=desired or now-state.get('last',now)>15:
             reset_pending()
             if new_observation:state.update(pending=desired,count=1,since=now,last=now)
         elif new_observation:
             state['count']=min(5,state.get('count',0)+1);state['last']=now
+        # El contexto de giro debe seguir siendo válido ahora. No repetir las
+        # tres confirmaciones direccionales que ya llegaron mientras se vigilaba.
+        if desired==candidate and state.get('candidate_side')==desired:
+            state['count']=state.get('candidate_count',0)
         required_readings=5 if desired=='RETIRAR' else 3
         if state.get('count',0)>=required_readings:
             detail=('Señal retirada: cinco lecturas contrarias con respaldo del movimiento o de la evaluación de cierre.' if desired=='RETIRAR' else 'Señal '+desired+' confirmada con tres lecturas nuevas.')
