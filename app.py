@@ -4637,8 +4637,64 @@ try:
 except Exception as exc:
     print(f"[ALPHA CONTINUITY] No se pudo iniciar el registrador: {type(exc).__name__}: {exc}")
 
+# Recent Alerts: isolated read-only presentation, independent of signal engine.
+# A dedicated start marker prevents historical rounds from being imported.
+_RECENT_ALERTS_DB = "alpha_recent_alerts_v1.db"
+
+def _recent_alerts_rows():
+    try:
+        with sqlite3.connect(_RECENT_ALERTS_DB, timeout=2) as conn:
+            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("CREATE TABLE IF NOT EXISTS alerts (ticker TEXT PRIMARY KEY, side TEXT NOT NULL, first_at TEXT NOT NULL)")
+            conn.execute("INSERT OR IGNORE INTO meta VALUES ('started_at', ?)", (datetime.now(timezone.utc).isoformat(),))
+            cutoff = conn.execute("SELECT value FROM meta WHERE key='started_at'").fetchone()[0]
+            # Only signals first emitted after this panel was activated.
+            with _round_db() as rounds:
+                for (raw,) in rounds.execute("SELECT payload FROM round_state"):
+                    try:
+                        row = json.loads(raw)
+                        side, when = row.get('first_direction'), row.get('first_signal_time')
+                        if side in ('UP','DOWN') and isinstance(when,str) and when >= cutoff:
+                            conn.execute("INSERT OR IGNORE INTO alerts VALUES (?,?,?)", (row['ticker'],side,when))
+                    except (ValueError,KeyError,TypeError):
+                        continue
+            saved = conn.execute("SELECT ticker,side,first_at FROM alerts ORDER BY first_at DESC").fetchall()
+        outcomes = {}
+        with _history_db() as history:
+            for ticker, outcome, status in history.execute("SELECT ticker,final_outcome,verification_status FROM round_history WHERE verification_status='official'"):
+                if outcome in ('UP','DOWN'):
+                    outcomes[ticker] = outcome
+        return [(ticker,side,when, ('LIVE' if ticker not in outcomes else 'WIN' if outcomes[ticker]==side else 'LOSS')) for ticker,side,when in saved]
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        print('[RECENT ALERTS] Read failed:', type(exc).__name__)
+        return []
+
+def _recent_alerts_cards(rows, full=False):
+    import html as _escape_html
+    visible = rows if full else rows[:4]
+    blocks=[]
+    for ticker,side,when,status in visible:
+        side_color = '#00dfb5' if side=='UP' else '#f26a70'
+        status_color = '#f6c65d' if status=='LIVE' else '#00dfb5' if status=='WIN' else '#f26a70'
+        blocks.append(f'<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;background:#0c2026;border:1px solid #23685e;border-radius:12px;padding:13px 15px;margin:8px 0"><div><div style="font-size:12px;color:#aabdc7">{_escape_html.escape(str(ticker))}</div><b style="font-size:21px;color:{side_color}">{"▲" if side=="UP" else "▼"} {side}</b></div><b style="color:{status_color};font-size:15px">{status}</b></div>')
+    if not blocks:
+        blocks=['<p style="color:#aabdc7">Esperando la primera señal nueva. No se importan rondas anteriores.</p>']
+    return ''.join(blocks)
+
+def render_recent_alerts(full=False):
+    rows = _recent_alerts_rows()
+    st.html('<section style="background:#06121a;color:white;padding:8px 4px"><h3 style="margin:6px 0 10px;font-size:19px">'+('HISTORIAL COMPLETO' if full else 'RECENT ALERTS')+'</h3>'+_recent_alerts_cards(rows,full)+'</section>')
+    if full:
+        wins=sum(x[3]=='WIN' for x in rows); losses=sum(x[3]=='LOSS' for x in rows)
+        st.caption(f"Rondas: {len(rows)} · WIN: {wins} · LOSS: {losses} · Aciertos: {100*wins/(wins+losses):.1f}%" if wins+losses else f"Rondas: {len(rows)} · Sin resultados oficiales todavía")
+        import pandas as _pd
+        st.download_button('Descargar historial CSV', _pd.DataFrame(rows,columns=['Ronda','Primera señal','Hora','Estado']).to_csv(index=False).encode('utf-8-sig'),'recent_alerts.csv','text/csv')
+
 page = "signal"
-if page == "signal_trace":
+if st.query_params.get("recent_history") == "1":
+    st.link_button("← Volver al bot", "./")
+    render_recent_alerts(full=True)
+elif page == "signal_trace":
     render_signal_trace_page()
 elif page == "settings":
     render_history_page()
@@ -4672,3 +4728,6 @@ else:
             '})();</script>',
             unsafe_allow_javascript=True,
         )
+
+    render_recent_alerts()
+    st.link_button("Ver historial completo →", "?recent_history=1")
