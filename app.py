@@ -4637,59 +4637,8 @@ try:
 except Exception as exc:
     print(f"[ALPHA CONTINUITY] No se pudo iniciar el registrador: {type(exc).__name__}: {exc}")
 
-
-# Registro visual aislado: no modifica las decisiones del motor.
-_RECENT_ALERTS_DB = "alpha_recent_alerts_v2.db"
-def _recent_alerts_rows():
-    try:
-        with sqlite3.connect(_RECENT_ALERTS_DB, timeout=3) as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-            conn.execute("CREATE TABLE IF NOT EXISTS alerts (ticker TEXT PRIMARY KEY, side TEXT NOT NULL, first_at TEXT NOT NULL)")
-            conn.execute("INSERT OR IGNORE INTO meta VALUES ('activated', ?)", (datetime.now(timezone.utc).isoformat(),))
-            cutoff = datetime.fromisoformat(conn.execute("SELECT value FROM meta WHERE key='activated'").fetchone()[0])
-            # La ronda en curso puede haber señalado antes de dibujar el panel.
-            with _round_db() as rounds:
-                for (raw,) in rounds.execute("SELECT payload FROM round_state"):
-                    try:
-                        row=json.loads(raw); side=row.get('first_direction'); when=row.get('first_signal_time')
-                        if side not in ('UP','DOWN') or not isinstance(when,str): continue
-                        dt=datetime.fromisoformat(when.replace('Z','+00:00'))
-                        if dt.tzinfo is None: dt=dt.replace(tzinfo=timezone.utc)
-                        # Acepta la ronda activa al instalar; no importa rondas antiguas.
-                        if dt < cutoff and (cutoff-dt).total_seconds()>900: continue
-                        conn.execute("INSERT OR IGNORE INTO alerts VALUES (?,?,?)",(row['ticker'],side,dt.isoformat()))
-                    except (ValueError,TypeError,KeyError): continue
-            saved=conn.execute("SELECT ticker,side,first_at FROM alerts ORDER BY first_at DESC").fetchall()
-        outcomes={}
-        with _history_db() as history:
-            for ticker, outcome in history.execute("SELECT ticker,final_outcome FROM round_history WHERE verification_status='official'"):
-                if outcome in ('UP','DOWN'): outcomes[ticker]=outcome
-        return [(ticker,side,when,'LIVE' if ticker not in outcomes else 'WIN' if outcomes[ticker]==side else 'LOSS') for ticker,side,when in saved]
-    except (sqlite3.Error,OSError,ValueError) as exc:
-        print('[RECENT ALERTS]',type(exc).__name__,str(exc)); return []
-
-def render_recent_alerts(full=False):
-    import html
-    rows=_recent_alerts_rows(); shown=rows if full else rows[:4]
-    cards=[]
-    for ticker,side,when,status in shown:
-        color='#00dfb5' if side=='UP' else '#f26a70'
-        state_color='#f6c65d' if status=='LIVE' else '#00dfb5' if status=='WIN' else '#f26a70'
-        cards.append(f'<div style="display:flex;justify-content:space-between;align-items:center;padding:15px;margin:9px 0;border:1px solid #23685e;border-radius:13px;background:#0c2026"><div><div style="font-size:12px;color:#aabdc7">{html.escape(ticker)}</div><strong style="font-size:21px;color:{color}">{"▲" if side=="UP" else "▼"} {side}</strong></div><b style="font-size:15px;color:{state_color}">{status}</b></div>')
-    body=''.join(cards) if cards else '<div style="color:#9cabb7;font-size:14px;padding:9px 0">Esperando la primera señal de la ronda actual.</div>'
-    title='HISTORIAL COMPLETO' if full else 'RECENT ALERTS'
-    st.html(f'<section style="background:#06121a;color:white;padding:10px 3px;border-top:1px solid #23685e"><h3 style="font-size:20px;margin:8px 0 12px">{title}</h3>{body}</section>')
-    if full:
-        wins=sum(x[3]=='WIN' for x in rows); losses=sum(x[3]=='LOSS' for x in rows)
-        st.caption(f"Rondas: {len(rows)} · WIN: {wins} · LOSS: {losses} · Aciertos: {100*wins/(wins+losses):.1f}%" if wins+losses else f"Rondas: {len(rows)} · Sin resultados oficiales todavía")
-        import pandas as pd
-        st.download_button('Descargar historial CSV',pd.DataFrame(rows,columns=['Ronda','Primera señal','Hora','Estado']).to_csv(index=False).encode('utf-8-sig'),'recent_alerts.csv','text/csv')
-
 page = "signal"
-if st.query_params.get("recent_history") == "1":
-    st.link_button("← Volver al bot", "./")
-    render_recent_alerts(full=True)
-elif page == "signal_trace":
+if page == "signal_trace":
     render_signal_trace_page()
 elif page == "settings":
     render_history_page()
@@ -4702,14 +4651,14 @@ else:
     if initial_html:
         safe_html = json.dumps(initial_html, ensure_ascii=False).replace("<", "\\u003c")
         st.html(
-            '<div id="alpha-chart-stable-host" style="width:100%;min-height:650px"></div>'
+            '<div id="alpha-chart-stable-host" style="width:100%;min-height:1830px"></div>'
             '<script>(function(){'
             'const host=document.getElementById("alpha-chart-stable-host");'
             'if(!host)return;'
             'let frame=host.querySelector("iframe");'
             'if(!frame){frame=document.createElement("iframe");'
             'frame.setAttribute("title","Gráfica BTC interactiva");'
-            'frame.style.cssText="width:100%;height:650px;border:0;display:block;background:#06121a";'
+            'frame.style.cssText="width:100%;height:1830px;border:0;display:block;background:#06121a";'
             'frame.setAttribute("scrolling","yes");'
             'frame.srcdoc=' + safe_html + ';host.appendChild(frame);}'
             'window.__alphaPushChart=function(payload){'
@@ -4717,13 +4666,9 @@ else:
             'if(frame.contentWindow)frame.contentWindow.postMessage({kind:"alpha-chart-update",payload:payload},"*");'
             '};'
             'frame.addEventListener("load",function(){'
-            'try{const doc=frame.contentDocument;const fit=()=>{const h=Math.ceil(Math.max(doc.body.scrollHeight,doc.documentElement.scrollHeight));if(h>0){frame.style.height=h+"px";host.style.minHeight=h+"px";}};fit();new ResizeObserver(fit).observe(doc.body);}catch(e){}'
             'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
             '});'
             'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
             '})();</script>',
             unsafe_allow_javascript=True,
         )
-
-    render_recent_alerts()
-    st.link_button("Ver historial completo →", "?recent_history=1")
