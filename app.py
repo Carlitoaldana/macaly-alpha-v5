@@ -4622,7 +4622,12 @@ _ALPHA_STABLE_PANEL = r"""
 """
 
 # Inicia una sola vez el registrador autónomo continuo.
-
+# No depende de la sesión del navegador: sigue actualizando el estado
+# mientras el proceso de Streamlit permanezca activo.
+try:
+    start_continuous_history_worker()
+except Exception as exc:
+    print(f"[ALPHA CONTINUITY] No se pudo iniciar el registrador: {type(exc).__name__}: {exc}")
 
 page = "signal"
 if page == "signal_trace":
