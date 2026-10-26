@@ -4166,6 +4166,12 @@ def render_experimental_panel(result, price, target, seconds_left, ticker, valid
     </div>'''
 
 
+# Estado compartido entre sesiones del navegador mientras Streamlit siga activo.
+# Se conserva al cerrar/reabrir Safari; no altera el motor de decisiones.
+@st.cache_resource
+def _experimental_shared_state():
+    return {"lock": threading.RLock(), "round": {}, "exit": {}, "flow": {}, "control": {}}
+
 @st.fragment(run_every="2s")
 def live_dashboard():
     errors=[];market=None;btc_df=None;price=None;whale=None;sig={};source='COINBASE'
@@ -4208,18 +4214,20 @@ def live_dashboard():
         kalshi_display_price=None
     reading=experimental_round_context(reading,kalshi_display_price,target,seconds_left)
     reading['round_valid']=round_valid
-    state=st.session_state.setdefault('alpha_round_close_v5',{})
+    shared=_experimental_shared_state()
+    state=shared['round']
     observations=getattr(_PRICE_OBSERVATIONS,'values',{})
-    result=experimental_decision(state,ticker,now.timestamp(),seconds_left,reading,observations.get('COINBASE'))
+    with shared['lock']:
+        result=experimental_decision(state,ticker,now.timestamp(),seconds_left,reading,observations.get('COINBASE'))
     valid=result['valid']
     # Estado propio del aviso: nunca modifica confirmaciones ni dirección oficial.
-    exit_state=st.session_state.setdefault('alpha_exit_watch_v1',{})
+    exit_state=shared['exit']
     result['exit_watch']=experimental_exit_watch(exit_state,ticker,result['direction'],reading,observations.get('COINBASE'),now.timestamp())
     result['buy_sell_advantage']=buying_selling_advantage(
-        st.session_state.setdefault('alpha_accumulated_flow_v1',{}),
+        shared['flow'],
         st.session_state.get('whale_flow_tape',[]),now.timestamp(),whale is not None)
     result['buy_sell_advantage']['price_control']=estimate_price_control(
-        st.session_state.setdefault('alpha_price_control_v1',{}),
+        shared['control'],
         price,observations.get('COINBASE'),now.timestamp(),
         st.session_state.get('whale_flow_tape',[]) if whale is not None else [])
     sig={'price':price,'price_source':'COINBASE','up_probability':reading.get('movement_up',reading.get('up',50)),'down_probability':100-reading.get('movement_up',reading.get('up',50))}
