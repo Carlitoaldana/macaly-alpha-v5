@@ -4652,24 +4652,52 @@ except Exception as exc:
 # No modifica el motor, sus decisiones ni las confirmaciones.
 def render_recent_rounds():
     df = load_history(4)
-    st.markdown("### Últimas rondas")
+    st.markdown("""
+    <style>
+    .alpha-recent {background:#08131e;border:1px solid #293845;border-radius:17px;padding:16px;margin-top:12px}
+    .alpha-recent-title {font-size:21px;font-weight:750;color:#edf4f8;margin-bottom:3px}
+    .alpha-recent-sub {font-size:12px;color:#8999a7;margin-bottom:17px}
+    .alpha-alert {background:#0d1620;border:1px solid #26323d;border-radius:15px;padding:16px;margin:11px 0;color:#dce6ed}
+    .alpha-alert-head {display:flex;justify-content:space-between;align-items:center;gap:12px;font-size:15px;font-weight:750}
+    .alpha-alert-grid {display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:15px;font-size:13px}
+    .alpha-alert-label {color:#7e8e9c;font-size:11px;letter-spacing:.05em}
+    .alpha-alert-bottom {display:flex;justify-content:space-between;gap:12px;margin-top:14px;color:#7e8e9c;font-size:11px;overflow-wrap:anywhere}
+    </style>
+    """, unsafe_allow_html=True)
+    cards = []
     if df.empty:
-        st.caption("Todavía no hay rondas registradas.")
+        cards.append('<div class="alpha-alert" style="color:#8999a7">Esperando la primera señal registrada.</div>')
     else:
         for _, r in df.iterrows():
-            status = str(r.get("Estado", "PENDIENTE"))
-            direction = str(r.get("1ª señal") or "—")
+            status = str(r.get("Estado", "PENDIENTE")).upper()
+            direction = str(r.get("1ª señal") or "—").upper()
             if status == "GANADA":
-                marker, label = "🟢", "WIN"
+                label, color = "WIN", "#6ce7b0"
             elif status == "PERDIDA":
-                marker, label = "🔴", "LOSS"
+                label, color = "LOSS", "#ff647d"
             elif status == "NO TRADE":
-                marker, label = "⚪", "NO TRADE"
+                label, color = "NO TRADE", "#a8b5c0"
             else:
-                marker, label = "🟡", "LIVE / PENDIENTE"
-            ticker = str(r.get("Ronda", ""))
-            st.markdown(f"{marker} **{direction}** · **{label}**  |  `{ticker}`")
-    st.caption("Solo cuenta la primera señal UP/DOWN de cada ronda. Los cambios posteriores no modifican su registro. WIN/LOSS requiere resultado oficial de Kalshi.")
+                label, color = "LIVE", "#f1c65b"
+            dcolor = "#ff647d" if direction == "DOWN" else "#49dfbb" if direction == "UP" else "#a8b5c0"
+            arrow = "▼" if direction == "DOWN" else "▲" if direction == "UP" else ""
+            ticker = html.escape(str(r.get("Ronda") or ""))
+            def val(*names):
+                for name in names:
+                    x = r.get(name)
+                    if x is not None and str(x).strip() not in ("", "nan", "None"):
+                        return html.escape(str(x))
+                return "—"
+            cards.append(f"""<div class="alpha-alert">
+              <div class="alpha-alert-head"><span><span style="color:#8796a4;font-size:12px">BTC 15M</span> &nbsp; <span style="color:{dcolor}">{arrow} {html.escape(direction)}</span></span><span style="color:{color}">{label}</span></div>
+              <div class="alpha-alert-grid">
+                <div><div class="alpha-alert-label">PROB.</div>{val("Probabilidad","PROB.","Prob.")}</div>
+                <div><div class="alpha-alert-label">EDGE</div>{val("Edge","EDGE")}</div>
+                <div><div class="alpha-alert-label">TARGET</div>{val("Target","TARGET")}</div>
+              </div>
+              <div class="alpha-alert-bottom"><span>{val("Hora","Fecha","Fecha/hora")}</span><span>{ticker}</span></div>
+            </div>""")
+    st.markdown('<div class="alpha-recent"><div class="alpha-recent-title">Recent Alerts</div><div class="alpha-recent-sub">BTC 15M · Live bot signals</div>'+''.join(cards)+'</div>',unsafe_allow_html=True)
     if st.button("📋 Ver historial completo", key="alpha_full_history_btn"):
         st.query_params["page"] = "settings"
         st.rerun()
@@ -4688,14 +4716,14 @@ else:
     if initial_html:
         safe_html = json.dumps(initial_html, ensure_ascii=False).replace("<", "\\u003c")
         st.html(
-            '<div id="alpha-chart-stable-host" style="width:100%;min-height:1830px"></div>'
+            '<div id="alpha-chart-stable-host" style="width:100%;min-height:0px"></div>'
             '<script>(function(){'
             'const host=document.getElementById("alpha-chart-stable-host");'
             'if(!host)return;'
             'let frame=host.querySelector("iframe");'
             'if(!frame){frame=document.createElement("iframe");'
             'frame.setAttribute("title","Gráfica BTC interactiva");'
-            'frame.style.cssText="width:100%;height:1830px;border:0;display:block;background:#06121a";'
+            'frame.style.cssText="width:100%;height:950px;border:0;display:block;background:#06121a";'
             'frame.setAttribute("scrolling","yes");'
             'frame.srcdoc=' + safe_html + ';host.appendChild(frame);}'
             'window.__alphaPushChart=function(payload){'
