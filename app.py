@@ -3244,6 +3244,17 @@ def render_history_page():
     """, unsafe_allow_html=True)
 
 
+    st.subheader("Todas las rondas")
+    if df.empty:
+        st.info("Aún no hay rondas guardadas.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.download_button("Descargar historial CSV", df.to_csv(index=False).encode("utf-8-sig"), file_name="alpha_historial_rondas.csv", mime="text/csv")
+    if st.button("← Volver a señales", key="alpha_back_signals"):
+        st.query_params["page"] = "signal"
+        st.rerun()
+
+
 
 # =========================================================
 
@@ -4637,7 +4648,33 @@ try:
 except Exception as exc:
     print(f"[ALPHA CONTINUITY] No se pudo iniciar el registrador: {type(exc).__name__}: {exc}")
 
-page = "signal"
+# Historial visual: la evaluación utiliza exclusivamente la PRIMERA señal registrada.
+# No modifica el motor, sus decisiones ni las confirmaciones.
+def render_recent_rounds():
+    df = load_history(4)
+    st.markdown("### Últimas rondas")
+    if df.empty:
+        st.caption("Todavía no hay rondas registradas.")
+    else:
+        for _, r in df.iterrows():
+            status = str(r.get("Estado", "PENDIENTE"))
+            direction = str(r.get("1ª señal") or "—")
+            if status == "GANADA":
+                marker, label = "🟢", "WIN"
+            elif status == "PERDIDA":
+                marker, label = "🔴", "LOSS"
+            elif status == "NO TRADE":
+                marker, label = "⚪", "NO TRADE"
+            else:
+                marker, label = "🟡", "LIVE / PENDIENTE"
+            ticker = str(r.get("Ronda", ""))
+            st.markdown(f"{marker} **{direction}** · **{label}**  |  `{ticker}`")
+    st.caption("Solo cuenta la primera señal UP/DOWN de cada ronda. Los cambios posteriores no modifican su registro. WIN/LOSS requiere resultado oficial de Kalshi.")
+    if st.button("📋 Ver historial completo", key="alpha_full_history_btn"):
+        st.query_params["page"] = "settings"
+        st.rerun()
+
+page = str(st.query_params.get("page", "signal"))
 if page == "signal_trace":
     render_signal_trace_page()
 elif page == "settings":
@@ -4672,3 +4709,7 @@ else:
             '})();</script>',
             unsafe_allow_javascript=True,
         )
+
+# Resumen compacto al pie de la pantalla principal.
+if page == "signal":
+    render_recent_rounds()
