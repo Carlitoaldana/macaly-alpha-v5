@@ -394,7 +394,10 @@ def _entry_route_checks(sig, seconds_left):
                              and (all(ok for _,ok in current) or d3==side or d5==side))
         sides[side] = []
         for name,checks in routes:
-            checks = checks+[("Fuera de la zona de ruido",noise_ok),
+            # Every route needs current one-minute corroboration, including
+            # routes driven by older 3/5-minute context. Symmetric, no side lock.
+            checks = checks+[("Precio actual respecto a EMA9 y MACD de 1 minuto a favor", live_ema*sign>0 and m1*sign>0),
+                            ("Fuera de la zona de ruido",noise_ok),
                             ("Distancia al target y tiempo respaldan la dirección",target_ok)]
             sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
                                 "total":len(checks),"complete":all(bool(ok) for _,ok in checks)})
