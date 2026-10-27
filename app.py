@@ -1257,5 +1257,103 @@ def main():
         Handler.bot.db.close()
         lock.close()
 
-if __name__=='__main__':
-    main()
+
+# Streamlit entry point. The signal engine and paper execution above are unchanged.
+import streamlit as st
+import pandas as pd
+st.set_page_config(page_title='ALPHA EDGE · Simulación', page_icon='📈', layout='wide')
+st.markdown('''<style>
+.stApp {background:#080f20;color:#e8edf7}
+[data-testid="stSidebar"]{background:#101b32}
+h1,h2,h3{color:#e7c36b!important} 
+[data-testid="stMetric"]{background:#122039;border:1px solid #344564;border-radius:12px;padding:16px}
+.stButton>button,.stFormSubmitButton>button{border:1px solid #c5a659;border-radius:8px}
+</style>''',unsafe_allow_html=True)
+
+@st.cache_resource
+def paper_bot():
+    db=ROOT/'data'/'streamlit_paper.sqlite3'
+    db.parent.mkdir(parents=True,exist_ok=True)
+    b=Bot(db)
+    b.start_worker()
+    return b
+
+bot=paper_bot()
+st.sidebar.title('ALPHA EDGE')
+st.sidebar.caption('BTC · 15 MINUTOS')
+st.sidebar.info('SIMULACIÓN · Sin compras con dinero real')
+page=st.sidebar.radio('Terminal',['Operación','Ajustes','Historial'])
+st.sidebar.caption('En Streamlit Cloud el proceso puede suspenderse. Descarga el historial antes de reiniciar: el disco no es permanente.')
+st.title('ALPHA EDGE')
+st.caption('Tu cerebro de señales · Ejecución automática simulada')
+
+labels={
+'contracts':'Contratos por entrada','min_entry_cents':'Precio mínimo de compra (¢)',
+'max_entry_cents':'Precio máximo de compra (¢)','take_profit_cents':'Take profit: subida desde entrada (¢)',
+'stop_loss_cents':'Stop loss: caída desde entrada (¢)','exit_before_close':'Salir antes del cierre (segundos)',
+'max_entries_round':'Máximo de entradas por ronda','daily_loss_dollars':'Límite de pérdida diaria ($)',
+'daily_goal_dollars':'Objetivo diario ($; 0 desactiva)','max_trade_dollars':'Máximo por operación ($)',
+'starting_balance':'Saldo inicial simulado ($)','fee_cents_per_contract':'Comisión simulada por contrato (¢)'}
+bounds={'contracts':(1,1000),'min_entry_cents':(1,98),'max_entry_cents':(2,99),
+ 'take_profit_cents':(0,98),'stop_loss_cents':(0,98),'exit_before_close':(0,300),
+ 'max_entries_round':(1,100),'daily_loss_dollars':(1,100000),'daily_goal_dollars':(0,100000),
+ 'max_trade_dollars':(1,100000),'starting_balance':(1,1000000),'fee_cents_per_contract':(0,20)}
+
+if page=='Ajustes':
+    st.subheader('Plan de operación simulada')
+    with st.form('settings'):
+        cfg=bot.view()['settings']
+        cols=st.columns(2)
+        for i,(key,label) in enumerate(labels.items()):
+            lo,hi=bounds[key]
+            cfg[key]=cols[i%2].number_input(label,min_value=lo,max_value=hi,value=int(cfg[key]),step=1,key=key)
+        cfg['close_on_reverse']=st.checkbox('Cerrar posición si el cerebro confirma la dirección contraria',value=cfg['close_on_reverse'])
+        st.caption('Take profit y stop loss en 0 desactivan esa salida. Las posiciones abiertas conservan su plan original.')
+        if st.form_submit_button('Guardar ajustes'):
+            try:
+                bot.save_settings(cfg)
+                st.success('Ajustes guardados.')
+            except ValueError as e:
+                st.error(str(e))
+else:
+    @st.fragment(run_every='2s')
+    def live_panel():
+        v=bot.view()
+        if page=='Operación':
+            cols=st.columns(3)
+            if cols[0].button('Iniciar simulación',use_container_width=True):
+                bot.command('start'); v=bot.view()
+            if cols[1].button('Pausar entradas',use_container_width=True):
+                bot.command('pause'); v=bot.view()
+            if cols[2].button('Cerrar posiciones simuladas',use_container_width=True):
+                bot.command('close'); v=bot.view()
+            st.caption('Pausar detiene entradas nuevas; las salidas siguen vigiladas mientras el proceso esté activo.')
+            a,b,c,d=st.columns(4)
+            a.metric('Estado',v['status'])
+            b.metric('Dirección confirmada',v.get('signal') or 'ANALIZANDO')
+            c.metric('Efectivo simulado',f"${v['totals']['cash']:,.2f}")
+            d.metric('Resultado diario',f"${v['totals']['daily']:,.2f}")
+            st.info(v.get('message','Esperando lectura'))
+            if v.get('status')=='SIN DATOS':
+                st.warning('No hay lectura actual válida. Los valores anteriores pueden estar vencidos.')
+            a,b,c=st.columns(3)
+            price=v.get('price'); target=v.get('target'); remaining=v.get('seconds_left')
+            a.metric('BTC observado',f'${price:,.2f}' if price else '—')
+            b.metric('Objetivo de la ronda',f'${target:,.2f}' if target else '—')
+            c.metric('Tiempo en última lectura',f'{int(remaining)//60:02d}:{int(remaining)%60:02d}' if remaining is not None else '—')
+            st.caption(f"Ronda: {v.get('market',{}).get('ticker','—')} · Actualización: {v.get('updated','—')} · Fuente: {v.get('source','—')}")
+            st.subheader('Posiciones simuladas abiertas')
+            if v['positions']: st.dataframe(pd.DataFrame(v['positions']),hide_index=True,use_container_width=True)
+            else: st.caption('Sin posiciones abiertas.')
+            st.subheader('Primeras señales de cada ronda')
+            if v['rounds']:
+                rows=[{'Ronda':r['ticker'],'Primera señal':r.get('first_direction'),'Dirección actual':r.get('active_direction')} for r in v['rounds']]
+                st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+        else:
+            st.subheader('Historial de simulación')
+            df=pd.DataFrame(v['trades'])
+            st.download_button('Descargar operaciones CSV',df.to_csv(index=False).encode('utf-8-sig'),'alpha_operaciones.csv','text/csv')
+            st.dataframe(df,hide_index=True,use_container_width=True)
+            st.subheader('Registro del sistema')
+            st.dataframe(pd.DataFrame(v['events']),hide_index=True,use_container_width=True)
+    live_panel()
