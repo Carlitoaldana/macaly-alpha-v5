@@ -698,7 +698,7 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parent
 API = 'https://external-api.kalshi.com/trade-api/v2'
 DEFAULTS = dict(contracts=1, min_entry_cents=10, max_entry_cents=60,
-                take_profit_cents=12, stop_loss_cents=10, exit_before_close=20,
+                take_profit_cents=90, stop_loss_cents=10, exit_before_close=20,
                 max_entries_round=1, daily_loss_dollars=25, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=1000,
                 fee_cents_per_contract=2, close_on_reverse=True)
@@ -729,7 +729,7 @@ def valid_settings(raw):
     if not isinstance(raw, dict) or set(raw) != set(DEFAULTS):
         raise ValueError('Envía todos los ajustes; hay campos desconocidos o ausentes.')
     bounds = {'contracts':(1,1000), 'min_entry_cents':(1,98), 'max_entry_cents':(2,99),
-              'take_profit_cents':(0,98), 'stop_loss_cents':(0,98),
+              'take_profit_cents':(0,100), 'stop_loss_cents':(0,98),
               'exit_before_close':(0,300), 'max_entries_round':(1,100),
               'daily_loss_dollars':(1,100000), 'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
@@ -882,6 +882,14 @@ class Bot:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,message TEXT);
         ''')
         self.settings = self.kv('settings') or DEFAULTS.copy()
+        # Migrate the old take-profit offset to a Kalshi contract price target.
+        if self.kv('kalshi_tp_target_migrated') is None:
+            old_tp = int(self.settings.get('take_profit_cents', 12))
+            self.settings['take_profit_cents'] = 90 if old_tp else 0
+            self.put('settings', self.settings)
+            self.db.execute('UPDATE trades SET tp = MIN(100, entry + tp) WHERE closed IS NULL AND tp > 0')
+            self.put('kalshi_tp_target_migrated', True)
+            self.db.commit()
         self.running = False  # Never resumes buying after a server restart.
         self.close_requested = False
         self.snapshot = {'status':'INICIANDO','message':'Esperando la primera lectura verificada.', 'mode':'SIMULACIÓN', 'signal':None}
@@ -974,7 +982,7 @@ class Bot:
         reason=None
         if self.close_requested:
             reason='CIERRE MANUAL'
-        elif p['tp'] and price>=p['entry']+p['tp']:
+        elif p['tp'] and price>=p['tp']:
             reason='TAKE PROFIT'
         elif p['sl'] and price<=p['entry']-p['sl']:
             reason='STOP LOSS'
@@ -1415,9 +1423,9 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="maxEntry" value="60" min="1" max="99" required>
 </div>
 <div class="field">
-<label>Take profit (¢)<small>Subida desde el precio de entrada; 0 desactiva</small>
+<label>Take profit — objetivo Kalshi (%)<small>Precio del contrato (90% = 90¢); 0 desactiva</small>
 </label>
-<input type="number" name="tp" value="12" min="0" max="98" required>
+<input type="number" name="tp" value="90" min="0" max="100" required>
 </div>
 <div class="field">
 <label>Stop loss (¢)<small>Caída desde el precio de entrada; 0 desactiva</small>
@@ -1551,7 +1559,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <script>
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
-const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:false}):'—';
+const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}):'—';
 const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',entries:'max_entries_round',minEntry:'min_entry_cents',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
