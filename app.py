@@ -697,8 +697,8 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 API = 'https://external-api.kalshi.com/trade-api/v2'
-DEFAULTS = dict(contracts=1, min_entry_cents=10, max_entry_cents=60,
-                take_profit_cents=12, stop_loss_cents=10, exit_before_close=20,
+DEFAULTS = dict(contracts=1, max_entry_cents=60,
+                take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_loss_dollars=25, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=1000,
                 fee_cents_per_contract=2, close_on_reverse=True)
@@ -728,9 +728,9 @@ def dumps(value):
 def valid_settings(raw):
     if not isinstance(raw, dict) or set(raw) != set(DEFAULTS):
         raise ValueError('Envía todos los ajustes; hay campos desconocidos o ausentes.')
-    bounds = {'contracts':(1,1000), 'min_entry_cents':(1,98), 'max_entry_cents':(2,99),
-              'take_profit_cents':(0,98), 'stop_loss_cents':(0,98),
-              'exit_before_close':(0,300), 'max_entries_round':(1,100),
+    bounds = {'contracts':(1,1000), 'max_entry_cents':(2,99),
+              'take_profit_pct':(0,10000), 'stop_loss_pct':(0,100),
+              'max_entries_round':(1,100),
               'daily_loss_dollars':(1,100000), 'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20)}
@@ -743,8 +743,6 @@ def valid_settings(raw):
     if not isinstance(raw['close_on_reverse'], bool):
         raise ValueError('El cierre por cambio de señal debe ser sí o no.')
     out['close_on_reverse'] = raw['close_on_reverse']
-    if out['min_entry_cents'] > out['max_entry_cents']:
-        raise ValueError('El precio mínimo no puede superar al máximo.')
     return out
 
 class MarketData:
@@ -919,7 +917,14 @@ class Bot:
               tp INTEGER, sl INTEGER, exit_seconds INTEGER, reverse INTEGER);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,message TEXT);
         ''')
-        self.settings = self.kv('settings') or DEFAULTS.copy()
+        columns={r[1] for r in self.db.execute('PRAGMA table_info(trades)')}
+        for column in ('tp_pct','sl_pct'):
+            if column not in columns:
+                self.db.execute('ALTER TABLE trades ADD COLUMN '+column+' REAL')
+        saved=self.kv('settings') or {}
+        self.settings={key:saved.get(key,value) for key,value in DEFAULTS.items()}
+        self.put('settings',self.settings)
+        self.db.commit()
         self.running = False  # Never resumes buying after a server restart.
         self.close_requested = False
         self.snapshot = {'status':'INICIANDO','message':'Esperando la primera lectura verificada.', 'mode':'SIMULACIÓN', 'signal':None}
@@ -1009,15 +1014,16 @@ class Bot:
         price=fill_book(bids,p['quantity'])
         if price is None:
             return
+        paid=p['entry']*p['quantity']/100+p['entry_fee']
+        net=(price-p['entry'])*p['quantity']/100-p['entry_fee']-self.settings['fee_cents_per_contract']*p['quantity']/100
+        roi=net/paid*100 if paid>0 else 0
         reason=None
         if self.close_requested:
             reason='CIERRE MANUAL'
-        elif p['tp'] and price>=p['entry']+p['tp']:
+        elif (p.get('tp_pct') is not None and p['tp_pct'] and roi+1e-9>=p['tp_pct']) or (p.get('tp_pct') is None and p['tp'] and price>=p['entry']+p['tp']):
             reason='TAKE PROFIT'
-        elif p['sl'] and price<=p['entry']-p['sl']:
+        elif (p.get('sl_pct') is not None and p['sl_pct'] and roi<=-p['sl_pct']+1e-9) or (p.get('sl_pct') is None and p['sl'] and price<=p['entry']-p['sl']):
             reason='STOP LOSS'
-        elif p['exit_seconds'] and remaining is not None and 0<remaining<=p['exit_seconds']:
-            reason='ANTES DEL CIERRE'
         elif p['reverse'] and signal in ('UP','DOWN') and signal!=p['side']:
             reason='CAMBIO DE SEÑAL'
         if reason:
@@ -1031,7 +1037,7 @@ class Bot:
             return 'Libro atrasado; esperando datos actuales.'
         # Remaining recalculated after every network request.
         actual=engine.get_seconds_remaining(market)
-        if actual is None or actual<=max(s['exit_before_close'],0):
+        if actual is None or actual<=0:
             return 'Fuera de ventana de entrada.'
         total=self.totals()
         if total['daily']<=-s['daily_loss_dollars']:
@@ -1048,14 +1054,12 @@ class Bot:
         if sized is None:
             return 'Sin liquidez suficiente para el importe configurado dentro del precio máximo.'
         quantity,price=sized
-        if price<s['min_entry_cents']:
-            return 'Precio inferior al mínimo configurado.'
         fee=quantity*s['fee_cents_per_contract']/100
         cost=price*quantity/100+fee
         if cost>budget+1e-8 or cost>total['cash']+1e-8:
             return 'La compra supera el importe o el saldo virtual disponible.'
-        self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse) VALUES (?,?,?,?,?,?,?,?,?,?)',
-                        (market['ticker'],side,quantity,price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
+        self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse,tp_pct,sl_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                        (market['ticker'],side,quantity,price,fee,stamp(),0,0,0,s['close_on_reverse'],s['take_profit_pct'],s['stop_loss_pct']))
         self.event('ENTRADA',f"{side} · {quantity} contrato(s) · Compró ${cost:.2f} incluyendo comisión · {price:.2f}¢ · ejecución simulada FOK")
         return 'Compra simulada ejecutada.'
 
@@ -1446,37 +1450,26 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Precios y protección</h2>
 <div class="body">
-<div class="field">
-<label>Precio mínimo de compra (¢)</label>
-<input type="number" name="minEntry" value="10" min="1" max="99" required>
-</div>
+
 <div class="field">
 <label>Precio máximo de compra (¢)</label>
 <input type="number" name="maxEntry" value="60" min="1" max="99" required>
 </div>
 <div class="field">
-<label>Take profit (¢)<small>Subida desde el precio de entrada; 0 desactiva</small>
-</label>
-<input type="number" name="tp" value="12" min="0" max="98" required>
+<label>Tomar profit (%)<small>Ganancia neta sobre lo pagado; requiere precio y liquidez suficientes.</small></label>
+<select name="tp"><option value="0">Desactivado</option><option value="80">+80%</option><option value="85">+85%</option><option value="90">+90%</option><option value="95">+95%</option></select>
 </div>
 <div class="field">
-<label>Stop loss (¢)<small>Caída desde el precio de entrada; 0 desactiva</small>
-</label>
-<input type="number" name="sl" value="10" min="0" max="98" required>
+<label>Stop loss (%)<small>Porcentaje de pérdida sobre lo pagado; 0 desactiva.</small></label>
+<input type="number" name="sl" value="10" min="0" max="100" required>
 </div>
-<div class="field">
-<label>Salida antes del cierre (seg.)</label>
-<input type="number" name="exitTime" value="20" min="0" max="300" required>
-</div>
+
 <div class="field">
 <label>Cerrar por señal contraria<small>Ajuste de salida; no fija la dirección del cerebro</small>
 </label>
 <input type="checkbox" name="reverse" checked>
 </div>
-<div class="field">
-<label>Comisión estimada por contrato (¢)</label>
-<input type="number" name="fee" value="2" min="0" max="20" required>
-</div>
+<input type="hidden" name="fee" value="2">
 </div>
 </article>
 </div>
@@ -1592,7 +1585,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:false}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',entries:'max_entries_round',minEntry:'min_entry_cents',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
