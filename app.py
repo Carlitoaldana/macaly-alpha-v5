@@ -1027,6 +1027,14 @@ class Bot:
                 continue
             quantity += take
             remaining_budget_cents -= take * unit_cost
+        # Auditoría: distinguir presupuesto insuficiente de liquidez limitada.
+        eligible = [(p, int(q)) for p, q in book[side]['asks']
+                    if p <= s['max_entry_cents'] and q >= 1]
+        available_contracts = sum(q for _, q in eligible)
+        self.event('DIAGNÓSTICO COMPRA',
+                   f"Saldo ${total['cash']:.2f} · presupuesto 5 % ${budget:.2f} · "
+                   f"liquidez hasta {s['max_entry_cents']}¢: {available_contracts} contratos · "
+                   f"cantidad calculada: {quantity}")
         if quantity < 1:
             return 'Saldo del 5 % insuficiente o sin liquidez al precio máximo.'
         price = fill_book(book[side]['asks'], quantity, s['max_entry_cents'])
