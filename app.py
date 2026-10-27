@@ -1185,6 +1185,11 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .radar.paused .sweep{animation-play-state:paused}
 @keyframes sweep{to{transform:rotate(360deg)}
 }
+
+.profit-orbit{position:absolute;inset:-10px;width:calc(100% + 20px);height:calc(100% + 20px);pointer-events:none;z-index:4;opacity:0;transition:opacity .35s}
+.profit-orbit-track{fill:none;stroke:#34d39922;stroke-width:2.5}
+.profit-orbit-value{fill:none;stroke:#34d399;stroke-width:2.5;stroke-linecap:round;stroke-dasharray:100;stroke-dashoffset:100;transform:rotate(-90deg);transform-origin:60px 60px;filter:drop-shadow(0 0 3px #34d399);transition:stroke-dashoffset .7s ease}
+@media(prefers-reduced-motion:reduce){.profit-orbit,.profit-orbit-value{transition:none}}
 .radar-core{position:absolute;inset:35%;border:1px solid var(--gold);border-radius:50%;background:radial-gradient(#1a335c,#080d1e);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2;box-shadow:0 0 25px #071327}
 .radar-core b{font-size:clamp(14px,2.3vw,25px);color:var(--gold);letter-spacing:1px}
 .radar-core small{font-size:9px;letter-spacing:2px}
@@ -1331,6 +1336,10 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </span>
 </div>
 <div class="radar paused" id="radar">
+<svg class="profit-orbit" id="profitOrbit" viewBox="0 0 120 120" role="progressbar" aria-label="Ganancia hacia el Take Profit" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-hidden="true">
+<circle class="profit-orbit-track" cx="60" cy="60" r="57"/>
+<circle class="profit-orbit-value" id="profitOrbitValue" cx="60" cy="60" r="57" pathLength="100"/>
+</svg>
 <div class="sweep">
 </div>
 <span class="rnum n">00</span>
@@ -1599,18 +1608,37 @@ const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textCont
 form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
 $('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
+function profitRingProgress(positions,net,marked,fresh,fee){
+ if(!fresh||!marked||!positions.length||!Number.isFinite(net))return null;
+ let target=0;
+ for(const p of positions){
+  const paid=p.entry*p.quantity/100+p.entry_fee;
+  let goal=p.tp_pct!=null?(p.tp_pct>0?paid*p.tp_pct/100:0):(p.tp>0?p.tp*p.quantity/100-p.entry_fee-fee*p.quantity/100:0);
+  if(!Number.isFinite(goal)||goal<=0)return null;
+  target+=goal;
+ }
+ return Math.max(0,Math.min(100,net/target*100));
+}
+function updateProfitRing(s,net,marked,fresh){
+ const progress=profitRingProgress(s.positions,net,marked,fresh,s.settings.fee_cents_per_contract);
+ const orbit=$('#profitOrbit');
+ orbit.style.opacity=progress===null?'0':'1';
+ orbit.setAttribute('aria-hidden',progress===null?'true':'false');
+ orbit.setAttribute('aria-valuenow',String(Math.round(progress||0)));
+ $('#profitOrbitValue').style.strokeDashoffset=String(100-(progress||0));
+}
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent='SIMULACIÓN · '+s.message;
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.daily,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.daily/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
+updateProfitRing(s,net,marked,fresh);$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
 if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}el.value=String(value)}}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.has_trades;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(fresh?'DATOS PÚBLICOS CONECTADOS':'ESPERANDO DATOS PÚBLICOS')+' · '+(s.connection?.message||'Simulación local activa; no requiere API privada.');height();tick()}
-function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
+function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#profitOrbit').style.opacity='0';$('#profitOrbit').setAttribute('aria-hidden','true');$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
 window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.snapshot)update(args.snapshot);let reply=args.reply;if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.ok&&reply.kind==='settings'){dirty=false;if(args.snapshot)update(args.snapshot)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
