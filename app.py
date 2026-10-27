@@ -321,6 +321,49 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "reliable": True, "efficiency": round(float(efficiency), 3),
             "recent_atr": round(recent, 3)}
 
+def _price_level_context(df, price, atr, now=None):
+    """Causal 20-bar levels and five-bar rejection evidence, mirrored by side.
+
+    Recent tests use levels fixed before those bars, so tests cannot move the
+    obstacle they are evaluated against. An open candle never confirms a break.
+    """
+    now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+    x = df.sort_values("time").copy()
+    closed = x[pd.to_datetime(x["time"], utc=True) + pd.Timedelta(minutes=1) <= now]
+    if len(closed) < 25 or not np.isfinite(price) or not np.isfinite(atr) or atr <= 0:
+        return {"valid": False, "sides": {}}
+    anchor, recent = closed.iloc[-25:-5], closed.iloc[-5:]
+    prior = closed.tail(20)
+    tolerance, margin, setback = .15*atr, .15*atr, .35*atr
+    sides = {}
+    for side, sign in (("UP", 1), ("DOWN", -1)):
+        level = float(prior["high"].max() if sign == 1 else prior["low"].min())
+        old = float(anchor["high"].max() if sign == 1 else anchor["low"].min())
+        # A breakout must be beyond the previous fixed level both at the last
+        # completed close and at the verified live price.
+        breakout = sign*(float(closed.iloc[-1]["close"])-old) > margin and sign*(price-old) > margin
+        near = -margin <= sign*(level-price) <= .35*atr
+        rejected = False
+        for _, bar in recent.iterrows():
+            extreme = float(bar["high"] if sign == 1 else bar["low"])
+            touched = sign*(extreme-old) >= -tolerance
+            returned = sign*(old-float(bar["close"])) >= setback
+            adverse_body = sign*(float(bar["close"])-float(bar["open"])) < 0
+            if touched and returned and adverse_body:
+                rejected = True
+        # A clear new completed break releases any previous rejection.
+        rejected = rejected and not breakout
+        allowed = breakout or not (near or rejected)
+        reason = ("RUPTURA RESPALDADA" if breakout else
+                  "RECHAZO EN RESISTENCIA" if rejected and sign == 1 else
+                  "REBOTE EN SOPORTE" if rejected else
+                  "ESPERANDO RUPTURA DE RESISTENCIA" if near and sign == 1 else
+                  "ESPERANDO RUPTURA DE SOPORTE" if near else "SIN OBSTÁCULO CERCANO")
+        sides[side] = dict(allowed=allowed, rejected=rejected, breakout=breakout,
+                           level=level, tested_level=old, reason=reason)
+    return {"valid": True, "sides": sides}
+
+
 def _entry_route_checks(sig, seconds_left):
     """Prueba: sin umbrales directos de momentum para confirmar entradas.
 
@@ -396,7 +439,9 @@ def _entry_route_checks(sig, seconds_left):
         for name,checks in routes:
             # Every route needs current one-minute corroboration, including
             # routes driven by older 3/5-minute context. Symmetric, no side lock.
-            checks = checks+[("Precio actual respecto a EMA9 y MACD de 1 minuto a favor", live_ema*sign>0 and m1*sign>0),
+            level_context = sig.get("level_context_internal") or {}
+            level_side = level_context.get("sides", {}).get(side, {})
+            checks = checks+[(level_side.get("reason", "Esperando niveles verificables"), level_context.get("valid", False) and level_side.get("allowed", False)), ("Precio actual respecto a EMA9 y MACD de 1 minuto a favor", live_ema*sign>0 and m1*sign>0),
                             ("Fuera de la zona de ruido",noise_ok),
                             ("Distancia al target y tiempo respaldan la dirección",target_ok)]
             sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
@@ -428,7 +473,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         flow_context["valid"] = (flow_side in ("UP","DOWN") and
             float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
             float(whale.get("flow_strength") or 0)>=.20)
-    route_input = {"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
+    level_context = _price_level_context(df, price, atr)
+    route_input = {"level_context_internal":level_context,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
         "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
         "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
         "price_ema9_atr":(price-float(l1["ema9"]))/atr,
@@ -450,7 +496,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"level_context_internal":level_context,"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 def _retention_assessment(state, signal):
     """Separate affirmative, opposite and unknown evidence for an active side."""
@@ -459,6 +505,9 @@ def _retention_assessment(state, signal):
         return 0, 0
     sign = 1 if side == "UP" else -1
     support = contrary = 0
+    level = (signal.get("level_context_internal") or {}).get("sides", {}).get(side, {})
+    if level.get("rejected"):
+        contrary += 1
     ema = signal.get("ema")
     if ema in ("BULL", "BEAR"):
         if ema == ("BULL" if sign == 1 else "BEAR"):
