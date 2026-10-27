@@ -1008,30 +1008,37 @@ class Bot:
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:
             return 'Máximo de entradas de esta ronda alcanzado.'
-        # Simulación por importe en dólares: 5 % del efectivo disponible.
-        # El precio visible del mercado sirve de referencia; no se limita la
-        # cantidad por la profundidad del libro (no es una ejecución real).
-        budget = round(max(0.0, total['cash']) * 0.05, 2)
-        eligible_prices = [float(price) for price, size in book[side]['asks']
-                           if size > 0 and 0 < price <= s['max_entry_cents']]
-        if not eligible_prices:
-            return 'Sin precio de entrada válido dentro del máximo configurado.'
-        price = min(eligible_prices)
-        fee_per_contract = float(s['fee_cents_per_contract'])
-        unit_cost_cents = price + fee_per_contract
-        if unit_cost_cents <= 0:
-            return 'Precio o comisión inválidos.'
-        # Las unidades son enteras; nunca gastar más del 5 % con comisiones.
-        quantity = int((budget * 100 + 1e-7) // unit_cost_cents)
+        # Tamaño automático: hasta 5 % del saldo virtual disponible por entrada.
+        # Se incluyen las comisiones y se respeta el precio máximo y la profundidad real del libro.
+        budget = max(0.0, total['cash']) * 0.05
+        remaining_budget_cents = budget * 100
+        fee_per_contract = s['fee_cents_per_contract']
+        quantity = 0
+        for level_price, level_size in sorted(book[side]['asks']):
+            if level_price > s['max_entry_cents']:
+                continue
+            unit_cost = level_price + fee_per_contract
+            if unit_cost <= 0:
+                continue
+            affordable = int((remaining_budget_cents + 1e-7) // unit_cost)
+            available = int(level_size)
+            take = min(affordable, available)
+            if take <= 0:
+                continue
+            quantity += take
+            remaining_budget_cents -= take * unit_cost
         if quantity < 1:
-            return 'El 5 % del saldo no alcanza para una unidad al precio actual.'
+            return 'Saldo del 5 % insuficiente o sin liquidez al precio máximo.'
+        price = fill_book(book[side]['asks'], quantity, s['max_entry_cents'])
+        if price is None:
+            return 'Sin liquidez suficiente dentro del precio máximo.'
         fee = quantity * fee_per_contract / 100
         cost = price * quantity / 100 + fee
         if cost > budget + 1e-7 or cost > total['cash'] + 1e-7:
-            return 'La compra supera el presupuesto disponible.'
+            return 'La compra supera el 5 % del saldo virtual disponible.'
         self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse) VALUES (?,?,?,?,?,?,?,?,?,?)',
                         (market['ticker'],side,quantity,price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
-        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} (5 % del saldo) · simulación por importe")
+        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} (5 % del saldo) · FOK")
         return 'Compra simulada ejecutada.'
 
     def step(self):
@@ -1325,7 +1332,10 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Posición</h2>
 <div class="position">
-<span class="label">GANANCIA NO REALIZADA</span>
+<span class="label">IMPORTE REALMENTE COMPRADO</span>
+<div class="amount" id="investedAmount">—</div>
+<hr>
+<span class="label">GANANCIA / PÉRDIDA ACTUAL</span>
 <div class="amount" id="unrealized">—</div>
 <span class="muted" id="positionNote">Sin operaciones</span>
 <hr>
@@ -1573,8 +1583,11 @@ function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.upda
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent='SIMULACIÓN · '+s.message;
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');metrics[0].textContent=money(s.totals.daily);metrics[1].textContent=money(s.totals.realized);let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.daily/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#unrealized').textContent=marked?money(net):'—';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
+let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';
+ let invested=s.positions.reduce((sum,p)=>sum+(Number(p.entry||0)*Number(p.quantity||0))/100+Number(p.entry_fee||0),0);
+ $('#investedAmount').textContent=s.positions.length?money(invested):'—';
+ let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
+$('#unrealized').textContent=marked?money(net):'—';$('#unrealized').style.color=!marked?'':net>0?'#20c879':net<0?'#ff5b66':'#f4f5f7';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
 if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else el.value=s.settings[key]}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.has_trades;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
