@@ -701,7 +701,7 @@ DEFAULTS = dict(contracts=1, min_entry_cents=10, max_entry_cents=60,
                 take_profit_cents=90, stop_loss_cents=10, exit_before_close=20,
                 max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=50, starting_balance=1000,
-                fee_cents_per_contract=2, close_on_reverse=True)
+                fee_cents_per_contract=2, close_on_reverse=True, martingale_enabled=False, martingale_levels=5)
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -733,7 +733,7 @@ def valid_settings(raw):
               'exit_before_close':(0,300), 'max_entries_round':(1,100),
               'daily_goal_dollars':(0,100000),
               'starting_balance':(1,1000000),
-              'fee_cents_per_contract':(0,20)}
+              'fee_cents_per_contract':(0,20), 'martingale_levels':(1,12)}
     out = {}
     for key, (low, high) in bounds.items():
         v = raw[key]
@@ -747,6 +747,9 @@ def valid_settings(raw):
     if not isinstance(raw['close_on_reverse'], bool):
         raise ValueError('El cierre por cambio de señal debe ser sí o no.')
     out['close_on_reverse'] = raw['close_on_reverse']
+    if not isinstance(raw['martingale_enabled'], bool):
+        raise ValueError('Martingala debe activarse o desactivarse.')
+    out['martingale_enabled'] = raw['martingale_enabled']
     return out
 
 class MarketData:
@@ -883,7 +886,7 @@ class Bot:
               tp INTEGER, sl INTEGER, exit_seconds INTEGER, reverse INTEGER);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,message TEXT);
         ''')
-        self.settings = self.kv('settings') or DEFAULTS.copy()
+        self.settings = {**DEFAULTS, **(self.kv('settings') or {})}
         self.settings['min_entry_cents'] = 1
         # Migrate the old take-profit offset to a Kalshi contract price target.
         if self.kv('kalshi_tp_target_migrated') is None:
@@ -915,6 +918,12 @@ class Bot:
         with self.lock:
             if settings['starting_balance'] != self.settings['starting_balance'] and self.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone():
                 raise ValueError('El saldo inicial ya tiene operaciones y no puede cambiarse.')
+            previous=(self.settings.get('martingale_enabled'),self.settings.get('martingale_levels'),self.settings.get('max_trade_dollars'))
+            current=(settings['martingale_enabled'],settings['martingale_levels'],settings['max_trade_dollars'])
+            if previous!=current:
+                # New progression starts with the NEXT trade; old trades do not count.
+                last_id=self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
+                self.put('martingale_start_trade_id',last_id)
             self.settings=settings
             self.put('settings',settings)
             self.event('AJUSTES','Ajustes guardados; se aplican a entradas nuevas. Las posiciones conservan su plan de salida.')
@@ -996,6 +1005,25 @@ class Bot:
         if reason:
             self._close(p,price,reason)
 
+    def martingale_state(self):
+        cfg=self.settings
+        levels=int(cfg.get('martingale_levels',5))
+        enabled=bool(cfg.get('martingale_enabled',False))
+        anchor=int(self.kv('martingale_start_trade_id') or 0)
+        history=self.db.execute('SELECT pnl FROM trades WHERE id>? AND closed IS NOT NULL ORDER BY id DESC',(anchor,)).fetchall()
+        streak=0
+        for trade in history:
+            if trade['pnl'] is not None and float(trade['pnl']) < 0:
+                streak+=1
+            else:
+                break
+        # The last loss at final level stops further simulated entries until reset.
+        exhausted=enabled and streak>=levels
+        level=min(streak+1,levels) if enabled else 1
+        base=float(cfg['max_trade_dollars'])
+        requested=round(base*(2**(level-1)),2) if enabled else base
+        return dict(enabled=enabled,level=level,levels=levels,losses=streak,exhausted=exhausted,requested=requested)
+
     def enter(self,market,book,side,remaining):
         s=self.settings
         if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
@@ -1012,9 +1040,11 @@ class Bot:
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:
             return 'Máximo de entradas de esta ronda alcanzado.'
-        # Simulación por importe fijo en dólares, limitado al efectivo disponible.
-        # No depende de un porcentaje del saldo.
-        budget = round(min(max(0.0, total['cash']), float(s['max_trade_dollars'])), 2)
+        progression=self.martingale_state()
+        if progression['exhausted']:
+            return 'Martingala completada: límite de niveles alcanzado. Reinicia desde Ajustes.'
+        # Apuesta inicial y escalones 1, 2, 4, 8... Se calcula antes de comprar.
+        budget = round(min(max(0.0, total['cash']), progression['requested']), 2)
         eligible_prices = [float(price) for price, size in book[side]['asks']
                            if size > 0 and 0 < price <= s['max_entry_cents']]
         if not eligible_prices:
@@ -1034,7 +1064,7 @@ class Bot:
             return 'La compra supera el presupuesto disponible.'
         self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse) VALUES (?,?,?,?,?,?,?,?,?,?)',
                         (market['ticker'],side,quantity,price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
-        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} (importe fijo) · simulación por importe")
+        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} · nivel {progression['level']}/{progression['levels']} · objetivo ${progression['requested']:.2f}")
         return 'Compra simulada ejecutada.'
 
     def step(self):
@@ -1102,7 +1132,7 @@ class Bot:
         with self.lock:
             result=dict(self.snapshot)
             result.update(running=self.running,close_requested=self.close_requested,settings=self.settings.copy(),
-                          positions=self.positions(),totals=self.totals(),
+                          positions=self.positions(),totals=self.totals(),martingale=self.martingale_state(),
                           trades=[dict(r) for r in self.db.execute('SELECT * FROM trades ORDER BY id DESC LIMIT 200')],
                           events=[dict(r) for r in self.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 60')])
             result['rounds']=[{'ticker':r['ticker'],**json.loads(r['state'])} for r in self.db.execute('SELECT * FROM rounds ORDER BY rowid DESC LIMIT 50')]
@@ -1409,8 +1439,18 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="goal" value="50" min="0" required>
 </div>
 <div class="field">
-<label>Importe fijo por operación ($)<small>Compra por este importe o por el saldo disponible si es menor.</small></label>
+<label>Apuesta inicial ($)<small>Importe del primer nivel. Si ganas, vuelve a este importe.</small></label>
 <input type="number" name="tradeAmount" value="50" min="0.01" max="100000" step="0.01" required>
+</div>
+<div class="field">
+<label>Activar martingala</label>
+<input type="checkbox" name="martingaleEnabled">
+<small>Si pierde: duplica para la siguiente entrada. Si gana: vuelve al primer nivel.</small>
+</div>
+<div class="field">
+<label>Niveles de martingala (1 a 12)</label>
+<input type="number" name="martingaleLevels" value="5" min="1" max="12" step="1" required>
+<small id="martingalePreview">Con $1 inicial: $1 · $2 · $4 · $8 · $16</small>
 </div>
 <div class="field">
 <label>Máximo de entradas por ronda</label>
@@ -1451,6 +1491,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
 </form>
+<button id="resetMartingale" type="button" style="margin:10px 0">REINICIAR MARTINGALA DESDE NIVEL 1</button>
 <div class="notice">Los ajustes se guardan en el servidor y se aplican a compras nuevas. Las posiciones abiertas conservan su plan de salida.</div>
 </section>
 <section id="entradas" class="page hidden">
@@ -1561,33 +1602,35 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',tradeAmount:'max_trade_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',tradeAmount:'max_trade_dollars',martingaleEnabled:'martingale_enabled',martingaleLevels:'martingale_levels',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
 let lastHeight=0;function height(){let h=Math.max(650,document.documentElement.scrollHeight);if(h!==lastHeight){lastHeight=h;post('streamlit:setFrameHeight',{height:h})}}
 function toast(msg){$('#toast').textContent=msg;$('#toast').classList.remove('hidden');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),4500)}
-function busy(on){for(const s of ['#start','#pause','#close','#testPublic','#testApi','#forgetApi','#exportCSV','#settings button[type=submit]'])$(s).disabled=on}
+function busy(on){for(const s of ['#start','#pause','#close','#testPublic','#testApi','#forgetApi','#exportCSV','#resetMartingale','#settings button[type=submit]'])$(s).disabled=on}
 function action(action,payload={}){if(pending){toast('Esperando confirmación del servidor.');return}let id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);pending=id;busy(true);post('streamlit:setComponentValue',{value:{id,action,payload},dataType:'json'});setTimeout(()=>{if(pending===id){pending=null;busy(false);toast('Sin confirmación del servidor. Revisa Registro antes de repetir.')}},25000)}
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>action('command',{command:'start'});$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y solicitar cerrar todas las posiciones simuladas?'))action('command',{command:'close'})};
-const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
+const form=$('#settings');
+function updateMartingalePreview(){let base=Number(form.elements.tradeAmount.value)||0,n=Math.max(1,Math.min(12,Number(form.elements.martingaleLevels.value)||1));let amounts=Array.from({length:n},(_,i)=>money(base*2**i));$('#martingalePreview').textContent=amounts.join(' · ')}
+form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';updateMartingalePreview()};
 form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current?.settings?.fee_cents_per_contract??2;cfg.contracts=current?.settings?.contracts??1;cfg.max_trade_dollars=cfg.max_trade_dollars??current?.settings?.max_trade_dollars??50;action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
-$('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
+$('#resetMartingale').onclick=()=>{if(confirm('¿Reiniciar la progresión desde el nivel 1 para la próxima operación?'))action('reset_martingale')};$('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent='SIMULACIÓN · '+s.message;
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');metrics[0].textContent=money(s.totals.daily);metrics[1].textContent=money(s.totals.realized);let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.daily/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let invested=s.positions.reduce((sum,p)=>sum+(Number(p.entry||0)*Number(p.quantity||0)/100)+Number(p.entry_fee||0),0);$('#investedAmount').textContent=money(invested);let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
 $('#unrealized').textContent=marked?money(net):'—';$('#unrealized').style.color=marked?(net>0?'#20c997':net<0?'#ff5d6c':'#d7dbe7'):'';$('#investedAmount').style.color=s.positions.length?'#e8c879':'';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
-if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else el.value=s.settings[key]}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.has_trades;
+if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else el.value=s.settings[key]}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR';updateMartingalePreview()}form.elements.balance.disabled=s.has_trades;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(fresh?'DATOS PÚBLICOS CONECTADOS':'ESPERANDO DATOS PÚBLICOS')+' · '+(s.connection?.message||'Simulación local activa; no requiere API privada.');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.snapshot)update(args.snapshot);let reply=args.reply;if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.ok&&reply.kind==='settings'){dirty=false;if(args.snapshot)update(args.snapshot)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.snapshot)update(args.snapshot);let reply=args.reply;if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.ok&&reply.kind==='settings'){dirty=false;if(args.snapshot)update(args.snapshot);$('#savedState').textContent='✓ CAMBIOS GUARDADOS'}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
@@ -1652,6 +1695,14 @@ class Controller:
                                   'close':'Cierre solicitado; esperando liquidez actual.'}[command]
             elif action=='settings':
                 self.bot.save_settings(payload);reply['message']='Ajustes guardados y aplicados a compras nuevas.'
+            elif action=='reset_martingale':
+                with self.bot.lock:
+                    if self.bot.positions():
+                        raise ValueError('Espera a que termine la operación abierta antes de reiniciar.')
+                    last_id=self.bot.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
+                    self.bot.put('martingale_start_trade_id',last_id)
+                    self.bot.event('MARTINGALA','Secuencia reiniciada al nivel 1.')
+                reply['message']='Martingala reiniciada: próxima entrada en nivel 1.'
             elif action=='public':
                 market=self.bot.feed.current();book=self.bot.feed.book(market['ticker'])
                 reply['message']='Kalshi responde: '+market['ticker']
