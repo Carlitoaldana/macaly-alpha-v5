@@ -1,5 +1,28 @@
+"""ALPHA EDGE — BTC 15 minutos. Primera fase: ejecución automática simulada.
+Run: python app.py. Only public GET requests leave this process.
+"""
 from __future__ import annotations
+import csv
+import hashlib
+import hmac
+import io
+import json
+import math
+import os
+from pathlib import Path
+import secrets
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit, quote
+from zoneinfo import ZoneInfo
 import types
+
+"""HTTP GET only. This application never submits orders to Kalshi."""
 import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
@@ -21,6 +44,10 @@ class requests:
         with urlopen(req, timeout=timeout) as response:
             return Response(json.load(response))
 
+"""Motor extraído literalmente de app 61(1).py. No importa ni ejecuta su interfaz.
+SHA256 original: 951af0078d752782234f396201935c846d562bbe14d5fae4c1d6ca6f29e71f39
+Las funciones de señal y confirmación conservan sus reglas originales.
+"""
 import math
 import numpy as np
 import pandas as pd
@@ -675,30 +702,49 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_since"] = None
         state["pending_last_at"] = None
 
-engine=types.SimpleNamespace(**{n:globals()[n] for n in ['_valid_live_observation', '_plan_number', 'new_round_state', '_fetch_current_btc_candles', 'get_event_ticker_from_market', 'extract_kalshi_btc_price', '_indicator_frame', '_resample_indicators', 'add_indicators', 'get_target_from_market', 'get_seconds_remaining', 'numeric_kalshi_price', 'get_yes_ask', 'get_no_ask', '_internal_impulse_context', '_entry_route_checks', '_signal_engine_without_trace', '_retention_assessment', '_retention_supported', '_reset_withdrawal', '_review_active_retention', '_round_opening_crosscheck', '_confirmation_without_trace']})
-import csv
-import hashlib
-import hmac
-import io
-import json
-import math
-import os
-from pathlib import Path
-import secrets
-import sqlite3
-import threading
-import time
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit, quote
-from zoneinfo import ZoneInfo
+
+# Exact original engine functions exposed as a namespace.
+engine = types.SimpleNamespace(**{name: globals()[name] for name in ['_valid_live_observation', '_plan_number', 'new_round_state', '_fetch_current_btc_candles', 'get_event_ticker_from_market', 'extract_kalshi_btc_price', '_indicator_frame', '_resample_indicators', 'add_indicators', 'get_target_from_market', 'get_seconds_remaining', 'numeric_kalshi_price', 'get_yes_ask', 'get_no_ask', '_internal_impulse_context', '_entry_route_checks', '_signal_engine_without_trace', '_retention_assessment', '_retention_supported', '_reset_withdrawal', '_review_active_retention', '_round_opening_crosscheck', '_confirmation_without_trace']})
+
+_INDEX = r'''
+<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ALPHA EDGE · Terminal BTC</title><style>
+:root{color-scheme:dark;--bg:#080e1c;--panel:#101c33;--line:#283b59;--gold:#e5bd68;--gold2:#95713d;--muted:#94a7c3;--text:#ecf2fc;--green:#59d7b0;--red:#f47c8d;--blue:#74acfa}*{box-sizing:border-box}body{margin:0;background:radial-gradient(ellipse at 60% -30%,#1c355e 0,transparent 60%),var(--bg);font:14px/1.5 system-ui,-apple-system,sans-serif;color:var(--text)}button,input{font:inherit}button{cursor:pointer}button:disabled{cursor:wait;opacity:.6}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--gold);outline-offset:4px}button,.button{border:1px solid #435674;color:var(--text);background:#172744;padding:11px 19px;border-radius:7px;font-weight:650;text-decoration:none}button:hover,.button:hover{filter:brightness(1.16)}button.primary{background:linear-gradient(120deg,#e9c779,#bc9149);border-color:#e4c16f;color:#172039}button.danger{background:#512633;border-color:#9d4c5c;color:#ffe0e5}.shell{display:grid;grid-template-columns:222px minmax(0,1fr);min-height:100vh}aside{background:#0b1427d9;border-right:1px solid var(--line);padding:30px 18px;display:flex;flex-direction:column;gap:25px}.logo{font-size:23px;letter-spacing:2.5px;font-weight:850;color:var(--gold);line-height:1.3}.logo small{display:block;font-size:10px;font-weight:500;letter-spacing:3px;color:var(--muted);margin-top:7px}.brandmark{width:34px;height:4px;background:var(--gold);box-shadow:10px -7px 0 -1px #839ac0;margin-bottom:16px}nav{display:grid;gap:9px}nav button{text-align:left;border:1px solid transparent;background:transparent;color:var(--muted);padding:13px 12px}nav button.active{color:var(--gold);background:linear-gradient(90deg,#c29a4524,transparent);border-color:#ad8d4c6b}nav b{margin-right:12px;font:11px ui-monospace,monospace;color:#8194b1}.aside-note{margin-top:auto;border-top:1px solid var(--line);padding-top:18px;color:var(--muted);font-size:12px}.pill{display:inline-flex;align-items:center;gap:7px;border-radius:30px;padding:5px 10px;font-size:10px;letter-spacing:1px;font-weight:750;border:1px solid #517359;background:#143b2d44;color:var(--green);white-space:nowrap}.pill.gold{color:var(--gold);border-color:#786440;background:#6d562122}.pill.red{color:var(--red);border-color:#7c4553;background:#44263355}main{padding:26px 34px 32px;max-width:1540px;width:100%;margin:auto}.topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:28px}.eyebrow{font-size:10px;letter-spacing:2px;color:var(--muted);font-weight:650}.topbar strong{font-size:14px;display:block;margin-top:5px}.top-right{display:flex;align-items:center;gap:15px}.clock{font:14px ui-monospace,monospace;color:var(--muted)}.pagehead{display:flex;justify-content:space-between;align-items:end;margin:0 0 20px;gap:15px}h1{margin:3px 0 6px;font-size:29px;letter-spacing:-.8px}h2{font-size:12px;letter-spacing:1.4px;margin:0;font-weight:750;text-transform:uppercase}h3{font-size:13px;margin:0 0 15px}p{margin:5px 0;color:var(--muted)}.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:20px}.stat,.panel{border:1px solid var(--line);border-radius:10px;background:linear-gradient(145deg,#14233d,#0d182b);box-shadow:0 6px 30px #00000012}.stat{padding:19px 20px}.stat .value{font-size:26px;font-weight:650;letter-spacing:-.6px;margin-top:7px;font-variant-numeric:tabular-nums}.sub{font-size:11px;color:var(--muted);margin-top:4px}.grid{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(280px,1fr);gap:18px}.panel{padding:22px;margin-bottom:18px}.panelhead{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:20px;gap:10px}.panelhead h2:before{content:'';display:inline-block;background:var(--gold);width:3px;height:11px;margin-right:10px}.radar-wrap{position:relative;display:grid;place-items:center;min-height:285px}.radar{width:min(100%,310px);aspect-ratio:1;border:1px solid #927440;border-radius:50%;position:relative;background:repeating-radial-gradient(circle,transparent 0,transparent calc(25% - 1px),#43638966 25%,transparent calc(25% + 1px)),linear-gradient(90deg,transparent calc(50% - .5px),#52709c77 50%,transparent calc(50% + .5px)),linear-gradient(transparent calc(50% - .5px),#52709c77 50%,transparent calc(50% + .5px)),radial-gradient(circle,#1d3d68,#0a1831);box-shadow:0 0 45px #102e6850,inset 0 0 30px #244d7b44}.radar:before{content:'';position:absolute;inset:11px;border:1px dashed #56729a44;border-radius:50%}.sweep{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,transparent 270deg,#dcb86a22 328deg,#dfbf7c66 359deg,transparent 360deg);animation:sweep 12s linear infinite;opacity:.3}.radar.running .sweep{opacity:1}.center{position:absolute;inset:28%;border-radius:50%;background:#0b1830ed;border:1px solid #9e824f;display:flex;flex-direction:column;align-items:center;justify-content:center;box-shadow:0 0 35px #071024}.direction{font-size:29px;font-weight:850;letter-spacing:-1px}.center small{font-size:9px;color:var(--muted);letter-spacing:1px}.up{color:var(--green)}.down{color:var(--red)}.neutral{color:var(--gold)}.radar-label{position:absolute;font:10px ui-monospace,monospace;color:#9db5d5}.radar-label.n{top:5px;left:calc(50% - 8px)}.radar-label.s{bottom:5px;left:calc(50% - 8px)}.radar-label.w{top:calc(50% - 8px);left:5px}.radar-label.e{top:calc(50% - 8px);right:5px}@keyframes sweep{to{transform:rotate(360deg)}}.radar-caption{display:flex;align-items:center;justify-content:space-between;margin-top:20px;gap:10px}.countdown{font:26px ui-monospace,monospace;letter-spacing:2px}.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid #24344e88}.row:last-child{border:0}.row span:first-child{color:var(--muted);font-size:12px}.row strong{font-size:13px}.price{font-size:30px;font-weight:700;letter-spacing:-.7px}.quotes{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:18px 0}.quote{border:1px solid #395a5a;background:#183f382a;border-radius:7px;padding:12px}.quote.no{border-color:#61434f;background:#492b3b22}.quote span{font-size:10px;letter-spacing:1px}.quote strong{display:block;font-size:22px;margin-top:3px}.statusbar{border:1px solid #364b6b;border-radius:8px;padding:13px 16px;color:var(--muted);display:flex;gap:10px;align-items:start;font-size:12px;margin-bottom:20px;background:#101d32}.dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--gold);margin-top:6px}.actions{display:flex;gap:10px;flex-wrap:wrap}.actions button{flex:1;min-width:120px}.chart{height:125px;position:relative}canvas{width:100%;height:100%}.empty{padding:26px 8px;color:var(--muted);text-align:center;font-size:12px;border:1px dashed #334562;border-radius:8px}.position{padding:16px;border:1px solid #4e6181;border-radius:8px;margin-bottom:10px}.position .heading{display:flex;justify-content:space-between;font-size:18px;font-weight:750}.formgrid{display:grid;grid-template-columns:1fr 1fr;gap:18px}.field label{display:block;color:#c8d6e9;font-size:12px;margin-bottom:7px}.field input{width:100%;background:#091426;border:1px solid #3b506f;color:var(--text);border-radius:6px;padding:12px 13px;min-height:44px}.field small{display:block;color:var(--muted);font-size:10px;margin-top:5px}.toggle{display:flex;gap:10px;align-items:center;padding:12px;background:#0d1930;border-radius:7px}.toggle input{accent-color:var(--gold);width:18px;height:18px}.formfooter{display:flex;align-items:center;justify-content:space-between;border-top:1px solid var(--line);margin-top:20px;padding-top:19px;gap:15px}.tablewrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:12px;white-space:nowrap}th{text-align:left;font-size:9px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);padding:12px;border-bottom:1px solid #476080}td{padding:13px 12px;border-bottom:1px solid #263852}td small{color:var(--muted);font-size:10px}.log{display:grid;gap:10px;max-height:330px;overflow:auto}.logitem{display:grid;grid-template-columns:65px 70px 1fr;gap:10px;font-size:11px;padding:10px 0;border-bottom:1px solid #283b54}.logitem time{color:var(--muted)}.logitem b{color:var(--gold);font-size:9px;padding-top:2px}.footer{font-size:10px;color:#7f94b2;display:flex;justify-content:space-between;gap:15px;margin-top:18px}section[hidden]{display:none}.toast{position:fixed;right:22px;bottom:22px;background:#234d42;color:#e5fff4;border:1px solid #528b76;padding:14px 20px;max-width:min(440px,90vw);border-radius:8px;box-shadow:0 10px 40px #0008;z-index:10}.toast.error{background:#552d38;border-color:#a75d70}.login{position:fixed;inset:0;background:#080f20f7;z-index:20;display:grid;place-items:center;padding:20px}.login[hidden]{display:none}.login form{width:360px;max-width:100%}.login input{width:100%;padding:13px;background:#101e34;color:white;border:1px solid #506482;border-radius:6px;margin:20px 0}.login button{width:100%}.note{font-size:11px;color:var(--muted);line-height:1.7}.goldtext{color:var(--gold)}
+@media(min-width:1450px){main{padding:32px 44px}.radar-wrap{min-height:350px}.radar{width:335px}}@media(max-width:1050px){.shell{grid-template-columns:170px minmax(0,1fr)}aside{padding:25px 12px}.logo{font-size:18px}main{padding:22px}.grid{grid-template-columns:1fr}.stats{grid-template-columns:1fr 1fr}.radar-wrap{min-height:270px}.radar{width:270px}}@media(max-width:640px){.shell{display:block}aside{padding:18px 16px 10px;border-right:0;border-bottom:1px solid var(--line);gap:16px}.brandmark,.aside-note{display:none}.logo{font-size:19px;display:flex;align-items:center;justify-content:space-between}.logo small{font-size:8px;letter-spacing:1px;margin:0}nav{display:flex;gap:5px}nav button{flex:1;text-align:center;padding:9px 3px;font-size:11px}nav b{display:none}main{padding:18px 14px}.topbar{margin-bottom:20px}.clock{display:none}.topbar strong{font-size:12px}.top-right{gap:4px}.pill{font-size:9px}h1{font-size:24px}.pagehead{align-items:center}.stats{gap:9px}.stat{padding:13px}.stat .value{font-size:22px}.eyebrow{font-size:9px;letter-spacing:1px}.panel{padding:17px}.grid{gap:0}.formgrid{gap:14px}.formfooter{align-items:start;flex-direction:column}.formfooter button{width:100%}.row strong{font-size:12px}.logitem{grid-template-columns:52px 55px 1fr;font-size:10px;gap:6px}.pagehead .button{font-size:10px;padding:8px}.footer{font-size:9px}.radar{width:260px}.panelhead h2{font-size:11px;letter-spacing:1px}.topbar .eyebrow{letter-spacing:.8px}}
+@media(prefers-reduced-motion:reduce){.sweep{animation:none}}
+</style></head><body>
+<div class="shell"><aside><div class="logo"><div><div class="brandmark"></div>ALPHA EDGE</div><small>BTC EXECUTION TERMINAL</small></div><nav aria-label="Navegación principal"><button class="active" data-page="overview"><b>01</b>Resumen</button><button data-page="settings"><b>02</b>Operación y ajustes</button><button data-page="history"><b>03</b>Registro</button></nav><div class="aside-note"><span class="pill gold">ENTORNO DE PRUEBA</span><p style="margin-top:14px">Una estrategia.<br>Un mercado.<br>Control en cada entrada.</p><div class="row"><span>Mercado</span><strong>BTC · 15 min</strong></div><div class="row"><span>Motor</span><strong>APP 61</strong></div><div class="row"><span>Ejecución</span><strong>Simulada</strong></div></div></aside>
+<main><header class="topbar"><div><div class="eyebrow">KALSHI / KXBTC15M</div><strong>Bitcoin · Mercado de 15 minutos</strong></div><div class="top-right"><span class="clock" id="clock">—</span><span class="pill gold">SIMULACIÓN</span><span class="pill" id="connection">CONECTANDO</span></div></header>
+<div class="stats"><div class="stat"><div class="eyebrow">Saldo disponible</div><div class="value" id="cash">—</div><div class="sub">Capital virtual</div></div><div class="stat"><div class="eyebrow">Resultado del día</div><div class="value" id="daily">—</div><div class="sub">Neto · hora de Miami</div></div><div class="stat"><div class="eyebrow">Resultado acumulado</div><div class="value" id="realized">—</div><div class="sub">Operaciones cerradas · neto</div></div><div class="stat"><div class="eyebrow">Operaciones cerradas</div><div class="value" id="completed">—</div><div class="sub" id="wintext">Sin operaciones</div></div></div>
+<section id="overview"><div class="pagehead"><div><div class="eyebrow">01 / CENTRO DE CONTROL</div><h1>Lectura. Decisión. Ejecución.</h1><p>Tu cerebro de señales, con control de operación.</p></div></div><div class="statusbar" role="status"><span class="dot"></span><span id="message">Esperando la primera lectura de mercado.</span></div><div class="grid"><div><div class="panel"><div class="panelhead"><h2>Radar de sesión</h2><span class="pill gold" id="botstatus">PAUSADO</span></div><div class="radar-wrap"><div class="radar" id="radar"><span class="radar-label n">00</span><span class="radar-label e">15</span><span class="radar-label s">30</span><span class="radar-label w">45</span><div class="sweep"></div><div class="center"><small>SEÑAL ACTIVA</small><span class="direction neutral" id="direction">—</span><small id="signalnote">ANALIZANDO</small></div></div></div><div class="radar-caption"><div><div class="eyebrow">Cierre de ronda</div><div class="countdown" id="countdown">—:—</div></div><div style="text-align:right"><div class="eyebrow">Primera señal</div><strong id="firstsignal">Sin confirmar</strong><div class="sub">Registro inmutable de la ronda</div></div></div><div class="row"><span>Ronda actual</span><strong id="ticker">Esperando mercado</strong></div><div class="row"><span>Estado del cerebro</span><strong id="quality">Esperando lectura</strong></div></div><div class="panel"><div class="panelhead"><h2>Recorrido BTC</h2><span class="sub">Lecturas recibidas en esta pantalla</span></div><div class="chart"><canvas id="chart" aria-label="Recorrido del precio BTC observado"></canvas></div><div class="sub" id="chartnote">La gráfica se construye al recibir precios actuales.</div></div><div class="actions"><button class="primary" id="start" onclick="command('start')">Activar simulación</button><button onclick="command('pause')">Pausar entradas</button><button class="danger" onclick="command('close')">Cerrar todo</button></div><p class="note" style="margin:12px 0 20px">Pausar mantiene la gestión de salidas. Cerrar todo espera un libro actual con liquidez; una posición vencida espera su liquidación oficial.</p></div><div><div class="panel"><div class="panelhead"><h2>Mercado en vivo</h2><span class="sub" id="source">—</span></div><div class="eyebrow">Bitcoin / USD</div><div class="price" id="btc">—</div><div class="row"><span>Target de la ronda</span><strong id="target">—</strong></div><div class="quotes"><div class="quote"><span class="up">UP / YES · COMPRA</span><strong id="yesask">—</strong></div><div class="quote no"><span class="down">DOWN / NO · COMPRA</span><strong id="noask">—</strong></div></div><div class="row"><span>RSI · 1 min</span><strong id="rsi">—</strong></div><div class="row"><span>Tendencia EMA</span><strong id="ema">—</strong></div><div class="row"><span>Última lectura válida</span><strong id="updated">—</strong></div><p class="note" id="retention"></p></div><div class="panel"><div class="panelhead"><h2>Posición en gestión</h2><span class="pill gold" id="positioncount">0 ABIERTAS</span></div><div id="positions"><div class="empty">Sin posición abierta.<br>El bot espera una señal confirmada.</div></div></div><div class="panel"><div class="panelhead"><h2>Plan de ejecución</h2><button style="padding:4px 9px;font-size:10px" onclick="page('settings')">Editar</button></div><div id="plan"></div><p class="note">Las entradas simuladas exigen profundidad para la cantidad completa. Las comisiones son una estimación configurable.</p></div></div></div></section>
+<section id="settings" hidden><div class="pagehead"><div><div class="eyebrow">02 / OPERACIÓN</div><h1>Configura tu ejecución.</h1><p>Precios, tamaño y salidas en un solo lugar.</p></div><span class="pill gold">SIMULACIÓN</span></div><form id="settingsform"><div class="grid"><div><div class="panel"><div class="panelhead"><h2>Entradas automáticas</h2><span class="sub">UP y DOWN según el cerebro</span></div><div class="formgrid"><div class="field"><label for="contracts">Contratos por compra</label><input id="contracts" type="number" min="1" max="1000" required></div><div class="field"><label for="max_trade_dollars">Presupuesto máximo / compra ($)</label><input id="max_trade_dollars" type="number" min="1" max="100000" required><small>Incluye la comisión simulada.</small></div><div class="field"><label for="min_entry_cents">Precio mínimo (¢)</label><input id="min_entry_cents" type="number" min="1" max="98" required></div><div class="field"><label for="max_entry_cents">Precio máximo (¢)</label><input id="max_entry_cents" type="number" min="2" max="99" required><small>Se aplica a cada nivel de compra.</small></div><div class="field"><label for="max_entries_round">Máximo de entradas / ronda</label><input id="max_entries_round" type="number" min="1" max="100" required><small>Limita compras; el cerebro sigue cambiando de dirección.</small></div><div class="field"><label for="fee_cents_per_contract">Comisión estimada (¢ / contrato)</label><input id="fee_cents_per_contract" type="number" min="0" max="20" required><small>Se cobra en cada compra y venta simulada.</small></div></div></div><div class="panel"><div class="panelhead"><h2>Salidas y protección</h2><span class="sub">0 = desactivado</span></div><div class="formgrid"><div class="field"><label for="take_profit_cents">Take profit — precio objetivo Kalshi (%)</label><input id="take_profit_cents" type="number" min="0" max="100" required><small>0 = desactivado. Vende al alcanzar el precio objetivo del contrato (ej. 90% = 90¢).</small></div><div class="field"><label for="stop_loss_cents">Stop loss (−¢ por contrato)</label><input id="stop_loss_cents" type="number" min="0" max="98" required><small>Salida al precio disponible; puede superar este umbral.</small></div><div class="field"><label for="exit_before_close">Salir antes del cierre (segundos)</label><input id="exit_before_close" type="number" min="0" max="300" required></div></div><label class="toggle" style="margin-top:18px"><input id="close_on_reverse" type="checkbox"><span>Salir si el cerebro confirma la dirección contraria</span></label></div></div><div><div class="panel"><div class="panelhead"><h2>Control de sesión</h2></div><div class="field"><label for="starting_balance">Saldo virtual inicial ($)</label><input id="starting_balance" type="number" min="1" max="1000000" required><small>Se fija al realizar la primera operación.</small></div><div class="field" style="margin-top:18px"><label for="daily_loss_dollars">Pérdida diaria máxima ($)</label><input id="daily_loss_dollars" type="number" min="1" max="100000" required><small>Detiene compras nuevas al alcanzar la pérdida registrada.</small></div><div class="field" style="margin-top:18px"><label for="daily_goal_dollars">Meta diaria ($)</label><input id="daily_goal_dollars" type="number" min="0" max="100000" required><small>0 = sin meta. El día se calcula en hora de Miami.</small></div></div><div class="panel"><h3 class="goldtext">Tu estrategia permanece separada.</h3><p class="note">Estos ajustes controlan la ejecución. El análisis y las confirmaciones se extraen de «app 61» sin agregar filtros de IA ni fijar una dirección.</p><div class="row"><span>Conexión de datos</span><strong>Kalshi + Coinbase</strong></div><div class="row"><span>Cuenta Kalshi</span><strong>Sin vincular</strong></div><p class="note" style="margin-top:12px">Esta fase usa capital virtual y datos públicos. La activación con API y dinero real corresponde a la siguiente fase.</p></div></div></div><div class="formfooter"><p class="note">Los cambios de salida se aplican a compras nuevas.<br>Las posiciones abiertas conservan su take profit, stop loss y criterio de cierre.</p><button class="primary" type="submit">Guardar ajustes</button></div></form></section>
+<section id="history" hidden><div class="pagehead"><div><div class="eyebrow">03 / REGISTRO</div><h1>Cada decisión, registrada.</h1><p>Entradas, salidas y resultado neto de la simulación.</p></div><a class="button" href="/api/history.csv">Exportar CSV</a></div><div class="panel"><div class="panelhead"><h2>Operaciones</h2><span class="sub">Últimas 200 · CSV completo</span></div><div class="tablewrap"><table><thead><tr><th>ID / Ronda</th><th>Dirección</th><th>Cantidad</th><th>Entrada</th><th>Salida</th><th>Resultado neto</th><th>Estado</th></tr></thead><tbody id="trades"></tbody></table></div></div><div class="panel"><div class="panelhead"><h2>Primera señal por ronda</h2><span class="sub">Independiente de las compras</span></div><div class="tablewrap"><table><thead><tr><th>Ronda</th><th>Primera señal</th><th>Hora</th><th>Señal activa</th></tr></thead><tbody id="rounds"></tbody></table></div></div><div class="panel"><div class="panelhead"><h2>Actividad del sistema</h2><span class="sub">Últimos 60 eventos</span></div><div class="log" id="events"></div></div></section>
+<div class="footer"><span>ALPHA EDGE / APP 61 · BTC 15 MIN</span><span>Simulación con liquidez observada · sin dinero real</span></div></main></div><div class="toast" id="toast" hidden role="status"></div><div class="login" id="login" hidden><form id="loginform"><div class="logo">ALPHA EDGE</div><h1 style="margin-top:25px">Tu terminal privada.</h1><p>Introduce la contraseña de este servidor.</p><input id="password" type="password" placeholder="Contraseña" aria-label="Contraseña" autocomplete="current-password" required><button class="primary">Entrar</button><p id="loginerror" class="down"></p></form></div>
+<script>
+const $=id=>document.getElementById(id),money=n=>n==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:2}).format(n),cent=n=>n==null?'—':Number(n).toFixed(1)+'¢',esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}):'—';let state=null,dirty=false,initialized=false,toastTimer,samples=[],laststamp='',closeAt=null;
+function page(name){for(const k of ['overview','settings','history'])$(k).hidden=k!==name;document.querySelectorAll('[data-page]').forEach(b=>b.classList.toggle('active',b.dataset.page===name));if(name==='overview')setTimeout(draw,0)}document.querySelectorAll('[data-page]').forEach(b=>b.onclick=()=>page(b.dataset.page));
+function toast(msg,error=false){$('toast').textContent=msg;$('toast').className='toast'+(error?' error':'');$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,6000)}
+async function api(path,data){const r=await fetch(path,data?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)}:{cache:'no-store'});const result=await r.json();if(r.status===401){$('login').hidden=false;throw Error('Inicia sesión.')}if(!r.ok)throw Error(result.error||'No se pudo completar la operación.');return result}
+async function command(command){if(command==='close'&&!confirm('¿Pausar compras y solicitar el cierre de todas las posiciones simuladas?'))return;try{await api('/api/command',{command});toast(command==='start'?'Simulación activada.':command==='pause'?'Entradas pausadas. Las salidas siguen vigiladas.':'Cierre solicitado; esperando precios y liquidez.');await refresh()}catch(e){toast(e.message,true)}}
+function row(a,b){return '<div class="row"><span>'+esc(a)+'</span><strong>'+esc(b)+'</strong></div>'}
+function render(s){state=s;const totals=s.totals;for(const k of ['cash','daily','realized']){$(k).textContent=money(totals[k]);$(k).className='value'+(k!=='cash'?(totals[k]>=0?' up':' down'):'')} $('completed').textContent=totals.completed;$('wintext').textContent=totals.completed?totals.wins+' con resultado positivo':'Sin operaciones cerradas';$('message').textContent=s.message;$('botstatus').textContent=s.status;$('botstatus').className='pill '+(s.status==='SIN DATOS'?'red':s.running?'':'gold');$('radar').classList.toggle('running',s.running&&s.status!=='SIN DATOS');$('direction').textContent=s.signal||'—';$('direction').className='direction '+(s.signal==='UP'?'up':s.signal==='DOWN'?'down':'neutral');$('signalnote').textContent=s.signal?'CONFIRMADA':'ANALIZANDO';$('firstsignal').textContent=s.first_signal||'Sin confirmar';$('ticker').textContent=s.market?.ticker||'Esperando mercado';$('quality').textContent=s.quality||'Esperando lectura';$('source').textContent=s.source||'—';$('btc').textContent=money(s.price);$('target').textContent=money(s.target);$('rsi').textContent=s.rsi?.toFixed(1)||'—';$('ema').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('updated').textContent=localtime(s.updated);$('retention').textContent=s.retention||'';closeAt=s.market?.close_time?new Date(s.market.close_time):null;
+const fresh=s.updated&&Date.now()-Date.parse(s.updated)<12000&&s.status!=='SIN DATOS';$('connection').textContent=fresh?'DATOS ACTIVOS':'ESPERANDO DATOS';$('connection').className='pill '+(fresh?'':'red');$('yesask').textContent=fresh?cent(s.book?.UP?.asks?.[0]?.[0]):'—';$('noask').textContent=fresh?cent(s.book?.DOWN?.asks?.[0]?.[0]):'—';$('start').disabled=s.running;$('start').textContent=s.running?'Simulación activa':'Activar simulación';
+$('positioncount').textContent=s.positions.length+' ABIERTAS';$('positions').innerHTML=s.positions.length?s.positions.map(p=>{let bids=p.ticker===s.market?.ticker&&fresh?s.book?.[p.side]?.bids:[];let left=p.quantity,total=0;for(const [price,n] of bids||[]){let take=Math.min(left,n);left-=take;total+=take*price;if(left<=0)break}let net=left<=0?(total-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100:null;return '<div class="position"><div class="heading"><span class="'+(p.side==='UP'?'up':'down')+'">'+esc(p.side)+'</span><span>'+esc(p.quantity)+' contrato(s)</span></div><div class="sub">'+esc(p.ticker)+'</div>'+row('Precio medio de entrada',cent(p.entry))+row('Valor neto de salida estimado',money(net))+row('Take profit / Stop loss',(p.tp?p.tp+'%':'OFF')+' / '+(p.sl?'−'+p.sl+'¢':'OFF'))+'<div class="sub">'+(net==null?'Esperando libro actual o liquidación oficial.':'Incluye comisiones simuladas.')+'</div></div>'}).join(''):'<div class="empty">Sin posición abierta.<br>El bot espera una señal confirmada.</div>';
+const cfg=s.settings;$('plan').innerHTML=row('Tamaño',cfg.contracts+' contrato(s)')+row('Rango de compra',cfg.min_entry_cents+'–'+cfg.max_entry_cents+'¢')+row('Take profit / Stop loss',(cfg.take_profit_cents?cfg.take_profit_cents+'%':'OFF')+' / '+(cfg.stop_loss_cents?'−'+cfg.stop_loss_cents+'¢':'OFF'))+row('Máximo por ronda',cfg.max_entries_round+' entrada(s)');if(!initialized||!dirty){for(const [key,value]of Object.entries(cfg)){if($(key).type==='checkbox')$(key).checked=value;else $(key).value=value}initialized=true}$('starting_balance').disabled=s.trades.length>0;
+$('trades').innerHTML=s.trades.length?s.trades.map(t=>'<tr><td>#'+t.id+'<br><small>'+esc(t.ticker)+'</small></td><td class="'+(t.side==='UP'?'up':'down')+'">'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cent(t.entry)+'</td><td>'+cent(t.exit)+'</td><td class="'+(t.pnl==null?'':t.pnl>=0?'up':'down')+'">'+money(t.pnl)+'</td><td>'+esc(t.reason||'ABIERTA')+'<br><small>'+localtime(t.closed||t.opened)+'</small></td></tr>').join(''):'<tr><td colspan="7" style="text-align:center;color:var(--muted);padding:35px">Todavía no hay operaciones. Activa la simulación para comenzar.</td></tr>';
+$('rounds').innerHTML=s.rounds.length?s.rounds.map(r=>'<tr><td>'+esc(r.ticker)+'</td><td>'+esc(r.first_direction||'SIN CONFIRMAR')+'</td><td>'+localtime(r.first_signal_time)+'</td><td>'+esc(r.active_direction||'ANALIZANDO')+'</td></tr>').join(''):'<tr><td colspan="4">Esperando la primera ronda.</td></tr>';$('events').innerHTML=s.events.map(e=>'<div class="logitem"><time>'+localtime(e.at)+'</time><b>'+esc(e.kind)+'</b><span>'+esc(e.message)+'</span></div>').join('');if(fresh&&s.updated!==laststamp&&s.price){laststamp=s.updated;samples.push(s.price);samples=samples.slice(-150);draw();$('chartnote').textContent=samples.length+' lecturas · '+(s.source||'')+' · precio observado'}tick()}
+function tick(){$('clock').textContent=new Date().toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true})+' Miami';let left=closeAt?Math.max(0,Math.floor((closeAt-Date.now())/1000)):null;$('countdown').textContent=left==null?'—:—':String(Math.floor(left/60)).padStart(2,'0')+':'+String(left%60).padStart(2,'0');if(state?.updated&&Date.now()-Date.parse(state.updated)>12000){$('connection').textContent='DATOS ATRASADOS';$('connection').className='pill red';$('radar').classList.remove('running')}}setInterval(tick,1000);
+function draw(){const c=$('chart'),r=c.getBoundingClientRect();if(!r.width)return;let d=window.devicePixelRatio||1;c.width=r.width*d;c.height=r.height*d;let x=c.getContext('2d');x.scale(d,d);const w=r.width,h=r.height;x.strokeStyle='#283b5777';for(let i=1;i<4;i++){x.beginPath();x.moveTo(0,i*h/4);x.lineTo(w,i*h/4);x.stroke()}if(samples.length<2)return;let min=Math.min(...samples)-2,max=Math.max(...samples)+2;const points=samples.map((v,i)=>[i/(samples.length-1)*w,h-10-(v-min)/(max-min)*(h-20)]);let g=x.createLinearGradient(0,0,0,h);g.addColorStop(0,'#e5bd6830');g.addColorStop(1,'#e5bd6800');x.beginPath();x.moveTo(0,h);points.forEach(p=>x.lineTo(...p));x.lineTo(w,h);x.closePath();x.fillStyle=g;x.fill();x.beginPath();points.forEach((p,i)=>i?x.lineTo(...p):x.moveTo(...p));x.lineWidth=2;x.strokeStyle='#e5bd68';x.stroke()}window.addEventListener('resize',draw);
+$('settingsform').addEventListener('input',()=>dirty=true);$('settingsform').onsubmit=async e=>{e.preventDefault();if(!state)return;let raw={};for(const k of Object.keys(state.settings))raw[k]=$(k).type==='checkbox'?$(k).checked:Number($(k).value);try{await api('/api/settings',raw);dirty=false;toast('Ajustes guardados. Se aplican a entradas nuevas.');await refresh()}catch(err){toast(err.message,true)}};
+$('loginform').onsubmit=async e=>{e.preventDefault();try{await api('/api/login',{password:$('password').value});$('password').value='';$('login').hidden=true;await refresh()}catch(e){$('loginerror').textContent=e.message}};
+let refreshing=false;async function refresh(){if(refreshing)return;refreshing=true;try{const s=await api('/api/state');$('login').hidden=true;render(s)}catch(e){$('connection').textContent='SIN CONEXIÓN';$('connection').className='pill red';if(!$('login').hidden)return;$('message').textContent='No se pudo conectar con el servidor. Última lectura conservada con su hora original.'}finally{refreshing=false}}refresh();setInterval(refresh,2000);
+</script></body></html>
+
+'''
 
 ROOT = Path(__file__).resolve().parent
 API = 'https://external-api.kalshi.com/trade-api/v2'
 DEFAULTS = dict(contracts=1, min_entry_cents=10, max_entry_cents=60,
-                take_profit_cents=12, stop_loss_cents=10, exit_before_close=20,
+                take_profit_cents=90, stop_loss_cents=10, exit_before_close=20,
                 max_entries_round=1, daily_loss_dollars=25, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=1000,
                 fee_cents_per_contract=2, close_on_reverse=True)
@@ -729,7 +775,7 @@ def valid_settings(raw):
     if not isinstance(raw, dict) or set(raw) != set(DEFAULTS):
         raise ValueError('Envía todos los ajustes; hay campos desconocidos o ausentes.')
     bounds = {'contracts':(1,1000), 'min_entry_cents':(1,98), 'max_entry_cents':(2,99),
-              'take_profit_cents':(0,98), 'stop_loss_cents':(0,98),
+              'take_profit_cents':(0,100), 'stop_loss_cents':(0,98),
               'exit_before_close':(0,300), 'max_entries_round':(1,100),
               'daily_loss_dollars':(1,100000), 'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
@@ -882,6 +928,15 @@ class Bot:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,message TEXT);
         ''')
         self.settings = self.kv('settings') or DEFAULTS.copy()
+        # Migración única: antes TP era subida en centavos; ahora es precio objetivo.
+        if self.kv('tp_target_migrated_v1') is None:
+            old_tp = int(self.settings.get('take_profit_cents', 12))
+            self.settings['take_profit_cents'] = 90 if old_tp else 0
+            self.put('settings', self.settings)
+            # Conservar el objetivo efectivo de las posiciones antiguas.
+            self.db.execute('UPDATE trades SET tp = MIN(100, CAST(entry + tp AS INTEGER)) WHERE closed IS NULL AND tp > 0')
+            self.put('tp_target_migrated_v1', True)
+            self.db.commit()
         self.running = False  # Never resumes buying after a server restart.
         self.close_requested = False
         self.snapshot = {'status':'INICIANDO','message':'Esperando la primera lectura verificada.', 'mode':'SIMULACIÓN', 'signal':None}
@@ -920,7 +975,6 @@ class Bot:
                 self.close_requested=True
             else:
                 raise ValueError('Comando desconocido.')
-            self.snapshot.update(status='ACTIVO' if self.running else 'PAUSADO')
             self.event('CONTROL',{'start':'Simulación automática activada.','pause':'Entradas pausadas. Gestión de salidas activa.',
                                  'close':'Cierre solicitado; esperando liquidez actual. Entradas pausadas.'}[name])
 
@@ -974,7 +1028,7 @@ class Bot:
         reason=None
         if self.close_requested:
             reason='CIERRE MANUAL'
-        elif p['tp'] and price>=p['entry']+p['tp']:
+        elif p['tp'] and price>=p['tp']:
             reason='TAKE PROFIT'
         elif p['sl'] and price<=p['entry']-p['sl']:
             reason='STOP LOSS'
@@ -1060,7 +1114,7 @@ class Bot:
                            'mode':'SIMULACIÓN','signal':active,'candidate':sig.get('candidate'),
                            'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
                            'price':sig['price'],'source':sig['price_source'],'quality':sig['quality'],
-                           'rsi':sig['rsi'],'ema':sig['ema'],'metrics':clean_json(sig),'updated':stamp(),
+                           'rsi':sig['rsi'],'ema':sig['ema'],'updated':stamp(),
                            'book':book,'target':engine.get_target_from_market(market),
                            'retention':state.get('retention_warning')}
 
@@ -1088,664 +1142,227 @@ class Bot:
             result['rounds']=[{'ticker':r['ticker'],**json.loads(r['state'])} for r in self.db.execute('SELECT * FROM rounds ORDER BY rowid DESC LIMIT 50')]
             return clean_json(result)
 
+class Handler(BaseHTTPRequestHandler):
+    bot: Bot
+    password = ''
+    sessions = {}
+    session_lock = threading.Lock()
+    def log_message(self,*args):
+        pass
 
-_TERMINAL_HTML = r"""
+    def send(self,data,status=200,content_type='application/json',headers=None):
+        payload=data if isinstance(data,bytes) else dumps(data).encode()
+        self.send_response(status)
+        self.send_header('Content-Type',content_type)
+        self.send_header('Content-Length',str(len(payload)))
+        self.send_header('Cache-Control','no-store')
+        self.send_header('X-Content-Type-Options','nosniff')
+        self.send_header('X-Frame-Options','DENY')
+        self.send_header('Content-Security-Policy',"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+        for k,v in (headers or {}).items():
+            self.send_header(k,v)
+        self.end_headers()
+        self.wfile.write(payload)
 
-<!doctype html>
-<html lang="es">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Alpha Edge · Terminal</title>
-<style>
-:root{--bg:#080e22;--panel:#101b3d;--blue:#193c89;--gold:#efc864;--text:#edf3ff;--muted:#a6b8df;--line:#687aa8;--green:#45edbe}
-*{box-sizing:border-box}
-body{margin:0;background:radial-gradient(ellipse at 45% 5%,#243e83 0,#101b3e 38%,#070c1c 100%);color:var(--text);font:13px Arial,sans-serif}
-button,input,select{font:inherit}
-button{cursor:pointer;color:var(--text);border:1px solid #7790c8;background:linear-gradient(#294c94,#142958);border-radius:5px;padding:10px 14px}
-button:hover{filter:brightness(1.25)}
-button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
-.app{max-width:1600px;margin:auto;display:grid;grid-template-columns:190px minmax(0,1fr);min-height:100vh;padding:12px;gap:14px}
-.sidebar{border:1px solid #6176a6;background:linear-gradient(135deg,#142753,#080e23);padding:18px 10px;display:flex;flex-direction:column;gap:8px;box-shadow:inset 0 0 20px #263d6f}
-.brand{text-align:center;color:var(--gold);font-size:23px;font-weight:900;letter-spacing:1px}
-.brand small{display:block;color:var(--muted);font-size:9px;letter-spacing:3px;margin-top:5px}
-.tag{display:inline-block;font-size:10px;color:var(--green);border:1px solid #2a9e87;padding:5px 8px;border-radius:3px}
-.side-state{display:flex;justify-content:space-between;margin:18px 0 10px;font-size:10px}
-.nav{display:flex;flex-direction:column;gap:7px}
-.nav button{text-align:left;text-transform:uppercase;font-weight:700;font-size:11px;padding:12px 10px}
-.nav button.active{color:var(--gold);border-color:var(--gold);background:linear-gradient(100deg,#5a492a,#1e2540)}
-.nav button span{color:#90a9da;display:inline-block;width:24px}
-.mini-radar{width:110px;height:110px;border:2px solid var(--gold);border-radius:50%;margin:30px auto 10px;display:grid;place-content:center;background:repeating-radial-gradient(circle,#15295a 0 20px,#476899 21px 22px);box-shadow:0 0 30px #183a7e}
-.mini-radar strong{color:var(--gold);font-size:25px;text-align:center}
-.mini-radar small{text-align:center;font-size:9px}
-.sidebar footer{margin-top:auto;border-top:1px solid #354975;padding-top:18px;color:var(--muted);font-size:10px;line-height:1.8}
-.topbar{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--gold);background:linear-gradient(100deg,#234483,#131e3d);padding:13px 18px;gap:14px;border-radius:5px;box-shadow:0 4px 15px #020612}
-.topbar small,.label{font-size:9px;letter-spacing:1px;color:var(--muted);display:block;margin-bottom:6px}
-.topbar strong{font-size:12px}
-.demo{margin:12px 0;color:#f9db8e;background:#45391f80;border:1px solid #8d7741;padding:9px 13px;border-radius:4px;font-size:11px}
-.section-title{background:linear-gradient(100deg,#254c9b,#131d3d);padding:12px 15px;border:1px solid #788bc0;margin:14px 0 12px;border-radius:5px;font-weight:bold;text-transform:uppercase;letter-spacing:1px}
-.section-title b{color:var(--gold);margin-right:15px}
-.panel{border:1px solid var(--line);border-left:3px solid var(--gold);background:linear-gradient(145deg,#1a3472aa,#0b132c 70%);border-radius:8px;box-shadow:inset 0 0 24px #112452,0 4px 12px #0005;overflow:hidden}
-.panel h2{margin:0;padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--gold);border-bottom:1px solid #3b5487}
-.body{padding:17px}
-.summary{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:12px}
-.radar-panel{text-align:center;position:relative}
-.radar-sub{font-size:10px;color:var(--muted);margin:10px}
-.radar{position:relative;margin:25px auto;width:min(340px,76%);aspect-ratio:1;border-radius:50%;border:2px solid var(--gold);background:repeating-radial-gradient(circle,transparent 0 17%,#6985b3 17.4% 17.8%,transparent 18.2% 23%),conic-gradient(from 275deg,#1ca4bd77,transparent 60deg),radial-gradient(circle,#18316b,#08172e);box-shadow:0 0 0 6px #09142b,0 0 0 7px #5b78ab,0 0 30px #0e6abc66}
-.radar:before,.radar:after{content:'';position:absolute;background:#708bb565}
-.radar:before{width:1px;height:100%;left:50%}
-.radar:after{height:1px;width:100%;top:50%;left:0}
-.sweep{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,transparent 290deg,#34d7cd22 330deg,#9fffea99 359deg,transparent 360deg);animation:sweep 12s linear infinite}
-.radar.paused .sweep{animation-play-state:paused}
-@keyframes sweep{to{transform:rotate(360deg)}
-}
-.radar-core{position:absolute;inset:35%;border:1px solid var(--gold);border-radius:50%;background:radial-gradient(#1a335c,#080d1e);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2;box-shadow:0 0 25px #071327}
-.radar-core b{font-size:clamp(14px,2.3vw,25px);color:var(--gold);letter-spacing:1px}
-.radar-core small{font-size:9px;letter-spacing:2px}
-.rnum{position:absolute;color:#dbe5ff;font-size:10px;z-index:3}
-.n{top:8px;left:48%}
-.s{bottom:8px;left:48%}
-.e{right:8px;top:48%}
-.w{left:8px;top:48%}
-.radar-meta{display:flex;justify-content:space-between;gap:8px;padding:0 16px 15px}
-.chip{border:1px solid #6889bf;padding:8px 12px;background:#102b55;font-size:10px;border-radius:3px}
-.chip b{display:block;margin-top:5px;color:var(--green)}
-.position{text-align:center;display:flex;flex-direction:column;justify-content:center;min-height:340px}
-.position .amount{font-size:42px;font-weight:bold;margin:30px 0 4px}
-.muted{color:var(--muted)}
-.position hr{border:0;border-top:1px solid #354d79;width:80%;margin:22px auto}
-.position strong{font-size:12px}
-.performance{margin-top:12px}
-.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
-.metrics strong{font-size:24px}
-.gold{color:var(--gold)}
-.green{color:var(--green)}
-.controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:13px 0}
-.controls button{padding:14px;font-weight:bold}
-.danger{background:linear-gradient(#c34a55,#78212b);border-color:#fc8490}
-.primary{background:linear-gradient(#ddbc6a,#8a682a);color:#101a30;border-color:#ffe29a}
-.settings-grid{display:grid;grid-template-columns:1.15fr 1fr;gap:12px}
-.field{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid #314369}
-.field label{font-size:11px;color:#e2eaff}
-.field small{display:block;color:var(--muted);font-size:10px;margin-top:4px}
-input[type=number],input[type=text],input[type=password],select{width:110px;background:#090f23;border:1px solid #a58d52;color:#fff;padding:9px;border-radius:4px}
-input[type=checkbox]{accent-color:#43e7b3;width:19px;height:19px}
-input[type=range]{accent-color:var(--gold);width:100%}
-.wide{width:100%!important}
-.save{width:100%;margin-top:15px}
-.table-wrap{overflow-x:auto}
-table{border-collapse:collapse;width:100%;font-size:11px;white-space:nowrap}
-th,td{text-align:left;padding:14px 12px;border-bottom:1px solid #2c4068}
-th{color:var(--muted);font-size:9px;text-transform:uppercase}
-.empty{text-align:center;color:var(--muted);padding:50px 20px}
-.hidden{display:none!important}
-.notice{padding:16px;border:1px solid #4a638d;margin-top:12px;line-height:1.6;color:var(--muted);font-size:11px;border-radius:5px}
-.toast{position:fixed;right:20px;bottom:20px;background:#163f3b;color:#b9ffe6;border:1px solid #4ce4b6;padding:15px 25px;border-radius:6px;z-index:10;box-shadow:0 6px 30px #0008}
-.strength{height:8px;border-radius:5px;background:#0b1630;margin:15px 0;overflow:hidden}
-.strength i{display:block;height:100%;width:0;background:var(--gold)}
-.top-controls{display:flex;align-items:center;justify-content:space-between}
-.mobile-brand{display:none}
-@media(max-width:850px){.app{grid-template-columns:145px minmax(0,1fr);gap:9px;padding:8px}
-.brand{font-size:18px}
-.summary{grid-template-columns:1fr 180px}
-.position .amount{font-size:30px}
-.settings-grid{grid-template-columns:1fr}
-.metrics{grid-template-columns:repeat(2,1fr)}
-}
-@media(max-width:600px){.app{display:block;padding:8px}
-.sidebar{padding:10px;margin-bottom:10px}
-.brand{font-size:19px}
-.side-state,.mini-radar,.sidebar footer{display:none}
-.nav{flex-direction:row;overflow-x:auto;margin-top:12px;gap:6px}
-.nav button{flex-shrink:0;padding:10px;font-size:10px}
-.nav button span{width:18px}
-.topbar{grid-template-columns:1fr 1fr;padding:12px;gap:15px}
-.summary{grid-template-columns:1fr}
-.position{min-height:190px}
-.position .amount{margin-top:18px}
-.position hr{margin:14px auto}
-.radar{width:240px;max-width:78%;margin:22px auto}
-.controls{gap:6px}
-.controls button{font-size:10px;padding:13px 5px}
-.metrics strong{font-size:22px}
-.radar-meta{padding:0 10px 14px}
-.chip{padding:8px;font-size:9px}
-}
-@media(prefers-reduced-motion:reduce){.sweep{animation:none}
-}
+    def authenticated(self):
+        if not self.password:
+            return True
+        cookie=self.headers.get('Cookie','')
+        token=next((x.strip()[6:] for x in cookie.split(';') if x.strip().startswith('alpha=')),None)
+        with self.session_lock:
+            expires=self.sessions.get(token,0)
+        return expires>time.time()
 
-</style>
-</head>
-<body>
-<div class="app">
-<aside class="sidebar">
-<div class="brand">ALPHA EDGE<small>PRECISIÓN · CONTROL</small>
-</div>
-<div class="side-state">
-<span class="muted">ESTADO</span>
-<span class="tag" id="sideStatus">PAUSADO</span>
-</div>
-<nav class="nav">
-<button class="active" data-page="resumen">
-<span>◈</span>Resumen</button>
-<button data-page="operacion">
-<span>⚙</span>Operación</button>
-<button data-page="entradas">
-<span>↗</span>Entradas</button>
-<button data-page="registro">
-<span>▤</span>Registro</button>
-<button data-page="senal">
-<span>◎</span>Señal</button>
-<button data-page="conexion">
-<span>⌁</span>Conexión</button>
-</nav>
-<div class="mini-radar">
-<strong>0%</strong>
-<small>OBJETIVO DIARIO</small>
-</div>
-<footer>
-<span class="gold">ENTORNO DE SIMULACIÓN</span>
-<br>BTC · Rondas de 15 minutos<br>Cuenta de prueba individual<br>
-<span class="green"><span id="feedStatus">● Esperando datos</span></span>
-</footer>
-</aside>
-<main>
-<header class="topbar">
-<div>
-<small>ESTADO DEL BOT</small>
-<strong id="status">PAUSADO</strong>
-</div>
-<div>
-<small>MERCADO</small>
-<strong>BTC · 15 MINUTOS</strong>
-</div>
-<div>
-<small>SESIÓN</small>
-<strong><span id="sessionTime">HORA DE MIAMI</span></strong>
-</div>
-<div>
-<small>MODO</small>
-<strong class="green">● SIMULACIÓN</strong>
-</div>
-</header>
-<div class="demo"><span id="liveMessage">Conectando el motor con Kalshi y Coinbase…</span></div>
-<div class="section-title">
-<b id="pageNum">01</b>
-<span id="pageTitle">Resumen</span>
-</div>
-<section id="resumen" class="page">
-<div class="summary">
-<article class="panel radar-panel">
-<h2>Radar de sesión</h2>
-<p class="radar-sub">Lectura de mercado · Confirmación · Ejecución</p>
-<div class="top-controls body" style="padding-top:0;padding-bottom:0">
-<span class="chip">MERCADO<span class="gold" id="marketLabel"> · ESPERANDO</span>
-</span>
-<span class="chip">LÍMITE DE ENTRADA <b id="entryLimit">60 ¢</b>
-</span>
-</div>
-<div class="radar paused" id="radar">
-<div class="sweep">
-</div>
-<span class="rnum n">00</span>
-<span class="rnum e">15</span>
-<span class="rnum s">30</span>
-<span class="rnum w">45</span>
-<div class="radar-core">
-<b id="radarSignal">ALPHA</b>
-<small id="radarMode">EDGE</small>
-</div>
-</div>
-<div class="radar-meta">
-<span class="chip">DIRECCIÓN<b id="activeSignal">ESPERANDO</b>
-</span>
-<span class="chip">PRIMERA SEÑAL<b id="firstSignal">—</b>
-</span>
-<span class="chip">RONDA<b id="roundClock">— / 15:00</b>
-</span>
-</div>
-</article>
-<article class="panel">
-<h2>Posición</h2>
-<div class="position">
-<span class="label">GANANCIA NO REALIZADA</span>
-<div class="amount" id="unrealized">—</div>
-<span class="muted" id="positionNote">Sin operaciones</span>
-<hr>
-<span class="label">CONTRATOS ABIERTOS</span>
-<strong id="openContracts">0 CONTRATOS</strong>
-<hr>
-<strong class="gold" id="positionSide">SIN POSICIÓN</strong>
-</div>
-</article>
-</div>
-<article class="panel performance">
-<h2>Performance</h2>
-<div class="body metrics">
-<div>
-<span class="label">RESULTADO DEL DÍA</span>
-<strong data-metric="result">$0.00</strong>
-</div>
-<div>
-<span class="label">GANANCIA REALIZADA</span>
-<strong data-metric="result">$0.00</strong>
-</div>
-<div>
-<span class="label">META DIARIA</span>
-<strong class="gold" id="goalDisplay">$50</strong>
-</div>
-<div>
-<span class="label">PROGRESO DE LA META</span>
-<div class="strength">
-<i>
-</i>
-</div>
-<small class="muted" id="progressText">0% · Sin operaciones</small>
-</div>
-</div>
-</article>
-<div class="controls">
-<button class="primary" id="start">▶ INICIAR SIMULACIÓN</button>
-<button id="pause">Ⅱ PAUSAR</button>
-<button class="danger" id="close">□ CERRAR TODO</button>
-</div>
-<div class="notice"><span id="radarNotice">El radar sigue las señales confirmadas. Pausar entradas conserva la gestión de salidas.</span></div>
-</section>
-<section id="operacion" class="page hidden">
-<article class="panel" style="margin-bottom:12px">
-<h2>Plan de operación</h2>
-<div class="body">
-<div class="top-controls">
-<span>BTC · 15 minutos</span>
-<span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
-</div>
-<div class="strength">
-<i style="width:100%">
-</i>
-</div>
-<div class="metrics">
-<span>01 · Lectura</span>
-<span>02 · Señal</span>
-<span>03 · Entrada</span>
-<span>04 · Salida</span>
-</div>
-</div>
-</article>
-<form id="settings">
-<div class="settings-grid">
-<article class="panel">
-<h2>Control principal</h2>
-<div class="body">
-<div class="field">
-<label>Saldo de simulación<small><span id="cashLabel">Saldo inicial virtual</span></small>
-</label>
-<input type="number" name="balance" value="1000" min="1" max="1000000" required>
-</div>
-<div class="field">
-<label>Meta diaria ($)</label>
-<input type="number" name="goal" value="50" min="0" required>
-</div>
-<div class="field">
-<label>Límite de pérdida diaria ($)</label>
-<input type="number" name="loss" value="25" min="1" required>
-</div>
-<div class="field">
-<label>Contratos por entrada</label>
-<input type="number" name="contracts" value="1" min="1" max="1000" required>
-</div>
-<div class="field">
-<label>Máximo por operación ($)</label>
-<input type="number" name="maxTrade" value="10" min="1" required>
-</div>
-<div class="field">
-<label>Máximo de entradas por ronda</label>
-<input type="number" name="entries" value="1" min="1" max="100" required>
-</div>
-</div>
-</article>
-<article class="panel">
-<h2>Precios y protección</h2>
-<div class="body">
-<div class="field">
-<label>Precio mínimo de compra (¢)</label>
-<input type="number" name="minEntry" value="10" min="1" max="99" required>
-</div>
-<div class="field">
-<label>Precio máximo de compra (¢)</label>
-<input type="number" name="maxEntry" value="60" min="1" max="99" required>
-</div>
-<div class="field">
-<label>Take profit (¢)<small>Subida desde el precio de entrada; 0 desactiva</small>
-</label>
-<input type="number" name="tp" value="12" min="0" max="98" required>
-</div>
-<div class="field">
-<label>Stop loss (¢)<small>Caída desde el precio de entrada; 0 desactiva</small>
-</label>
-<input type="number" name="sl" value="10" min="0" max="98" required>
-</div>
-<div class="field">
-<label>Salida antes del cierre (seg.)</label>
-<input type="number" name="exitTime" value="20" min="0" max="300" required>
-</div>
-<div class="field">
-<label>Cerrar por señal contraria<small>Ajuste de salida; no fija la dirección del cerebro</small>
-</label>
-<input type="checkbox" name="reverse" checked>
-</div>
-<div class="field">
-<label>Comisión estimada por contrato (¢)</label>
-<input type="number" name="fee" value="2" min="0" max="20" required>
-</div>
-</div>
-</article>
-</div>
-<button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
-</form>
-<div class="notice">Los ajustes se guardan en el servidor y se aplican a compras nuevas. Las posiciones abiertas conservan su plan de salida.</div>
-</section>
-<section id="entradas" class="page hidden">
-<article class="panel">
-<h2>Entradas de la sesión <button id="exportCSV" style="float:right;padding:4px 10px;font-size:10px">EXPORTAR CSV</button></h2>
-<div class="table-wrap">
-<table>
-<thead>
-<tr>
-<th>Hora</th>
-<th>Ronda</th>
-<th>Dirección</th>
-<th>Contratos</th>
-<th>Precio</th>
-<th>Estado</th>
-</tr>
-</thead><tbody id="entriesRows"></tbody>
-</table>
-</div>
-<div class="empty" id="entriesEmpty">Sin entradas. Activa la simulación para comenzar.</div>
-</article>
-</section>
-<section id="registro" class="page hidden">
-<article class="panel">
-<h2>Registro de operaciones y eventos</h2>
-<div class="table-wrap">
-<table>
-<thead>
-<tr>
-<th>Hora local</th>
-<th>Acción</th>
-<th>Detalle</th>
-</tr>
-</thead>
-<tbody id="logs">
-</tbody>
-</table>
-</div>
-</article>
-</section>
-<section id="senal" class="page hidden">
-<div class="settings-grid">
-<article class="panel">
-<h2>Lectura del cerebro</h2>
-<div class="body">
-<div class="empty">
-<div class="gold" style="font-size:28px;margin-bottom:15px"><span id="signalTitle">ESPERANDO DATOS</span></div><span id="signalDetail">El motor está arrancando.</span></div>
-<div class="field">
-<label>Dirección actual</label>
-<strong id="signalDirection">—</strong>
-</div>
-<div class="field">
-<label>Primera señal de la ronda</label>
-<strong id="signalFirst">—</strong>
-</div>
-<div class="field">
-<label>Precio de BTC</label>
-<strong id="btcPrice">—</strong>
-</div>
-<div class="field">
-<label>Objetivo de la ronda</label>
-<strong id="targetPrice">—</strong>
-</div>
-</div>
-</article>
-<article class="panel">
-<h2>Indicadores</h2>
-<div class="body">
-<div class="field">EMA 9 / EMA 21<strong id="emaValue">—</strong>
-</div>
-<div class="field">RSI 14<strong id="rsiValue">—</strong>
-</div>
-<div class="field">Momentum<strong id="momentumValue">—</strong>
-</div>
-<div class="field">Volumen relativo<strong id="volumeValue">—</strong>
-</div>
-<div class="notice"><span id="indicatorNote">Indicadores del cerebro original. No son probabilidades calibradas.</span></div>
-</div>
-</article>
-</div>
-</section>
-<section id="conexion" class="page hidden">
-<article class="panel">
-<h2>Conexión Kalshi</h2>
-<div class="body">
-<p class="muted">Los datos públicos funcionan sin clave. Puedes verificar una API de Kalshi Demo; no habilita órdenes reales.</p>
-<div class="field">
-<label>Entorno</label>
-<select id="connectionMode"><option value="public">Simulación local</option><option value="demo">Kalshi Demo · lectura</option></select>
-</div>
-<div class="field">
-<label>API Key ID</label>
-<input id="apiKey" class="wide" style="max-width:360px" type="text" placeholder="API Key ID de Demo" autocomplete="off">
-</div>
-<div class="field">
-<label>Clave privada</label>
-<textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM de Demo" spellcheck="false" autocomplete="off"></textarea>
-</div>
-<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testPublic">VERIFICAR DATOS</button><button id="testApi" class="primary">VERIFICAR API DEMO</button><button id="forgetApi">LIMPIAR CREDENCIALES</button></div><div class="notice"><span id="connectionNotice">Consultando conexión pública…</span></div>
-</div>
-</article>
-</section>
-</main>
-</div>
-<div class="toast hidden" id="toast" role="status">
-</div>
-<script>
-const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
-const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:false}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',entries:'max_entries_round',minEntry:'min_entry_cents',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
-const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
-let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
-function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
-let lastHeight=0;function height(){let h=Math.max(650,document.documentElement.scrollHeight);if(h!==lastHeight){lastHeight=h;post('streamlit:setFrameHeight',{height:h})}}
-function toast(msg){$('#toast').textContent=msg;$('#toast').classList.remove('hidden');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),4500)}
-function busy(on){for(const s of ['#start','#pause','#close','#testPublic','#testApi','#forgetApi','#exportCSV','#settings button[type=submit]'])$(s).disabled=on}
-function action(action,payload={}){if(pending){toast('Esperando confirmación del servidor.');return}let id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);pending=id;busy(true);post('streamlit:setComponentValue',{value:{id,action,payload},dataType:'json'});setTimeout(()=>{if(pending===id){pending=null;busy(false);toast('Sin confirmación del servidor. Revisa Registro antes de repetir.')}},25000)}
-document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
-$('#start').onclick=()=>action('command',{command:'start'});$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y solicitar cerrar todas las posiciones simuladas?'))action('command',{command:'close'})};
-const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}action('settings',cfg)};
-$('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
-$('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
-function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent='SIMULACIÓN · '+s.message;
-$('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
-let metrics=document.querySelectorAll('[data-metric]');metrics[0].textContent=money(s.totals.daily);metrics[1].textContent=money(s.totals.realized);let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.daily/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#unrealized').textContent=marked?money(net):'—';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
-if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else el.value=s.settings[key]}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.has_trades;
-$('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
-$('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
-$('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
-endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(fresh?'DATOS PÚBLICOS CONECTADOS':'ESPERANDO DATOS PÚBLICOS')+' · '+(s.connection?.message||'Simulación local activa; no requiere API privada.');height();tick()}
-function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.snapshot)update(args.snapshot);let reply=args.reply;if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.ok&&reply.kind==='settings'){dirty=false;if(args.snapshot)update(args.snapshot)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
-window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
+    def do_GET(self):
+        path=urlsplit(self.path).path
+        if path=='/healthz':
+            return self.send({'ok':True,'mode':'paper'})
+        if path=='/':
+            return self.send(_INDEX.encode('utf-8'),content_type='text/html; charset=utf-8')
+        if not self.authenticated():
+            return self.send({'error':'Inicia sesión.'},401)
+        if path=='/api/state':
+            return self.send(self.bot.view())
+        if path=='/api/history.csv':
+            stream=io.StringIO()
+            with self.bot.lock:
+                rows=self.bot.db.execute('SELECT * FROM trades ORDER BY id').fetchall()
+                fields=[d[0] for d in self.bot.db.execute('SELECT * FROM trades LIMIT 0').description]
+                writer=csv.writer(stream);writer.writerow(fields);writer.writerows([tuple(r) for r in rows])
+            return self.send(stream.getvalue().encode('utf-8-sig'),content_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename=alpha_historial.csv'})
+        self.send({'error':'No encontrado.'},404)
 
-</script></body></html>
-"""
-# Connection verification never submits an order and never stores private keys.
-def verify_demo_credentials(payload, getter=None):
-    import base64
-    from cryptography.hazmat.primitives import serialization, hashes
-    from cryptography.hazmat.primitives.asymmetric import padding, rsa, ed25519
-    key_id=payload.get('key_id','')
-    pem=payload.get('pem','')
-    if not isinstance(key_id,str) or not isinstance(pem,str) or not key_id.strip() or len(key_id)>200 or len(pem)>16000:
-        raise ValueError('Introduce el API Key ID y la clave privada PEM de Kalshi Demo.')
-    try:
-        key=serialization.load_pem_private_key(pem.strip().encode(),password=None)
-    except Exception:
-        raise ValueError('La clave privada no es un PEM válido sin contraseña.') from None
-    timestamp=str(int(time.time()*1000));path='/trade-api/v2/portfolio/balance'
-    message=(timestamp+'GET'+path).encode()
-    if isinstance(key,ed25519.Ed25519PrivateKey):
-        signature=key.sign(message)
-    elif isinstance(key,rsa.RSAPrivateKey):
-        signature=key.sign(message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.DIGEST_LENGTH),hashes.SHA256())
-    else:
-        raise ValueError('Kalshi requiere una clave RSA o Ed25519 compatible.')
-    headers={'KALSHI-ACCESS-KEY':key_id.strip(),'KALSHI-ACCESS-TIMESTAMP':timestamp,
-             'KALSHI-ACCESS-SIGNATURE':base64.b64encode(signature).decode()}
-    try:
-        result=(getter or requests.get)('https://external-api.demo.kalshi.co'+path,headers=headers,timeout=8).json()
-        balance=float(result['balance'])/100
-        if not math.isfinite(balance):
-            raise ValueError('Saldo inválido.')
-    except Exception as e:
-        code=getattr(e,'code',None)
-        if code in (401,403):
-            raise ValueError('Kalshi rechazó estas credenciales. Usa claves del entorno Demo, no de la cuenta real.') from None
-        raise ValueError('No se pudo verificar el saldo de Kalshi Demo. Comprueba la conexión y las credenciales.') from None
-    return {'message':f'API DEMO VERIFICADA · saldo de prueba ${balance:.2f}. Ejecución local simulada.', 'balance':balance,'verified_at':stamp()}
-
-class Controller:
-    """Idempotent UI actions. Returned snapshots never include credentials."""
-    def __init__(self,bot):
-        self.bot=bot
-        self.seen={}
-        self.connection={'message':'Datos públicos sin API privada.'}
-    def handle(self,event):
-        if not isinstance(event,dict) or event.get('action')=='ack':
-            return None
-        action=event.get('action');event_id=event.get('id')
-        if not isinstance(event_id,str) or len(event_id)>160:
-            return None
-        if event_id in self.seen:
-            return self.seen[event_id]
-        reply={'id':event_id,'ok':True,'kind':action}
+    def do_POST(self):
+        # JSON-only + exact Origin prevents browser cross-site form actions.
+        origin=self.headers.get('Origin')
+        host=self.headers.get('Host','')
+        if origin and urlsplit(origin).netloc!=host:
+            return self.send({'error':'Origen no autorizado.'},403)
+        if self.headers.get('Content-Type','').split(';')[0]!='application/json':
+            return self.send({'error':'Se requiere JSON.'},415)
         try:
-            payload=event.get('payload',{})
-            if not isinstance(payload,dict):raise ValueError('Solicitud inválida.')
-            if action=='command':
-                command=payload.get('command')
-                self.bot.command(command)
-                reply['message']={'start':'Simulación activada.','pause':'Entradas pausadas; salidas vigiladas.',
-                                  'close':'Cierre solicitado; esperando liquidez actual.'}[command]
-            elif action=='settings':
-                self.bot.save_settings(payload);reply['message']='Ajustes guardados y aplicados a compras nuevas.'
-            elif action=='public':
-                market=self.bot.feed.current();book=self.bot.feed.book(market['ticker'])
-                reply['message']='Kalshi responde: '+market['ticker']
-                self.connection={'message':'Consulta pública verificada: '+market['ticker'],'verified_at':stamp()}
-            elif action=='verify_demo':
-                self.connection=verify_demo_credentials(payload)
-                reply['message']=self.connection['message']
-                with self.bot.lock:self.bot.event('CONEXIÓN','API de Demo verificada en modo de lectura.')
-            elif action=='forget_demo':
-                self.connection={'message':'Verificación de API eliminada. Datos públicos disponibles.'}
-                reply['message']='Campos de credenciales limpiados. No se guardaron claves en disco.'
-            elif action=='export':
-                stream=io.StringIO();writer=csv.writer(stream)
-                with self.bot.lock:
-                    cursor=self.bot.db.execute('SELECT * FROM trades ORDER BY id')
-                    writer.writerow([x[0] for x in cursor.description]);writer.writerows(cursor.fetchall())
-                reply.update(csv=stream.getvalue(),message='Historial completo exportado.')
+            length=int(self.headers.get('Content-Length','0'))
+            if not 0<length<=16384:
+                raise ValueError('Solicitud demasiado grande o vacía.')
+            data=json.loads(self.rfile.read(length))
+            path=urlsplit(self.path).path
+            if path=='/api/login':
+                # Constant-time comparison; use a strong ALPHA_PASSWORD on a hosted instance.
+                if not isinstance(data.get('password'),str) or not hmac.compare_digest(data['password'].encode(),self.password.encode()):
+                    return self.send({'error':'Contraseña incorrecta.'},403)
+                token=secrets.token_urlsafe(32)
+                with self.session_lock:
+                    self.sessions={k:v for k,v in self.sessions.items() if v>time.time()}
+                    type(self).sessions=self.sessions
+                    self.sessions[token]=time.time()+43200
+                secure='; Secure' if os.environ.get('ALPHA_SECURE_COOKIE')=='1' else ''
+                return self.send({'ok':True},headers={'Set-Cookie':f'alpha={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{secure}'})
+            if not self.authenticated():
+                return self.send({'error':'Inicia sesión.'},401)
+            if path=='/api/settings':
+                self.bot.save_settings(data)
+            elif path=='/api/command':
+                self.bot.command(data.get('command'))
             else:
-                raise ValueError('Acción desconocida.')
-        except ValueError as e:
-            reply.update(ok=False,message=str(e))
+                return self.send({'error':'No encontrado.'},404)
+            self.send({'ok':True})
+        except (ValueError,TypeError,AttributeError) as e:
+            self.send({'error':str(e)},400)
         except Exception:
-            reply.update(ok=False,message='No se pudo completar la operación. No se confirmó el cambio.')
-        self.seen[event_id]=reply
-        if len(self.seen)>500:self.seen.pop(next(iter(self.seen)))
-        return reply
-    def snapshot(self):
-        result=self.bot.view()
-        with self.bot.lock:
-            result['has_trades']=bool(self.bot.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone())
-        result['connection']=self.connection.copy()
-        return result
+            self.send({'error':'No se pudo guardar la operación.'},500)
 
-
-def streamlit_main():
-    import streamlit as st
-    import streamlit.components.v1 as components
-    import tempfile
-    st.set_page_config(page_title='ALPHA EDGE · BTC 15 MIN',layout='wide',initial_sidebar_state='collapsed')
-    st.markdown('<style>.block-container{padding:0!important;max-width:100%!important}header,footer{display:none!important}.stApp{background:#080e22}</style>',unsafe_allow_html=True)
+def main():
+    host=os.environ.get('BIND','127.0.0.1')
+    password=os.environ.get('ALPHA_PASSWORD','')
+    if host not in ('127.0.0.1','localhost','::1') and len(password)<12:
+        raise SystemExit('Define ALPHA_PASSWORD de al menos 12 caracteres para acceso externo.')
+    db=Path(os.environ.get('ALPHA_DB',ROOT/'data'/'alpha.sqlite3'))
+    db.parent.mkdir(parents=True,exist_ok=True)
+    lock=open(str(db)+'.lock','a+')
     try:
-        password=os.environ.get('ALPHA_PASSWORD') or st.secrets.get('ALPHA_PASSWORD','')
-    except Exception:
-        password=os.environ.get('ALPHA_PASSWORD','')
-    if password and not st.session_state.get('alpha_authenticated'):
-        supplied=st.text_input('Contraseña de ALPHA EDGE',type='password')
-        if st.button('Entrar'):
-            if hmac.compare_digest(supplied.encode(),password.encode()):
-                st.session_state.alpha_authenticated=True;st.rerun()
-            else:st.error('Contraseña incorrecta.')
-        st.stop()
+        if os.name == 'nt':
+            import msvcrt
+            lock.seek(0); lock.write('0'); lock.flush(); lock.seek(0)
+            msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
+        else:
+            import fcntl
+            fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except (BlockingIOError, OSError):
+        raise SystemExit('Ya hay un servidor operando esta base. Usa una sola instancia.')
+    Handler.password=password
+    Handler.bot=Bot(db)
+    server=ThreadingHTTPServer((host,int(os.environ.get('PORT','8000'))),Handler)
+    Handler.bot.start_worker()
+    print(f'ALPHA EDGE · simulación · http://{host}:{server.server_port}',flush=True)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        Handler.bot.stop_event.set()
+        server.server_close()
+        if Handler.bot.thread:
+            Handler.bot.thread.join(timeout=40)
+        Handler.bot.db.close()
+        lock.close()
 
-    @st.cache_resource
-    def shared_bot():
-        db=Path(os.environ.get('ALPHA_DB',ROOT/'data'/'alpha.sqlite3'))
-        db.parent.mkdir(parents=True,exist_ok=True)
-        lock=open(str(db)+'.lock','a+')
-        try:
-            if os.name=='nt':
-                import msvcrt
-                lock.seek(0);lock.write('0');lock.flush();lock.seek(0)
-                msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
-            else:
-                import fcntl
-                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except OSError:
-            lock.close()
-            raise RuntimeError('Ya existe un proceso operando esta base. Reinicia el servicio y usa una instancia.')
-        bot=Bot(db);bot._process_lock=lock
-        bot.start_worker()
-        return bot
-    bot=shared_bot()
-    if 'alpha_controller' not in st.session_state:
-        st.session_state.alpha_controller=Controller(bot)
-    controller=st.session_state.alpha_controller
-    digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
-    directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
-    directory.mkdir(parents=True,exist_ok=True)
-    index=directory/'index.html'
-    if not index.exists():index.write_text(_TERMINAL_HTML,encoding='utf-8')
-    terminal=components.declare_component('alpha_edge_terminal',path=str(directory))
 
-    @st.fragment(run_every=2)
-    def live_terminal():
-        event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
-        if isinstance(event,dict) and event.get('action')=='ack':
-            st.session_state.alpha_reply=None
-        elif isinstance(event,dict) and event.get('id') not in controller.seen:
-            reply=controller.handle(event)
-            if reply:
-                st.session_state.alpha_reply=reply
-                st.rerun()
-    live_terminal()
+# Streamlit entry point. The signal engine and paper execution above are unchanged.
+import streamlit as st
+import pandas as pd
+st.set_page_config(page_title='ALPHA EDGE · Simulación', page_icon='📈', layout='wide')
+st.markdown('''<style>
+.stApp {background:#080f20;color:#e8edf7}
+[data-testid="stSidebar"]{background:#101b32}
+h1,h2,h3{color:#e7c36b!important} 
+[data-testid="stMetric"]{background:#122039;border:1px solid #344564;border-radius:12px;padding:16px}
+.stButton>button,.stFormSubmitButton>button{border:1px solid #c5a659;border-radius:8px}
+</style>''',unsafe_allow_html=True)
 
-if __name__=='__main__':
-    from streamlit.runtime.scriptrunner import get_script_run_ctx
-    if get_script_run_ctx(suppress_warning=True) is None:
-        # Also support the previously supplied Render start command.
-        import sys
-        from streamlit.web import cli as streamlit_cli
-        sys.argv=['streamlit','run',str(Path(__file__).resolve()),
-                  '--server.address',os.environ.get('BIND','127.0.0.1'),
-                  '--server.port',os.environ.get('PORT','8501'),'--server.headless','true']
-        raise SystemExit(streamlit_cli.main())
-    else:
-        streamlit_main()
+@st.cache_resource
+def paper_bot():
+    db=ROOT/'data'/'streamlit_paper.sqlite3'
+    db.parent.mkdir(parents=True,exist_ok=True)
+    b=Bot(db)
+    b.start_worker()
+    return b
+
+bot=paper_bot()
+st.sidebar.title('ALPHA EDGE')
+st.sidebar.caption('BTC · 15 MINUTOS')
+st.sidebar.info('SIMULACIÓN · Sin compras con dinero real')
+page=st.sidebar.radio('Terminal',['Operación','Ajustes','Historial'])
+st.sidebar.caption('En Streamlit Cloud el proceso puede suspenderse. Descarga el historial antes de reiniciar: el disco no es permanente.')
+st.title('ALPHA EDGE')
+st.caption('Tu cerebro de señales · Ejecución automática simulada')
+
+labels={
+'contracts':'Contratos por entrada','min_entry_cents':'Precio mínimo de compra (¢)',
+'max_entry_cents':'Precio máximo de compra (¢)','take_profit_cents':'Take profit: precio objetivo Kalshi (%)',
+'stop_loss_cents':'Stop loss: caída desde entrada (¢)','exit_before_close':'Salir antes del cierre (segundos)',
+'max_entries_round':'Máximo de entradas por ronda','daily_loss_dollars':'Límite de pérdida diaria ($)',
+'daily_goal_dollars':'Objetivo diario ($; 0 desactiva)','max_trade_dollars':'Máximo por operación ($)',
+'starting_balance':'Saldo inicial simulado ($)','fee_cents_per_contract':'Comisión simulada por contrato (¢)'}
+bounds={'contracts':(1,1000),'min_entry_cents':(1,98),'max_entry_cents':(2,99),
+ 'take_profit_cents':(0,100),'stop_loss_cents':(0,98),'exit_before_close':(0,300),
+ 'max_entries_round':(1,100),'daily_loss_dollars':(1,100000),'daily_goal_dollars':(0,100000),
+ 'max_trade_dollars':(1,100000),'starting_balance':(1,1000000),'fee_cents_per_contract':(0,20)}
+
+if page=='Ajustes':
+    st.subheader('Plan de operación simulada')
+    with st.form('settings'):
+        cfg=bot.view()['settings']
+        cols=st.columns(2)
+        for i,(key,label) in enumerate(labels.items()):
+            lo,hi=bounds[key]
+            cfg[key]=cols[i%2].number_input(label,min_value=lo,max_value=hi,value=int(cfg[key]),step=1,key=key)
+        cfg['close_on_reverse']=st.checkbox('Cerrar posición si el cerebro confirma la dirección contraria',value=cfg['close_on_reverse'])
+        st.caption('Take profit es el precio objetivo Kalshi (90% = 90¢); 0 lo desactiva. Stop loss en 0 se desactiva. Las posiciones abiertas conservan su plan original.')
+        if st.form_submit_button('Guardar ajustes'):
+            try:
+                bot.save_settings(cfg)
+                st.success('Ajustes guardados.')
+            except ValueError as e:
+                st.error(str(e))
+else:
+    @st.fragment(run_every='2s')
+    def live_panel():
+        v=bot.view()
+        if page=='Operación':
+            cols=st.columns(3)
+            if cols[0].button('Iniciar simulación',use_container_width=True):
+                bot.command('start'); v=bot.view()
+            if cols[1].button('Pausar entradas',use_container_width=True):
+                bot.command('pause'); v=bot.view()
+            if cols[2].button('Cerrar posiciones simuladas',use_container_width=True):
+                bot.command('close'); v=bot.view()
+            st.caption('Pausar detiene entradas nuevas; las salidas siguen vigiladas mientras el proceso esté activo.')
+            a,b,c,d=st.columns(4)
+            a.metric('Estado',v['status'])
+            b.metric('Dirección confirmada',v.get('signal') or 'ANALIZANDO')
+            c.metric('Efectivo simulado',f"${v['totals']['cash']:,.2f}")
+            d.metric('Resultado diario',f"${v['totals']['daily']:,.2f}")
+            st.info(v.get('message','Esperando lectura'))
+            if v.get('status')=='SIN DATOS':
+                st.warning('No hay lectura actual válida. Los valores anteriores pueden estar vencidos.')
+            a,b,c=st.columns(3)
+            price=v.get('price'); target=v.get('target'); remaining=v.get('seconds_left')
+            a.metric('BTC observado',f'${price:,.2f}' if price else '—')
+            b.metric('Objetivo de la ronda',f'${target:,.2f}' if target else '—')
+            c.metric('Tiempo en última lectura',f'{int(remaining)//60:02d}:{int(remaining)%60:02d}' if remaining is not None else '—')
+            st.caption(f"Ronda: {v.get('market',{}).get('ticker','—')} · Actualización: {v.get('updated','—')} · Fuente: {v.get('source','—')}")
+            st.subheader('Posiciones simuladas abiertas')
+            if v['positions']: st.dataframe(pd.DataFrame(v['positions']),hide_index=True,use_container_width=True)
+            else: st.caption('Sin posiciones abiertas.')
+            st.subheader('Primeras señales de cada ronda')
+            if v['rounds']:
+                rows=[{'Ronda':r['ticker'],'Primera señal':r.get('first_direction'),'Dirección actual':r.get('active_direction')} for r in v['rounds']]
+                st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+        else:
+            st.subheader('Historial de simulación')
+            df=pd.DataFrame(v['trades'])
+            st.download_button('Descargar operaciones CSV',df.to_csv(index=False).encode('utf-8-sig'),'alpha_operaciones.csv','text/csv')
+            st.dataframe(df,hide_index=True,use_container_width=True)
+            st.subheader('Registro del sistema')
+            st.dataframe(pd.DataFrame(v['events']),hide_index=True,use_container_width=True)
+    live_panel()
