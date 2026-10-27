@@ -886,7 +886,7 @@ class Bot:
               tp INTEGER, sl INTEGER, exit_seconds INTEGER, reverse INTEGER);
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,message TEXT);
         ''')
-        self.settings = {**DEFAULTS, **(self.kv('settings') or {})}
+        self.settings = {**DEFAULTS, **{k:v for k,v in (self.kv('settings') or {}).items() if k in DEFAULTS}}
         self.settings['min_entry_cents'] = 1
         # Migrate the old take-profit offset to a Kalshi contract price target.
         if self.kv('kalshi_tp_target_migrated') is None:
@@ -914,8 +914,16 @@ class Bot:
         self.db.commit()
 
     def save_settings(self,raw):
-        settings=valid_settings(raw)
+        if not isinstance(raw,dict):
+            raise ValueError('Los ajustes deben enviarse como un objeto.')
+        unknown=set(raw)-set(DEFAULTS)
+        if unknown:
+            raise ValueError('Ajustes desconocidos: '+', '.join(sorted(unknown)))
         with self.lock:
+            # Allow legacy clients or persisted settings without the new fields.
+            # Explicit incoming values always take priority over saved values.
+            merged={**DEFAULTS, **{k:v for k,v in self.settings.items() if k in DEFAULTS}, **raw}
+            settings=valid_settings(merged)
             if settings['starting_balance'] != self.settings['starting_balance'] and self.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone():
                 raise ValueError('El saldo inicial ya tiene operaciones y no puede cambiarse.')
             previous=(self.settings.get('martingale_enabled'),self.settings.get('martingale_levels'),self.settings.get('max_trade_dollars'))
@@ -1439,13 +1447,16 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="goal" value="50" min="0" required>
 </div>
 <div class="field">
-<label>Apuesta inicial ($)<small>Importe del primer nivel. Si ganas, vuelve a este importe.</small></label>
+<label>Importe de compra ($)<small>Normal: la misma cantidad en cada ronda. Martingala: apuesta inicial del nivel 1.</small></label>
 <input type="number" name="tradeAmount" value="50" min="0.01" max="100000" step="0.01" required>
 </div>
 <div class="field">
-<label>Activar martingala</label>
-<input type="checkbox" name="martingaleEnabled">
-<small>Si pierde: duplica para la siguiente entrada. Si gana: vuelve al primer nivel.</small>
+<label>Modo de compra</label>
+<select name="operationMode" style="background:#0a1024;color:#f2f4f9;border:1px solid #b29a54;border-radius:7px;padding:10px;max-width:320px;width:100%">
+<option value="normal">NORMAL — importe fijo</option>
+<option value="martingale">MARTINGALA — duplica tras pérdida</option>
+</select>
+<small id="modeExplanation">Normal: compra siempre por el importe indicado. Martingala: duplica solo después de perder y vuelve al inicio si gana.</small>
 </div>
 <div class="field">
 <label>Niveles de martingala (1 a 12)</label>
@@ -1603,7 +1614,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',tradeAmount:'max_trade_dollars',martingaleEnabled:'martingale_enabled',martingaleLevels:'martingale_levels',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',tradeAmount:'max_trade_dollars',martingaleLevels:'martingale_levels',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
@@ -1616,8 +1627,10 @@ document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.
 $('#start').onclick=()=>action('command',{command:'start'});$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y solicitar cerrar todas las posiciones simuladas?'))action('command',{command:'close'})};
 const form=$('#settings');
 function updateMartingalePreview(){let base=Number(form.elements.tradeAmount.value)||0,n=Math.max(1,Math.min(12,Number(form.elements.martingaleLevels.value)||1));let amounts=Array.from({length:n},(_,i)=>money(base*2**i));$('#martingalePreview').textContent=amounts.join(' · ')}
-form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';updateMartingalePreview()};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current?.settings?.fee_cents_per_contract??2;cfg.contracts=current?.settings?.contracts??1;cfg.max_trade_dollars=cfg.max_trade_dollars??current?.settings?.max_trade_dollars??50;saveFeedback('Guardando cambios…',null);action('settings',cfg)};
+function refreshMode(){let isMartingale=form.elements.operationMode.value==='martingale';$('#martingalePreview').style.opacity=isMartingale?'1':'.50';$('#modeExplanation').textContent=isMartingale?'Martingala: duplica tras cada pérdida y vuelve al importe inicial cuando gana.':'Normal: el mismo importe fijo en cada compra, gane o pierda.'}
+form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';updateMartingalePreview();refreshMode()};
+form.onchange=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';refreshMode()};
+form.onsubmit=e=>{e.preventDefault();if(!current?.settings){saveFeedback('✕ Esperando ajustes del servidor. Vuelve a intentar.',false);return}let cfg={...current.settings};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.martingale_enabled=form.elements.operationMode.value==='martingale';cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current.settings.fee_cents_per_contract??2;cfg.contracts=current.settings.contracts??1;saveFeedback('Guardando cambios…',null);action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
 $('#resetMartingale').onclick=()=>{if(confirm('¿Reiniciar la progresión desde el nivel 1 para la próxima operación?'))action('reset_martingale')};$('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
@@ -1626,7 +1639,7 @@ $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salida
 let metrics=document.querySelectorAll('[data-metric]');metrics[0].textContent=money(s.totals.daily);metrics[1].textContent=money(s.totals.realized);let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.daily/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let invested=s.positions.reduce((sum,p)=>sum+(Number(p.entry||0)*Number(p.quantity||0)/100)+Number(p.entry_fee||0),0);$('#investedAmount').textContent=money(invested);let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
 $('#unrealized').textContent=marked?money(net):'—';$('#unrealized').style.color=marked?(net>0?'#20c997':net<0?'#ff5d6c':'#d7dbe7'):'';$('#investedAmount').style.color=s.positions.length?'#e8c879':'';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
-if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else el.value=s.settings[key]}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR';updateMartingalePreview()}form.elements.balance.disabled=s.has_trades;
+if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else el.value=s.settings[key]}form.elements.operationMode.value=s.settings.martingale_enabled?'martingale':'normal';loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR';updateMartingalePreview();refreshMode()}form.elements.balance.disabled=s.has_trades;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
