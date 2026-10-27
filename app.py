@@ -1458,9 +1458,9 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </select>
 <small id="modeExplanation">Normal: compra siempre por el importe indicado. Martingala: duplica solo después de perder y vuelve al inicio si gana.</small>
 </div>
-<div class="field">
+<div class="field" id="martingaleLevelField">
 <label>Niveles de martingala (1 a 12)</label>
-<input type="number" name="martingaleLevels" value="5" min="1" max="12" step="1" required>
+<input type="number" name="martingaleLevels" value="5" min="1" max="12" step="1">
 <small id="martingalePreview">Con $1 inicial: $1 · $2 · $4 · $8 · $16</small>
 </div>
 <div class="field">
@@ -1627,10 +1627,10 @@ document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.
 $('#start').onclick=()=>action('command',{command:'start'});$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y solicitar cerrar todas las posiciones simuladas?'))action('command',{command:'close'})};
 const form=$('#settings');
 function updateMartingalePreview(){let base=Number(form.elements.tradeAmount.value)||0,n=Math.max(1,Math.min(12,Number(form.elements.martingaleLevels.value)||1));let amounts=Array.from({length:n},(_,i)=>money(base*2**i));$('#martingalePreview').textContent=amounts.join(' · ')}
-function refreshMode(){let isMartingale=form.elements.operationMode.value==='martingale';$('#martingalePreview').style.opacity=isMartingale?'1':'.50';$('#modeExplanation').textContent=isMartingale?'Martingala: duplica tras cada pérdida y vuelve al importe inicial cuando gana.':'Normal: el mismo importe fijo en cada compra, gane o pierda.'}
+function refreshMode(){let isMartingale=form.elements.operationMode.value==='martingale';$('#martingaleLevelField').style.display=isMartingale?'':'none';form.elements.martingaleLevels.disabled=!isMartingale;form.elements.martingaleLevels.required=isMartingale;$('#modeExplanation').textContent=isMartingale?'Martingala: duplica tras cada pérdida y vuelve al importe inicial cuando gana.':'Normal: el mismo importe fijo en cada compra, gane o pierda.';height()}
 form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';updateMartingalePreview();refreshMode()};
-form.onchange=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';refreshMode()};
-form.onsubmit=e=>{e.preventDefault();if(!current?.settings){saveFeedback('✕ Esperando ajustes del servidor. Vuelve a intentar.',false);return}let cfg={...current.settings};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.martingale_enabled=form.elements.operationMode.value==='martingale';cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current.settings.fee_cents_per_contract??2;cfg.contracts=current.settings.contracts??1;saveFeedback('Guardando cambios…',null);action('settings',cfg)};
+form.onchange=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';refreshMode()};refreshMode();
+form.onsubmit=e=>{e.preventDefault();if(!current?.settings){saveFeedback('✕ Esperando ajustes del servidor. Vuelve a intentar.',false);return}let cfg={...current.settings};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.martingale_enabled=form.elements.operationMode.value==='martingale';if(!cfg.martingale_enabled){cfg.martingale_levels=Number(current.settings.martingale_levels)||5;}cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current.settings.fee_cents_per_contract??2;cfg.contracts=current.settings.contracts??1;saveFeedback('Guardando cambios…',null);action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
 $('#resetMartingale').onclick=()=>{if(confirm('¿Reiniciar la progresión desde el nivel 1 para la próxima operación?'))action('reset_martingale')};$('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
