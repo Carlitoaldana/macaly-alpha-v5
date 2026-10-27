@@ -699,7 +699,7 @@ ROOT = Path(__file__).resolve().parent
 API = 'https://external-api.kalshi.com/trade-api/v2'
 DEFAULTS = dict(contracts=1, min_entry_cents=10, max_entry_cents=60,
                 take_profit_cents=90, stop_loss_cents=10, exit_before_close=20,
-                max_entries_round=1, daily_loss_dollars=25, daily_goal_dollars=50,
+                max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=1000,
                 fee_cents_per_contract=2, close_on_reverse=True)
 
@@ -731,7 +731,7 @@ def valid_settings(raw):
     bounds = {'contracts':(1,1000), 'min_entry_cents':(1,98), 'max_entry_cents':(2,99),
               'take_profit_cents':(0,100), 'stop_loss_cents':(0,98),
               'exit_before_close':(0,300), 'max_entries_round':(1,100),
-              'daily_loss_dollars':(1,100000), 'daily_goal_dollars':(0,100000),
+              'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20)}
     out = {}
@@ -1003,8 +1003,6 @@ class Bot:
         if actual is None or actual<=max(s['exit_before_close'],0):
             return 'Fuera de ventana de entrada.'
         total=self.totals()
-        if total['daily']<=-s['daily_loss_dollars']:
-            return 'Límite diario de pérdida alcanzado.'
         if s['daily_goal_dollars'] and total['daily']>=s['daily_goal_dollars']:
             return 'Meta diaria alcanzada.'
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
@@ -1412,10 +1410,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="goal" value="50" min="0" required>
 </div>
 <div class="field">
-<label>Límite de pérdida diaria ($)</label>
-<input type="number" name="loss" value="25" min="1" required>
-</div>
-<div class="field">
 <label>Inversión automática por operación<small>5 % del saldo disponible. Se recalcula al ganar o perder, incluyendo comisiones.</small></label>
 <div style="font-size:19px;font-weight:800;color:#e7c36b">5 %</div>
 </div>
@@ -1568,7 +1562,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
