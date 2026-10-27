@@ -322,12 +322,15 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 def _entry_route_checks(sig, seconds_left):
-    """Evaluate both sides from the same evidence; shared by engine and UI."""
+    """Prueba: sin umbrales directos de momentum para confirmar entradas.
+
+    Los cálculos de impulso/agotamiento y la retención se conservan.
+    """
     required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
-                "vol_ratio", "mom3", "mom5", "target_atr", "price_ema9_atr")
+                "vol_ratio", "target_atr", "price_ema9_atr")
     if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
         return {"valid":False, "sides":{}, "noise_ok":False}
-    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion,live_ema = (float(sig[k]) for k in required)
+    r1,r3,r5,adx,vw,m1,m3,vol,cushion,live_ema = (float(sig[k]) for k in required)
     d3,d5 = sig.get("trend3"), sig.get("trend5")
     impulse = sig.get("impulse_internal") or {}
     noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
@@ -339,35 +342,34 @@ def _entry_route_checks(sig, seconds_left):
         reliable = bool(impulse.get("reliable"))
         current = [
             ("EMA de 1 minuto y precio actual a favor", sig.get("ema") == ("BULL" if up else "BEAR") and live_ema*sign>0),
-            ("RSI y momentum actuales a favor", (r1>=53 if up else r1<=47) and mom*sign>=.025),
+            ("RSI actual a favor", (r1>=53 if up else r1<=47)),
             ("MACD de 1 minuto y VWAP a favor", m1*sign>0 and vw*sign>=.03),
             ("Impulso actual sin agotamiento detectado", not exhausted),
         ]
-        early_five = d5 != other or (reliable and strength>=.75 and mom*sign>.04 and vol>=.9)
+        early_five = d5 != other or (reliable and strength>=.75 and vol>=.9)
         rsi_vwap = (r1>=52 and vw>=.05) if up else (r1<=48 and vw<=-.05)
         routes = [
             ("IMPULSO ACTUAL", current),
             ("TENDENCIA ALINEADA", [
                 ("Tendencias de 3 y 5 minutos a favor", d3==side and d5==side),
                 ("Fuerza de tendencia o RSI suficientes", adx>=20 or ((r3>=52 and r5>=50) if up else (r3<=48 and r5<=50))),
-                ("VWAP y momentum actual respaldan la tendencia", (vw>-.15 if up else vw<.15) and mom*sign>=.012),
+                ("VWAP respalda la tendencia", (vw>-.15 if up else vw<.15)),
                 ("Sin agotamiento detectado", not exhausted),
             ]),
             ("TEMPRANA", [
                 ("MACD de 3 minutos a favor", m3*sign>0),
                 ("RSI de 1 minuto y VWAP a favor", rsi_vwap),
-                ("Momentum de 3 minutos a favor", mom*sign>.015),
                 ("Contexto de 5 minutos respaldado o superado por fuerza actual", early_five),
                 ("Sin agotamiento detectado", not exhausted),
             ]),
             ("TEMPRANA ACELERADA", [
-                ("MACD y momentum a favor", m3*sign>0 and mom*sign>.015),
+                ("MACD a favor", m3*sign>0),
                 ("Contexto de 5 minutos no contrario", d5!=other),
                 ("Impulso fuerte con volumen y ADX", reliable and strength>=.65 and adx>=20 and vol>=.8),
                 ("Sin agotamiento detectado", not exhausted),
             ]),
             ("GIRO TEMPRANO", [
-                ("MACD y momentum respaldan el giro", m3*sign>0 and mom*sign>.04),
+                ("MACD respalda el giro", m3*sign>0),
                 ("RSI de 1 y 3 minutos respaldan el giro", (r1>=54 and r3>=50) if up else (r1<=46 and r3<=50)),
                 ("VWAP y distancia suficientes", vw*sign>=.08 and abs(cushion)>=.30),
                 ("Impulso y volumen suficientes", reliable and strength>=.70 and vol>=.9),
@@ -379,8 +381,7 @@ def _entry_route_checks(sig, seconds_left):
         routes.append(("FLUJO + IMPULSO", [
             ("Flujo agresor significativo a favor", flow_ok),
             ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and live_ema*sign>0),
-            ("Momentum y VWAP a favor", mom*sign>=.012 and vw*sign>=-.04),
-            ("Contexto contrario corroborado por momentum", d5!=other or (mom5*sign>=.025 and abs(mom)>=.025)),
+            ("VWAP a favor", vw*sign>=-.04),
             ("Impulso fiable sin agotamiento", reliable and not exhausted),
         ]))
         target_ok = True
@@ -389,7 +390,7 @@ def _entry_route_checks(sig, seconds_left):
             weight = .12+.88*(1-remaining/900)**1.6
             tolerance = 1.8-1.4*weight
             if -sign*cushion>tolerance:
-                target_ok = (reliable and strength>=.75 and mom*sign>.04 and not exhausted
+                target_ok = (reliable and strength>=.75 and not exhausted
                              and (all(ok for _,ok in current) or d3==side or d5==side))
         sides[side] = []
         for name,checks in routes:
