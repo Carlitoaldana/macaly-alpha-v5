@@ -341,7 +341,11 @@ def _price_level_context(df, price, atr, now=None):
         old = float(anchor["high"].max() if sign == 1 else anchor["low"].min())
         # A breakout must be beyond the previous fixed level both at the last
         # completed close and at the verified live price.
-        breakout = sign*(float(closed.iloc[-1]["close"])-old) > margin and sign*(price-old) > margin
+        # Exclude the confirmation bar, but include newer obstacles formed
+        # after the anchor window. Clearing an older level is not enough.
+        obstacles = closed.iloc[-21:-1]
+        obstacle = float(obstacles["high"].max() if sign == 1 else obstacles["low"].min())
+        breakout = sign*(float(closed.iloc[-1]["close"])-obstacle) > margin and sign*(price-obstacle) > margin
         near = -margin <= sign*(level-price) <= .35*atr
         rejected = False
         for _, bar in recent.iterrows():
@@ -1082,10 +1086,17 @@ class Bot:
         if reason:
             self._close(p,price,reason)
 
-    def enter(self,market,book,side,remaining):
+    def enter(self,market,book,side,remaining,signal=None):
         s=self.settings
         if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
             return 'Entradas pausadas o posición en gestión.'
+        # Retaining a displayed direction is not permission for a new entry.
+        # Recheck every route using the current signal, including level vetoes.
+        if not signal or signal.get('data_valid') is not True or signal.get('candidate') != side:
+            return 'Esperando respaldo actual para una compra nueva.'
+        current_routes = engine._entry_route_checks(signal, engine.get_seconds_remaining(market))
+        if not current_routes.get('valid') or not any(r['complete'] for r in current_routes.get('sides', {}).get(side, [])):
+            return 'La señal conservada ya no cumple los requisitos actuales de entrada.'
         if book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
             return 'Libro atrasado; esperando datos actuales.'
         # Remaining recalculated after every network request.
@@ -1150,7 +1161,7 @@ class Bot:
                 if p['ticker']==market['ticker']:
                     self.manage(p,book,active,remaining)
             # Do not reuse the same liquidity snapshot for both a close and a new buy.
-            message=self.enter(market,book,active,remaining) if not had_position else 'Gestión de posición abierta.'
+            message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
             if not self.positions() and self.close_requested:
                 self.close_requested=False
             if active is None:
