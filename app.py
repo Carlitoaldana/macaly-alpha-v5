@@ -1008,45 +1008,30 @@ class Bot:
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:
             return 'Máximo de entradas de esta ronda alcanzado.'
-        # Tamaño automático: hasta 5 % del saldo virtual disponible por entrada.
-        # Se incluyen las comisiones y se respeta el precio máximo y la profundidad real del libro.
-        budget = max(0.0, total['cash']) * 0.05
-        remaining_budget_cents = budget * 100
-        fee_per_contract = s['fee_cents_per_contract']
-        quantity = 0
-        for level_price, level_size in sorted(book[side]['asks']):
-            if level_price > s['max_entry_cents']:
-                continue
-            unit_cost = level_price + fee_per_contract
-            if unit_cost <= 0:
-                continue
-            affordable = int((remaining_budget_cents + 1e-7) // unit_cost)
-            available = int(level_size)
-            take = min(affordable, available)
-            if take <= 0:
-                continue
-            quantity += take
-            remaining_budget_cents -= take * unit_cost
-        # Auditoría: distinguir presupuesto insuficiente de liquidez limitada.
-        eligible = [(p, int(q)) for p, q in book[side]['asks']
-                    if p <= s['max_entry_cents'] and q >= 1]
-        available_contracts = sum(q for _, q in eligible)
-        self.event('DIAGNÓSTICO COMPRA',
-                   f"Saldo ${total['cash']:.2f} · presupuesto 5 % ${budget:.2f} · "
-                   f"liquidez hasta {s['max_entry_cents']}¢: {available_contracts} contratos · "
-                   f"cantidad calculada: {quantity}")
+        # Simulación por importe en dólares: 5 % del efectivo disponible.
+        # El precio visible del mercado sirve de referencia; no se limita la
+        # cantidad por la profundidad del libro (no es una ejecución real).
+        budget = round(max(0.0, total['cash']) * 0.05, 2)
+        eligible_prices = [float(price) for price, size in book[side]['asks']
+                           if size > 0 and 0 < price <= s['max_entry_cents']]
+        if not eligible_prices:
+            return 'Sin precio de entrada válido dentro del máximo configurado.'
+        price = min(eligible_prices)
+        fee_per_contract = float(s['fee_cents_per_contract'])
+        unit_cost_cents = price + fee_per_contract
+        if unit_cost_cents <= 0:
+            return 'Precio o comisión inválidos.'
+        # Las unidades son enteras; nunca gastar más del 5 % con comisiones.
+        quantity = int((budget * 100 + 1e-7) // unit_cost_cents)
         if quantity < 1:
-            return 'Saldo del 5 % insuficiente o sin liquidez al precio máximo.'
-        price = fill_book(book[side]['asks'], quantity, s['max_entry_cents'])
-        if price is None:
-            return 'Sin liquidez suficiente dentro del precio máximo.'
+            return 'El 5 % del saldo no alcanza para una unidad al precio actual.'
         fee = quantity * fee_per_contract / 100
         cost = price * quantity / 100 + fee
         if cost > budget + 1e-7 or cost > total['cash'] + 1e-7:
-            return 'La compra supera el 5 % del saldo virtual disponible.'
+            return 'La compra supera el presupuesto disponible.'
         self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse) VALUES (?,?,?,?,?,?,?,?,?,?)',
                         (market['ticker'],side,quantity,price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
-        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} (5 % del saldo) · FOK")
+        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} (5 % del saldo) · simulación por importe")
         return 'Compra simulada ejecutada.'
 
     def step(self):
