@@ -437,8 +437,13 @@ def _structure_context(df, price, atr, now=None):
         sides[side]={"breakout":bool(breakout),"rejection":bool(rejection),
                      "retest":bool(retest),"range_bounce":bool(edge_bounce),
                      "fresh":bool(fresh),"not_extended":bool(not_extended),
-                     "volume_ok":bool(volume_ok)}
-    return {"valid":True,"sides":sides}
+                     "volume_ok":bool(volume_ok),
+                     "level":level,"opposite_level":obstacle,
+                     "body_atr":body,"close_location":close_location,
+                     "live_change_atr":sign*(price-c)/atr,
+                     "range_efficiency":range_efficiency,"remaining_room_atr":room}
+    return {"valid":True,"sides":sides,"bar_time":str(last["time"]),
+            "closed_price":c,"live_price":price,"atr":atr,"efficiency":efficiency}
 
 
 def _entry_route_checks(sig, seconds_left):
@@ -449,7 +454,7 @@ def _entry_route_checks(sig, seconds_left):
     for side in ("UP","DOWN"):
         info=context.get("sides",{}).get(side,{})
         sides[side]=[]
-        for name,key in (("RUPTURA Y RETEST","retest"),("FALSA RUPTURA Y RECUPERACIÓN","rejection"),("REBOTE EN RANGO","range_bounce"),("RUPTURA DE ESTRUCTURA","breakout")):
+        for name,key in (("RUPTURA Y RETEST","retest"),("RUPTURA DE ESTRUCTURA","breakout")):
             checks=[("Estructura cerrada y datos actuales",valid),
                     (name,info.get(key,False)),
                     ("Precio actual confirma sin perseguir",info.get("fresh",False)),
@@ -460,7 +465,11 @@ def _entry_route_checks(sig, seconds_left):
     return {"valid":bool(valid),"sides":sides,"noise_ok":bool(valid)}
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
-    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
+    now=pd.Timestamp.now(tz="UTC")
+    completed=df[pd.to_datetime(df["time"],utc=True)+pd.Timedelta(minutes=1)<=now]
+    if len(completed)<25:
+        raise ValueError("Esperando al menos 25 velas cerradas para evaluar el motor.")
+    one=add_indicators(completed); three=_resample_indicators(completed,3); five=_resample_indicators(completed,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
     def direction(row):
@@ -940,9 +949,9 @@ class Bot:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,message TEXT);
         ''')
         columns={r[1] for r in self.db.execute('PRAGMA table_info(trades)')}
-        for column in ('tp_pct','sl_pct'):
+        for column in ('tp_pct','sl_pct','entry_evidence'):
             if column not in columns:
-                self.db.execute('ALTER TABLE trades ADD COLUMN '+column+' REAL')
+                self.db.execute('ALTER TABLE trades ADD COLUMN '+column+(' TEXT' if column=='entry_evidence' else ' REAL'))
         saved=self.kv('settings') or {}
         self.settings={key:saved.get(key,value) for key,value in DEFAULTS.items()}
         self.put('settings',self.settings)
@@ -1087,8 +1096,15 @@ class Bot:
         cost=price*quantity/100+fee
         if cost>budget+1e-8 or cost>total['cash']+1e-8:
             return 'La compra supera el importe o el saldo virtual disponible.'
-        self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse,tp_pct,sl_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        entry_cursor=self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse,tp_pct,sl_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                         (market['ticker'],side,quantity,price,fee,stamp(),0,0,0,s['close_on_reverse'],s['take_profit_pct'],s['stop_loss_pct']))
+        evidence={"engine_revision":"structure_break_retest_v2","side":side,
+                  "candidate":signal.get("candidate"),"route":signal.get("quality"),
+                  "price_source":signal.get("price_source"),"remaining":remaining,
+                  "structure":signal.get("structure_internal"),
+                  "checks":current_routes["sides"].get(side,[])}
+        self.db.execute('UPDATE trades SET entry_evidence=? WHERE id=?',
+                        (dumps(evidence),entry_cursor.lastrowid))
         self.event('ENTRADA',f"{side} · {quantity} contrato(s) · Compró ${cost:.2f} incluyendo comisión · {price:.2f}¢ · ejecución simulada FOK")
         return 'Compra simulada ejecutada.'
 
