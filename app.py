@@ -1010,16 +1010,37 @@ class Bot:
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:
             return 'Máximo de entradas de esta ronda alcanzado.'
-        price=fill_book(book[side]['asks'],s['contracts'],s['max_entry_cents'])
+        # Tamaño automático: hasta 5 % del saldo virtual disponible por entrada.
+        # Se incluyen las comisiones y se respeta el precio máximo y la profundidad real del libro.
+        budget = max(0.0, total['cash']) * 0.05
+        remaining_budget_cents = budget * 100
+        fee_per_contract = s['fee_cents_per_contract']
+        quantity = 0
+        for level_price, level_size in sorted(book[side]['asks']):
+            if level_price > s['max_entry_cents']:
+                continue
+            unit_cost = level_price + fee_per_contract
+            if unit_cost <= 0:
+                continue
+            affordable = int((remaining_budget_cents + 1e-7) // unit_cost)
+            available = int(level_size)
+            take = min(affordable, available)
+            if take <= 0:
+                continue
+            quantity += take
+            remaining_budget_cents -= take * unit_cost
+        if quantity < 1:
+            return 'Saldo del 5 % insuficiente o sin liquidez al precio máximo.'
+        price = fill_book(book[side]['asks'], quantity, s['max_entry_cents'])
         if price is None:
             return 'Sin liquidez suficiente dentro del precio máximo.'
-        fee=s['contracts']*s['fee_cents_per_contract']/100
-        cost=price*s['contracts']/100+fee
-        if cost>s['max_trade_dollars'] or cost>total['cash']:
-            return 'La compra supera el presupuesto o el saldo virtual disponible.'
+        fee = quantity * fee_per_contract / 100
+        cost = price * quantity / 100 + fee
+        if cost > budget + 1e-7 or cost > total['cash'] + 1e-7:
+            return 'La compra supera el 5 % del saldo virtual disponible.'
         self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse) VALUES (?,?,?,?,?,?,?,?,?,?)',
-                        (market['ticker'],side,s['contracts'],price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
-        self.event('ENTRADA',f"{side} · {s['contracts']} contrato(s) · {price:.2f}¢ · ejecución simulada FOK")
+                        (market['ticker'],side,quantity,price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
+        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} (5 % del saldo) · FOK")
         return 'Compra simulada ejecutada.'
 
     def step(self):
@@ -1395,12 +1416,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="loss" value="25" min="1" required>
 </div>
 <div class="field">
-<label>Contratos por entrada</label>
-<input type="number" name="contracts" value="1" min="1" max="1000" required>
-</div>
-<div class="field">
-<label>Máximo por operación ($)</label>
-<input type="number" name="maxTrade" value="10" min="1" required>
+<label>Inversión automática por operación<small>5 % del saldo disponible. Se recalcula al ganar o perder, incluyendo comisiones.</small></label>
+<div style="font-size:19px;font-weight:800;color:#e7c36b">5 %</div>
 </div>
 <div class="field">
 <label>Máximo de entradas por ronda</label>
@@ -1551,7 +1568,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
@@ -1562,7 +1579,7 @@ function action(action,payload={}){if(pending){toast('Esperando confirmación de
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>action('command',{command:'start'});$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y solicitar cerrar todas las posiciones simuladas?'))action('command',{command:'close'})};
 const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current?.settings?.fee_cents_per_contract??2;action('settings',cfg)};
+form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current?.settings?.fee_cents_per_contract??2;cfg.contracts=current?.settings?.contracts??1;cfg.max_trade_dollars=current?.settings?.max_trade_dollars??10;action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
 $('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
