@@ -737,9 +737,9 @@ def valid_settings(raw):
     out = {}
     for key, (low, high) in bounds.items():
         v = raw[key]
-        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or int(v) != v or not low <= v <= high:
+        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (key != 'max_trade_dollars' and int(v) != v) or not low <= v <= high:
             raise ValueError(f'Valor inválido para {key}: {low}–{high}.')
-        out[key] = int(v)
+        out[key] = round(float(v), 2) if key == 'max_trade_dollars' else int(v)
     if not isinstance(raw['close_on_reverse'], bool):
         raise ValueError('El cierre por cambio de señal debe ser sí o no.')
     out['close_on_reverse'] = raw['close_on_reverse']
@@ -862,6 +862,44 @@ def fill_book(levels, quantity, limit=None):
         if left <= 1e-9:
             return total/quantity
     return None
+
+def size_for_budget(levels, dollars, fee_cents, limit):
+    """Spend the dollar budget on whole contracts, including simulated fees.
+
+    Require enough depth to size the full budget; do not silently buy a tiny
+    partial amount when the requested dollar amount cannot be filled.
+    """
+    remaining = Decimal(str(dollars)) * 100
+    fee = Decimal(str(fee_cents))
+    quantity = 0
+    value = Decimal('0')
+    last_unit = None
+    for raw_price, raw_size in sorted(levels):
+        price = Decimal(str(raw_price))
+        if price > Decimal(str(limit)):
+            continue
+        unit = price + fee
+        if unit <= 0:
+            continue
+        available = int(Decimal(str(raw_size)))
+        if available <= 0:
+            continue
+        affordable = int(remaining // unit)
+        if affordable == 0:
+            break
+        take = min(available, affordable)
+        quantity += take
+        value += price * take
+        remaining -= unit * take
+        last_unit = unit
+        if take < available:
+            break
+    else:
+        if last_unit is not None and remaining >= last_unit:
+            return None
+    if quantity == 0:
+        return None
+    return quantity, float(value / quantity)
 
 class Bot:
     def __init__(self, db_path=None, feed=None):
@@ -1003,18 +1041,22 @@ class Bot:
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:
             return 'Máximo de entradas de esta ronda alcanzado.'
-        price=fill_book(book[side]['asks'],s['contracts'],s['max_entry_cents'])
-        if price is None:
-            return 'Sin liquidez suficiente dentro del precio máximo.'
+        budget=s['max_trade_dollars']
+        if Decimal(str(total['cash'])) < Decimal(str(budget)):
+            return 'Saldo virtual insuficiente para el importe configurado.'
+        sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
+        if sized is None:
+            return 'Sin liquidez suficiente para el importe configurado dentro del precio máximo.'
+        quantity,price=sized
         if price<s['min_entry_cents']:
             return 'Precio inferior al mínimo configurado.'
-        fee=s['contracts']*s['fee_cents_per_contract']/100
-        cost=price*s['contracts']/100+fee
-        if cost>s['max_trade_dollars'] or cost>total['cash']:
-            return 'La compra supera el presupuesto o el saldo virtual disponible.'
+        fee=quantity*s['fee_cents_per_contract']/100
+        cost=price*quantity/100+fee
+        if cost>budget+1e-8 or cost>total['cash']+1e-8:
+            return 'La compra supera el importe o el saldo virtual disponible.'
         self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse) VALUES (?,?,?,?,?,?,?,?,?,?)',
-                        (market['ticker'],side,s['contracts'],price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
-        self.event('ENTRADA',f"{side} · {s['contracts']} contrato(s) · {price:.2f}¢ · ejecución simulada FOK")
+                        (market['ticker'],side,quantity,price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
+        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · Compró ${cost:.2f} incluyendo comisión · {price:.2f}¢ · ejecución simulada FOK")
         return 'Compra simulada ejecutada.'
 
     def step(self):
@@ -1389,13 +1431,10 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Límite de pérdida diaria ($)</label>
 <input type="number" name="loss" value="25" min="1" required>
 </div>
+<input type="hidden" name="contracts" value="1">
 <div class="field">
-<label>Contratos por entrada</label>
-<input type="number" name="contracts" value="1" min="1" max="1000" required>
-</div>
-<div class="field">
-<label>Máximo por operación ($)</label>
-<input type="number" name="maxTrade" value="10" min="1" required>
+<label>Importe a comprar ($)</label>
+<input type="number" name="maxTrade" value="10" min="1" max="100000" step="0.01" required>
 </div>
 <div class="field">
 <label>Máximo de entradas por ronda</label>
