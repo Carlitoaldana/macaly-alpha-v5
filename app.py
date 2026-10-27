@@ -384,7 +384,12 @@ def _structure_context(df, price, atr, now=None):
     prior,last=bars.iloc[:-1],bars.iloc[-1]
     o,h,l,c=(float(last[k]) for k in ("open","high","low","close"))
     values=bars[["open","high","low","close"]].to_numpy(dtype=float)
-    if not np.isfinite(values).all() or h<max(o,c) or l>min(o,c) or h<=l:
+    volumes=bars['volume'].to_numpy(dtype=float)
+    if (not np.isfinite(values).all() or (values<=0).any()
+            or not np.isfinite(volumes).all() or (volumes<0).any()
+            or (bars['high']<bars[['open','close','low']].max(axis=1)).any()
+            or (bars['low']>bars[['open','close','high']].min(axis=1)).any()
+            or h<=l):
         return {"valid":False,"sides":{}}
     upper,lower=float(prior["high"].max()),float(prior["low"].min())
     recent=bars["close"].tail(6).to_numpy(dtype=float)
@@ -432,6 +437,13 @@ def _structure_context(df, price, atr, now=None):
                      and abs(probe-obstacle)<=.20*atr and sign*(c-obstacle)>.12*atr
                      and body>.12 and wick>=.30*(h-l) and close_location>=.65
                      and room>=.75)
+        # Local obstacles count too: a bounce off the bottom of the 20-bar
+        # range must not buy straight into a more recent lower high (or low).
+        local=prior.tail(5)
+        obstacles=local['high'] if sign==1 else local['low']
+        ahead=[sign*(float(v)-price)/atr for v in obstacles if sign*(float(v)-price)>0]
+        room_ahead=min(ahead) if ahead else float('inf')
+        reversal_room=room_ahead>=.60 and room>=.75
         fresh= -.10<=sign*(price-c)/atr<=.50
         not_extended=(h-l)/atr<=2.2 and abs(move)<=2.5
         sides[side]={"breakout":bool(breakout),"rejection":bool(rejection),
@@ -442,6 +454,8 @@ def _structure_context(df, price, atr, now=None):
                      "body_atr":body,"close_location":close_location,
                      "live_change_atr":sign*(price-c)/atr,
                      "range_efficiency":range_efficiency,"remaining_room_atr":room}
+        sides[side]['reversal_room']=bool(reversal_room)
+        sides[side]['continuation_room']=bool(room_ahead>=.60)
     return {"valid":True,"sides":sides,"bar_time":str(last["time"]),
             "closed_price":c,"live_price":price,"atr":atr,"efficiency":efficiency}
 
@@ -454,136 +468,93 @@ def _entry_route_checks(sig, seconds_left):
     for side in ("UP","DOWN"):
         info=context.get("sides",{}).get(side,{})
         sides[side]=[]
-        for name,key in (("RUPTURA Y RETEST","retest"),("RUPTURA DE ESTRUCTURA","breakout")):
+        for name,key in (("RUPTURA Y RETEST","retest"),("RUPTURA DE ESTRUCTURA","breakout"),
+                         ("RECHAZO CONFIRMADO","rejection"),("REBOTE EN RANGO","range_bounce")):
             checks=[("Estructura cerrada y datos actuales",valid),
                     (name,info.get(key,False)),
                     ("Precio actual confirma sin perseguir",info.get("fresh",False)),
                     ("Movimiento sin extensión excesiva",info.get("not_extended",False)),
                     ("Volumen de vela cerrada suficiente",info.get("volume_ok",False))]
+            if key in ('rejection','range_bounce'):
+                checks.append(("Espacio antes del siguiente obstáculo",info.get('reversal_room',False)))
+            elif key=='retest':
+                checks.append(("Retest con espacio para continuar",info.get('continuation_room',False)))
             sides[side].append({"name":name,"checks":checks,"met":sum(bool(v) for _,v in checks),
                                 "total":len(checks),"complete":all(bool(v) for _,v in checks)})
     return {"valid":bool(valid),"sides":sides,"noise_ok":bool(valid)}
 
+STRUCTURE_ENGINE_REVISION = "jc_price_structure_v3"
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
+    """JC decides from price structure alone; indicators below are display-only.
+
+    ATR measures size, never direction. No EMA/RSI/MACD, whale score or target
+    position participates in selecting UP or DOWN.
+    """
     now=pd.Timestamp.now(tz="UTC")
-    completed=df[pd.to_datetime(df["time"],utc=True)+pd.Timedelta(minutes=1)<=now]
+    completed=df[pd.to_datetime(df["time"],utc=True)+pd.Timedelta(minutes=1)<=now].copy()
+    completed=completed.sort_values('time').drop_duplicates('time',keep='last')
     if len(completed)<25:
-        raise ValueError("Esperando al menos 25 velas cerradas para evaluar el motor.")
-    one=add_indicators(completed); three=_resample_indicators(completed,3); five=_resample_indicators(completed,5)
-    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
-    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
-    def direction(row):
-        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
-        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
-    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
-    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
-    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
-    target_atr=(distance/atr) if distance is not None else 0.0
-    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
-    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
-    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
-    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
-    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
-    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
-    # Evaluate all routes for both directions before choosing any candidate.
-    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
-    flow_context = {"direction":flow_side, "valid":False}
-    if isinstance(whale,dict):
-        flow_context["valid"] = (flow_side in ("UP","DOWN") and
-            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
-            float(whale.get("flow_strength") or 0)>=.20)
-    level_context = _price_level_context(df, price, atr)
-    structure = _structure_context(df, price, atr)
-    route_input = {"structure_internal":structure,"level_context_internal":level_context,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
-        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
-        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
-        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
-        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
-        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    route_view = _entry_route_checks(route_input, seconds_left)
-    eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
-                for side in ("UP","DOWN")}
-    choices = [side for side in ("UP","DOWN") if eligible[side]]
-    candidate = choices[0] if len(choices)==1 else None
-    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
-    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
-                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
-    evidence=1.0 if candidate=="UP" else -1.0 if candidate=="DOWN" else 0.0
-    up_probability=50.0; down_probability=50.0  # No calibrated probability model.
-    momentum="ALCISTA" if candidate=="UP" else "BAJISTA" if candidate=="DOWN" else "NEUTRAL"
-    return {"structure_internal":structure,"level_context_internal":level_context,"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+        raise ValueError("Esperando al menos 25 velas cerradas para evaluar estructura.")
+    price=_plan_number(live_price)
+    if price is None or price<=0:
+        raise ValueError("El motor de estructura necesita un precio live verificado.")
+    previous=completed['close'].shift(1)
+    tr=pd.concat([completed['high']-completed['low'],
+                  (completed['high']-previous).abs(),
+                  (completed['low']-previous).abs()],axis=1).max(axis=1)
+    atr=float(tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean().iloc[-1])
+    structure=_structure_context(completed,price,atr,now)
+    routes=_entry_route_checks({'structure_internal':structure},seconds_left)
+    eligible={side:[r for r in routes['sides'][side] if r['complete']] for side in ('UP','DOWN')}
+    choices=[side for side in ('UP','DOWN') if eligible[side]]
+    candidate=choices[0] if len(choices)==1 and (seconds_left is None or seconds_left>0) else None
+    quality=(eligible[candidate][0]['name'] if candidate else
+             'ESTRUCTURA CONTRADICTORIA' if len(choices)>1 else 'ESPERANDO ESTRUCTURA CONFIRMADA')
+    evidence=1.0 if candidate=='UP' else -1.0 if candidate=='DOWN' else 0.0
+    # Preserve the existing technical panel without feeding it back into decisions.
+    one=add_indicators(completed); last=one.iloc[-1]
+    def display_number(key,default=0.0):
+        value=_plan_number(last.get(key))
+        return default if value is None else value
+    distance=price-target if target is not None else None
+    return {'engine_revision':STRUCTURE_ENGINE_REVISION,'structure_internal':structure,
+            'price':price,'candle_price':float(last['close']),
+            'candidate':candidate,'quality':quality,'entry_route_internal':quality,
+            'technical_score':evidence,'final_score':evidence,
+            'distance':distance,'distance_pct':distance/target*100 if target else None,
+            'target_atr':distance/atr if distance is not None and atr>0 else None,
+            'target_score':0.0,'atr':atr,
+            'ema':'BULL' if last['ema9']>last['ema21'] else 'BEAR',
+            'rsi':display_number('rsi',50),'mom3':display_number('mom3'),
+            'mom5':display_number('mom5'),'mom15':display_number('mom15'),
+            'vol_ratio':display_number('vol_ratio'), 'vwap':display_number('vwap'),
+            'momentum':'ALCISTA' if candidate=='UP' else 'BAJISTA' if candidate=='DOWN' else 'NEUTRAL',
+            'up_probability':50,'down_probability':50}
 
 def _retention_assessment(state, signal):
-    """Separate affirmative, opposite and unknown evidence for an active side."""
-    side = state.get("active_direction")
-    if side not in ("UP", "DOWN") or not signal or signal.get("data_valid") is False:
-        return 0, 0
-    sign = 1 if side == "UP" else -1
-    support = contrary = 0
-    level = (signal.get("level_context_internal") or {}).get("sides", {}).get(side, {})
-    if level.get("rejected"):
-        contrary += 1
-    ema = signal.get("ema")
-    if ema in ("BULL", "BEAR"):
-        if ema == ("BULL" if sign == 1 else "BEAR"):
-            support += 1
-        else:
-            contrary += 1
-    for name in ("mom5", "distance"):
-        value = _plan_number(signal.get(name))
-        if value is None:
-            continue
-        if value * sign > 0:
-            support += 1
-        elif value * sign < 0:
-            contrary += 1
-    return support, contrary
+    """Compatibility helper: no legacy indicator can sustain a structure signal."""
+    side=state.get('active_direction')
+    if side not in ('UP','DOWN') or not signal or signal.get('data_valid') is not True:
+        return 0,0
+    routes=_entry_route_checks(signal,None)
+    allowed=lambda direction:any(r['complete'] for r in routes['sides'].get(direction,[]))
+    return int(allowed(side)),int(allowed('DOWN' if side=='UP' else 'UP'))
 
 def _retention_supported(state, signal, seconds_left):
-    """Partial weakening is not sufficient to withdraw an existing signal."""
-    if seconds_left is None or seconds_left <= 0:
-        return False
-    support, _ = _retention_assessment(state, signal)
-    return support >= 2
+    return (seconds_left is not None and seconds_left>0
+            and _retention_assessment(state,signal)[0]>0)
 
 def _reset_withdrawal(state):
     state.update(withdraw_direction=None, withdraw_source=None, withdraw_count=0,
                  withdraw_since=None, withdraw_last_at=None, retention_warning=None)
 
 def _review_active_retention(state, signal, seconds_left, now):
-    """Withdraw only after two opposite conditions persist in spaced readings.
-
-    Neutral/missing evidence never counts as an opposite vote. This helper is
-    only for candidate=None; entry and reversal confirmation are unchanged.
-    """
-    side = state.get("active_direction")
-    if side not in ("UP", "DOWN"):
-        _reset_withdrawal(state)
-        return
-    support, contrary = _retention_assessment(state, signal)
-    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if support < 3 else None
-    if contrary < 2:
-        _reset_withdrawal(state)
-        state["retention_warning"] = warning
-        return
-    source = (signal or {}).get("price_source")
-    stamp = now.timestamp()
-    last = state.get("withdraw_last_at")
-    same = (state.get("withdraw_direction") == side and state.get("withdraw_source") == source
-            and last is not None and 0 <= stamp-last <= SIGNAL_CONFIRM_MAX_GAP)
-    if not same:
-        state.update(withdraw_direction=side, withdraw_source=source, withdraw_count=1,
-                     withdraw_since=stamp, withdraw_last_at=stamp)
-    elif stamp-last >= SIGNAL_CONFIRM_INTERVAL:
-        state["withdraw_count"] += 1
-        state["withdraw_last_at"] = stamp
-    state["retention_warning"] = warning
-    if (state["withdraw_count"] >= SIGNAL_CONFIRM_READINGS and
-            stamp-state["withdraw_since"] >= SIGNAL_CONFIRM_INTERVAL*(SIGNAL_CONFIRM_READINGS-1)):
-        state["active_direction"] = None
-        state["active_since"] = None
-        _reset_withdrawal(state)
+    """An unconfirmed structure never leaves an old direction on screen."""
+    if not _retention_supported(state,signal,seconds_left):
+        state['active_direction']=None
+        state['active_since']=None
+    _reset_withdrawal(state)
 
 def _round_opening_crosscheck(state, candidate, signal, now):
     """Use the same price-action evidence for first and later signals."""
@@ -598,10 +569,16 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
     """Confirmación compartida por la pantalla y el registrador de fondo.
 
-    La primera señal queda inmutable. Un cambio UP/DOWN posterior también
-    necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
-    la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
+    La primera señal queda como historial. Cada dirección necesita estructura
+    actual y dos lecturas; una señal anterior no se conserva mientras se espera
+    confirmar la contraria. EMA/RSI/MACD no intervienen.
     """
+    if state.get('engine_revision') != STRUCTURE_ENGINE_REVISION:
+        # Keep round history; discard pending/active decisions from older engines.
+        state.update(engine_revision=STRUCTURE_ENGINE_REVISION,active_direction=None,
+                     active_since=None,pending_direction=None,pending_count=0,
+                     pending_since=None,pending_last_at=None,pending_price_source=None)
+        _reset_withdrawal(state)
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
@@ -623,7 +600,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
-        # Una interrupción no demuestra neutralidad ni permite confirmar.
+        # No current data means no actionable displayed direction.
+        state['active_direction'] = None
+        state['active_since'] = None
         state["pending_direction"] = None
         state["pending_count"] = 0
         state["pending_since"] = None
@@ -659,6 +638,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         return
 
+    # Withdraw the former direction while the opposite structure is confirmed.
+    state['active_direction'] = None
+    state['active_since'] = None
     last = state.get("pending_last_at")
     if isinstance(last, str):
         try:
@@ -1098,7 +1080,7 @@ class Bot:
             return 'La compra supera el importe o el saldo virtual disponible.'
         entry_cursor=self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse,tp_pct,sl_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                         (market['ticker'],side,quantity,price,fee,stamp(),0,0,0,s['close_on_reverse'],s['take_profit_pct'],s['stop_loss_pct']))
-        evidence={"engine_revision":"structure_break_retest_v2","side":side,
+        evidence={"engine_revision":STRUCTURE_ENGINE_REVISION,"side":side,
                   "candidate":signal.get("candidate"),"route":signal.get("quality"),
                   "price_source":signal.get("price_source"),"remaining":remaining,
                   "structure":signal.get("structure_internal"),
