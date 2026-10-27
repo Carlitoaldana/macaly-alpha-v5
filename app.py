@@ -1193,7 +1193,7 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .chip{border:1px solid #6889bf;padding:8px 12px;background:#102b55;font-size:10px;border-radius:3px}
 .chip b{display:block;margin-top:5px;color:var(--green)}
 .position{text-align:center;display:flex;flex-direction:column;justify-content:center;min-height:340px}
-.position .amount{font-size:42px;font-weight:bold;margin:30px 0 4px}
+.position-money{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}.position-money>div{min-width:0}.position .position-money .amount{font-size:clamp(20px,3vw,32px);overflow-wrap:anywhere}.position .amount{font-size:42px;font-weight:bold;margin:30px 0 4px}
 .muted{color:var(--muted)}
 .position hr{border:0;border-top:1px solid #354d79;width:80%;margin:22px auto}
 .position strong{font-size:12px}
@@ -1350,12 +1350,13 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Posición</h2>
 <div class="position">
-<span class="label">GANANCIA NO REALIZADA</span>
-<div class="amount" id="unrealized">—</div>
+<div class="position-money">
+<div><span class="label">PAGÓ</span><div class="amount" id="positionPaid">$0.00</div></div>
+<div><span class="label">GANANCIA / PÉRDIDA ACTUAL</span><div class="amount" id="unrealized">—</div></div>
+</div>
 <span class="muted" id="positionNote">Sin operaciones</span>
 <hr>
-<span class="label">CONTRATOS ABIERTOS</span>
-<strong id="openContracts">0 CONTRATOS</strong>
+<strong id="openContracts" hidden>0 CONTRATOS</strong>
 <hr>
 <strong class="gold" id="positionSide">SIN POSICIÓN</strong>
 </div>
@@ -1610,7 +1611,7 @@ $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');metrics[0].textContent=money(s.totals.daily);metrics[1].textContent=money(s.totals.realized);let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.daily/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#unrealized').textContent=marked?money(net):'—';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
+$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
 if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else el.value=s.settings[key]}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.has_trades;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
