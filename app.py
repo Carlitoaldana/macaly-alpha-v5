@@ -743,8 +743,6 @@ def valid_settings(raw):
     if not isinstance(raw['close_on_reverse'], bool):
         raise ValueError('El cierre por cambio de señal debe ser sí o no.')
     out['close_on_reverse'] = raw['close_on_reverse']
-    if out['min_entry_cents'] > out['max_entry_cents']:
-        raise ValueError('El precio mínimo no puede superar al máximo.')
     return out
 
 class MarketData:
@@ -882,6 +880,7 @@ class Bot:
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,message TEXT);
         ''')
         self.settings = self.kv('settings') or DEFAULTS.copy()
+        self.settings['min_entry_cents'] = 1
         # Migrate the old take-profit offset to a Kalshi contract price target.
         if self.kv('kalshi_tp_target_migrated') is None:
             old_tp = int(self.settings.get('take_profit_cents', 12))
@@ -1014,8 +1013,6 @@ class Bot:
         price=fill_book(book[side]['asks'],s['contracts'],s['max_entry_cents'])
         if price is None:
             return 'Sin liquidez suficiente dentro del precio máximo.'
-        if price<s['min_entry_cents']:
-            return 'Precio inferior al mínimo configurado.'
         fee=s['contracts']*s['fee_cents_per_contract']/100
         cost=price*s['contracts']/100+fee
         if cost>s['max_trade_dollars'] or cost>total['cash']:
@@ -1415,17 +1412,15 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Precios y protección</h2>
 <div class="body">
 <div class="field">
-<label>Precio mínimo de compra (¢)</label>
-<input type="number" name="minEntry" value="10" min="1" max="99" required>
-</div>
-<div class="field">
 <label>Precio máximo de compra (¢)</label>
 <input type="number" name="maxEntry" value="60" min="1" max="99" required>
 </div>
 <div class="field">
-<label>Take profit — objetivo Kalshi (%)<small>Precio del contrato (90% = 90¢); 0 desactiva</small>
-</label>
-<input type="number" name="tp" value="90" min="0" max="100" required>
+<label>Take Profit (%)<small>0 desactiva</small></label>
+<div style="display:flex;align-items:center;gap:8px">
+<input type="number" name="tp" value="90" min="0" max="100" required style="min-width:0;flex:1">
+<span aria-hidden="true" style="font-size:18px;font-weight:800;color:#e7c36b">%</span>
+</div>
 </div>
 <div class="field">
 <label>Stop loss (¢)<small>Caída desde el precio de entrada; 0 desactiva</small>
@@ -1440,10 +1435,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Cerrar por señal contraria<small>Ajuste de salida; no fija la dirección del cerebro</small>
 </label>
 <input type="checkbox" name="reverse" checked>
-</div>
-<div class="field">
-<label>Comisión estimada por contrato (¢)</label>
-<input type="number" name="fee" value="2" min="0" max="20" required>
 </div>
 </div>
 </article>
@@ -1560,7 +1551,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',entries:'max_entries_round',minEntry:'min_entry_cents',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
@@ -1571,7 +1562,7 @@ function action(action,payload={}){if(pending){toast('Esperando confirmación de
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>action('command',{command:'start'});$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y solicitar cerrar todas las posiciones simuladas?'))action('command',{command:'close'})};
 const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}action('settings',cfg)};
+form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current?.settings?.fee_cents_per_contract??2;action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
 $('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
