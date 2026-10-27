@@ -751,7 +751,7 @@ def valid_settings(raw):
     if not isinstance(raw, dict) or set(raw) != set(DEFAULTS):
         raise ValueError('Envía todos los ajustes; hay campos desconocidos o ausentes.')
     bounds = {'contracts':(1,1000), 'max_entry_cents':(2,99),
-              'take_profit_pct':(0,10000), 'stop_loss_pct':(0,100),
+              'take_profit_pct':(0,100), 'stop_loss_pct':(0,100),
               'max_entries_round':(1,100),
               'daily_loss_dollars':(1,100000), 'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
@@ -1042,7 +1042,7 @@ class Bot:
         reason=None
         if self.close_requested:
             reason='CIERRE MANUAL'
-        elif (p.get('tp_pct') is not None and p['tp_pct'] and roi+1e-9>=p['tp_pct']) or (p.get('tp_pct') is None and p['tp'] and price>=p['entry']+p['tp']):
+        elif (p.get('tp_pct') is not None and p['tp_pct'] and price+1e-9>=p['tp_pct']) or (p.get('tp_pct') is None and p['tp'] and price>=p['entry']+p['tp']):
             reason='TAKE PROFIT'
         elif (p.get('sl_pct') is not None and p['sl_pct'] and roi<=-p['sl_pct']+1e-9) or (p.get('sl_pct') is None and p['sl'] and price<=p['entry']-p['sl']):
             reason='STOP LOSS'
@@ -1496,8 +1496,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="maxEntry" value="60" min="1" max="99" required>
 </div>
 <div class="field">
-<label>Tomar profit (%)<small>Ganancia neta sobre lo pagado; requiere precio y liquidez suficientes.</small></label>
-<select name="tp"><option value="0">Desactivado</option><option value="80">+80%</option><option value="85">+85%</option><option value="90">+90%</option><option value="95">+95%</option></select>
+<label>Tomar profit (%)<small>Nivel del contrato: 90% = vender a 90¢ o más; requiere liquidez suficiente.</small></label>
+<select name="tp"><option value="0">Desactivado</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option></select>
 </div>
 <div class="field">
 <label>Stop loss (%)<small>Porcentaje de pérdida sobre lo pagado; 0 desactiva.</small></label>
@@ -1644,7 +1644,7 @@ function profitRingProgress(positions,net,marked,fresh,fee){
  let target=0;
  for(const p of positions){
   const paid=p.entry*p.quantity/100+p.entry_fee;
-  let goal=p.tp_pct!=null?(p.tp_pct>0?paid*p.tp_pct/100:0):(p.tp>0?p.tp*p.quantity/100-p.entry_fee-fee*p.quantity/100:0);
+  let goal=p.tp_pct!=null?(p.tp_pct>0?(p.tp_pct-p.entry)*p.quantity/100-p.entry_fee-fee*p.quantity/100:0):(p.tp>0?p.tp*p.quantity/100-p.entry_fee-fee*p.quantity/100:0);
   if(!Number.isFinite(goal)||goal<=0)return null;
   target+=goal;
  }
