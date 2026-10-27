@@ -700,7 +700,7 @@ API = 'https://external-api.kalshi.com/trade-api/v2'
 DEFAULTS = dict(contracts=1, min_entry_cents=10, max_entry_cents=60,
                 take_profit_cents=90, stop_loss_cents=10, exit_before_close=20,
                 max_entries_round=1, daily_goal_dollars=50,
-                max_trade_dollars=10, starting_balance=1000,
+                max_trade_dollars=50, starting_balance=1000,
                 fee_cents_per_contract=2, close_on_reverse=True)
 
 def utcnow():
@@ -732,7 +732,7 @@ def valid_settings(raw):
               'take_profit_cents':(0,100), 'stop_loss_cents':(0,98),
               'exit_before_close':(0,300), 'max_entries_round':(1,100),
               'daily_goal_dollars':(0,100000),
-              'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
+              'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20)}
     out = {}
     for key, (low, high) in bounds.items():
@@ -740,6 +740,10 @@ def valid_settings(raw):
         if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or int(v) != v or not low <= v <= high:
             raise ValueError(f'Valor inválido para {key}: {low}–{high}.')
         out[key] = int(v)
+    amount = raw['max_trade_dollars']
+    if isinstance(amount, bool) or not isinstance(amount, (int,float)) or not math.isfinite(amount) or not 0.01 <= amount <= 100000:
+        raise ValueError('El importe fijo por operación debe estar entre $0.01 y $100,000.')
+    out['max_trade_dollars'] = round(float(amount), 2)
     if not isinstance(raw['close_on_reverse'], bool):
         raise ValueError('El cierre por cambio de señal debe ser sí o no.')
     out['close_on_reverse'] = raw['close_on_reverse']
@@ -1008,37 +1012,29 @@ class Bot:
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:
             return 'Máximo de entradas de esta ronda alcanzado.'
-        # Tamaño automático: hasta 5 % del saldo virtual disponible por entrada.
-        # Se incluyen las comisiones y se respeta el precio máximo y la profundidad real del libro.
-        budget = max(0.0, total['cash']) * 0.05
-        remaining_budget_cents = budget * 100
-        fee_per_contract = s['fee_cents_per_contract']
-        quantity = 0
-        for level_price, level_size in sorted(book[side]['asks']):
-            if level_price > s['max_entry_cents']:
-                continue
-            unit_cost = level_price + fee_per_contract
-            if unit_cost <= 0:
-                continue
-            affordable = int((remaining_budget_cents + 1e-7) // unit_cost)
-            available = int(level_size)
-            take = min(affordable, available)
-            if take <= 0:
-                continue
-            quantity += take
-            remaining_budget_cents -= take * unit_cost
+        # Simulación por importe fijo en dólares, limitado al efectivo disponible.
+        # No depende de un porcentaje del saldo.
+        budget = round(min(max(0.0, total['cash']), float(s['max_trade_dollars'])), 2)
+        eligible_prices = [float(price) for price, size in book[side]['asks']
+                           if size > 0 and 0 < price <= s['max_entry_cents']]
+        if not eligible_prices:
+            return 'Sin precio de entrada válido dentro del máximo configurado.'
+        price = min(eligible_prices)
+        fee_per_contract = float(s['fee_cents_per_contract'])
+        unit_cost_cents = price + fee_per_contract
+        if unit_cost_cents <= 0:
+            return 'Precio o comisión inválidos.'
+        # Las unidades son enteras; nunca gastar más del 5 % con comisiones.
+        quantity = int((budget * 100 + 1e-7) // unit_cost_cents)
         if quantity < 1:
-            return 'Saldo del 5 % insuficiente o sin liquidez al precio máximo.'
-        price = fill_book(book[side]['asks'], quantity, s['max_entry_cents'])
-        if price is None:
-            return 'Sin liquidez suficiente dentro del precio máximo.'
+            return 'El 5 % del saldo no alcanza para una unidad al precio actual.'
         fee = quantity * fee_per_contract / 100
         cost = price * quantity / 100 + fee
         if cost > budget + 1e-7 or cost > total['cash'] + 1e-7:
-            return 'La compra supera el 5 % del saldo virtual disponible.'
+            return 'La compra supera el presupuesto disponible.'
         self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse) VALUES (?,?,?,?,?,?,?,?,?,?)',
                         (market['ticker'],side,quantity,price,fee,stamp(),s['take_profit_cents'],s['stop_loss_cents'],s['exit_before_close'],s['close_on_reverse']))
-        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} (5 % del saldo) · FOK")
+        self.event('ENTRADA',f"{side} · {quantity} contrato(s) · {price:.2f}¢ · inversión simulada ${cost:.2f} (importe fijo) · simulación por importe")
         return 'Compra simulada ejecutada.'
 
     def step(self):
@@ -1332,10 +1328,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Posición</h2>
 <div class="position">
-<span class="label">IMPORTE REALMENTE COMPRADO</span>
-<div class="amount" id="investedAmount">—</div>
-<hr>
-<span class="label">GANANCIA / PÉRDIDA ACTUAL</span>
+<span class="label">GANANCIA NO REALIZADA</span>
 <div class="amount" id="unrealized">—</div>
 <span class="muted" id="positionNote">Sin operaciones</span>
 <hr>
@@ -1413,8 +1406,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="goal" value="50" min="0" required>
 </div>
 <div class="field">
-<label>Inversión automática por operación<small>5 % del saldo disponible. Se recalcula al ganar o perder, incluyendo comisiones.</small></label>
-<div style="font-size:19px;font-weight:800;color:#e7c36b">5 %</div>
+<label>Importe fijo por operación ($)<small>Compra por este importe o por el saldo disponible si es menor.</small></label>
+<input type="number" name="tradeAmount" value="50" min="0.01" max="100000" step="0.01" required>
 </div>
 <div class="field">
 <label>Máximo de entradas por ronda</label>
@@ -1565,7 +1558,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',tradeAmount:'max_trade_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_cents',sl:'stop_loss_cents',exitTime:'exit_before_close',reverse:'close_on_reverse'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
@@ -1576,18 +1569,15 @@ function action(action,payload={}){if(pending){toast('Esperando confirmación de
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>action('command',{command:'start'});$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y solicitar cerrar todas las posiciones simuladas?'))action('command',{command:'close'})};
 const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current?.settings?.fee_cents_per_contract??2;cfg.contracts=current?.settings?.contracts??1;cfg.max_trade_dollars=current?.settings?.max_trade_dollars??10;action('settings',cfg)};
+form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}cfg.min_entry_cents=1;cfg.fee_cents_per_contract=current?.settings?.fee_cents_per_contract??2;cfg.contracts=current?.settings?.contracts??1;cfg.max_trade_dollars=cfg.max_trade_dollars??current?.settings?.max_trade_dollars??50;action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
 $('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent='SIMULACIÓN · '+s.message;
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');metrics[0].textContent=money(s.totals.daily);metrics[1].textContent=money(s.totals.realized);let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.daily/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';
- let invested=s.positions.reduce((sum,p)=>sum+(Number(p.entry||0)*Number(p.quantity||0))/100+Number(p.entry_fee||0),0);
- $('#investedAmount').textContent=s.positions.length?money(invested):'—';
- let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#unrealized').textContent=marked?money(net):'—';$('#unrealized').style.color=!marked?'':net>0?'#20c879':net<0?'#ff5b66':'#f4f5f7';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
+let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
+$('#unrealized').textContent=marked?money(net):'—';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
 if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else el.value=s.settings[key]}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.has_trades;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
