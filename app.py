@@ -1307,7 +1307,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="hidden" name="maxTrade" value="10">
 <div class="field">
 <label>Porcentaje del saldo por apuesta (%)<small>Se recalcula con el saldo virtual disponible antes de cada compra.</small></label>
-<input type="number" name="riskPct" value="10" min="1" max="100" step="1" required>
+<select name="riskPct"><option value="5">5%</option><option value="10" selected>10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
 </div>
 <div class="field">
 <label>Máximo de entradas por ronda</label>
