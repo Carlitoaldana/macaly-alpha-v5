@@ -934,8 +934,6 @@ class Bot:
         for column in ('tp_pct','sl_pct','entry_evidence'):
             if column not in columns:
                 self.db.execute('ALTER TABLE trades ADD COLUMN '+column+(' TEXT' if column=='entry_evidence' else ' REAL'))
-        if 'tp_triggered' not in columns:
-            self.db.execute('ALTER TABLE trades ADD COLUMN tp_triggered INTEGER NOT NULL DEFAULT 0')
         saved=self.kv('settings') or {}
         self.settings={key:saved.get(key,value) for key,value in DEFAULTS.items()}
         self.put('settings',self.settings)
@@ -1026,34 +1024,12 @@ class Bot:
             except Exception:
                 continue  # Position remains open/pending, not guessed.
 
-    def _arm_take_profit(self, p, market):
-        # Quote for the owned side, not ROI and not the opposite contract.
-        if not market or market.get('ticker') != p['ticker']:
-            return
-        quote_price = get_yes_ask(market) if p['side']=='UP' else get_no_ask(market)
-        target = p.get('tp_pct')
-        if target is None:
-            target = p['entry'] + p['tp'] if p.get('tp') else 0
-        if (not target or quote_price is None or not math.isfinite(quote_price)
-                or not 0 <= quote_price <= 1 or quote_price*100+1e-9 < target):
-            return
-        cur=self.db.execute('UPDATE trades SET tp_triggered=1 WHERE id=? AND closed IS NULL AND tp_triggered=0',
-                            (p['id'],))
-        if cur.rowcount:
-            self.event('TAKE PROFIT ACTIVADO',
-                       f"#{p['id']} {p['side']} · cotización {quote_price*100:.2f}% · "
-                       f"objetivo {target:.2f}% · cierre completo al precio de venta disponible")
-        p['tp_triggered']=1
-
     def manage(self,p,book,signal,remaining):
         if book['ticker']!=p['ticker'] or time.monotonic()-book['at']>5:
             return
         bids=book[p['side']]['bids']
         price=fill_book(bids,p['quantity'])
         if price is None:
-            if p.get('tp_triggered'):
-                # Do not fabricate a fill or disarm a previously triggered exit.
-                self.snapshot['message']='Take Profit activado; cierre completo pendiente de precio ejecutable.'
             return
         paid=p['entry']*p['quantity']/100+p['entry_fee']
         net=(price-p['entry'])*p['quantity']/100-p['entry_fee']-self.settings['fee_cents_per_contract']*p['quantity']/100
@@ -1061,7 +1037,7 @@ class Bot:
         reason=None
         if self.close_requested:
             reason='CIERRE MANUAL'
-        elif p.get('tp_triggered'):
+        elif (p.get('tp_pct') is not None and p['tp_pct'] and price+1e-9>=p['tp_pct']) or (p.get('tp_pct') is None and p['tp'] and price>=p['entry']+p['tp']):
             reason='TAKE PROFIT'
         elif (p.get('sl_pct') is not None and p['sl_pct'] and roi<=-p['sl_pct']+1e-9) or (p.get('sl_pct') is None and p['sl'] and price<=p['entry']-p['sl']):
             reason='STOP LOSS'
@@ -1128,14 +1104,11 @@ class Bot:
                 m=self.feed.get('/markets/'+quote(p['ticker'],safe=''))['market']
                 rem=engine.get_seconds_remaining(m)
                 if m.get('status') in ('active','open') and rem is not None and rem>0:
-                    with self.lock:
-                        self._arm_take_profit(p,m)
                     b=self.feed.book(p['ticker'])
                     with self.lock:
                         self.manage(p,b,None,engine.get_seconds_remaining(m))
-            except Exception as exc:
-                with self.lock:
-                    self.event('ERROR DE SALIDA', f"#{p['id']} {p['side']} · {type(exc).__name__}: {exc}")
+            except Exception:
+                pass
         market=self.feed.current()
         sig=self.feed.signal(market)
         signal_at=time.monotonic()
@@ -1153,7 +1126,6 @@ class Bot:
             had_position=bool(self.positions())
             for p in self.positions():
                 if p['ticker']==market['ticker']:
-                    self._arm_take_profit(p,market)
                     self.manage(p,book,active,remaining)
             # Do not reuse the same liquidity snapshot for both a close and a new buy.
             message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
