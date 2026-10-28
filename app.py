@@ -887,23 +887,29 @@ class Bot:
             except Exception:
                 continue  # Position remains open/pending, not guessed.
 
-    def _arm_take_profit(self, p, market):
-        # Quote for the owned side, not ROI and not the opposite contract.
+    def _arm_take_profit(self, p, market, book=None):
+        # Trigger solely on Kalshi's displayed contract percentage for the owned side.
         if not market or market.get('ticker') != p['ticker']:
             return
-        quote_price = get_yes_ask(market) if p['side']=='UP' else get_no_ask(market)
         target = p.get('tp_pct')
         if target is None:
-            target = p['entry'] + p['tp'] if p.get('tp') else 0
-        if (not target or quote_price is None or not math.isfinite(quote_price)
-                or not 0 <= quote_price <= 1 or quote_price*100+1e-9 < target):
+            target = self.settings['take_profit_pct']
+        if target is None or not (0 < float(target) <= 100):
             return
-        cur=self.db.execute('UPDATE trades SET tp_triggered=1 WHERE id=? AND closed IS NULL AND tp_triggered=0',
-                            (p['id'],))
+        quote_price = get_yes_ask(market) if p['side']=='UP' else get_no_ask(market)
+        quote_pct = quote_price*100 if quote_price is not None and math.isfinite(quote_price) and 0 <= quote_price <= 1 else None
+        # Fallback to the same-side live Kalshi orderbook ask when market quote is absent.
+        if book and book.get('ticker') == p['ticker'] and time.monotonic()-book['at'] <= 5:
+            asks = book.get(p['side'], {}).get('asks', [])
+            prices = [level[0] for level in asks if level[1] > 0]
+            if prices:
+                book_ask = min(prices)
+                quote_pct = max(quote_pct, book_ask) if quote_pct is not None else book_ask
+        if quote_pct is None or quote_pct + 1e-9 < float(target):
+            return
+        cur=self.db.execute('UPDATE trades SET tp_triggered=1 WHERE id=? AND closed IS NULL AND tp_triggered=0', (p['id'],))
         if cur.rowcount:
-            self.event('TAKE PROFIT ACTIVADO',
-                       f"#{p['id']} {p['side']} · cotización {quote_price*100:.2f}% · "
-                       f"objetivo {target:.2f}% · cierre completo al precio de venta disponible")
+            self.event('TAKE PROFIT ACTIVADO', f"#{p['id']} {p['side']} · Kalshi {quote_pct:.2f}% · objetivo {float(target):.2f}% · cierre simulado solicitado")
         p['tp_triggered']=1
 
     def manage(self,p,book,signal,remaining):
@@ -990,9 +996,9 @@ class Bot:
                 rem=engine.get_seconds_remaining(m)
                 if m.get('status') in ('active','open') and rem is not None and rem>0:
                     with self.lock:
-                        self._arm_take_profit(p,m)
-                    b=self.feed.book(p['ticker'])
+                        b=self.feed.book(p['ticker'])
                     with self.lock:
+                        self._arm_take_profit(p,m,b)
                         self.manage(p,b,None,engine.get_seconds_remaining(m))
             except Exception as exc:
                 with self.lock:
@@ -1014,7 +1020,7 @@ class Bot:
             had_position=bool(self.positions())
             for p in self.positions():
                 if p['ticker']==market['ticker']:
-                    self._arm_take_profit(p,market)
+                    self._arm_take_profit(p,market,book)
                     self.manage(p,book,active,remaining)
             # Do not reuse the same liquidity snapshot for both a close and a new buy.
             message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
