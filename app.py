@@ -535,7 +535,7 @@ ROOT = Path(__file__).resolve().parent
 API = 'https://external-api.kalshi.com/trade-api/v2'
 DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
-                max_entries_round=1, daily_loss_dollars=25, daily_goal_dollars=50,
+                max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=1000,
                 fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10)
 
@@ -567,7 +567,7 @@ def valid_settings(raw):
     bounds = {'contracts':(1,1000), 'max_entry_cents':(2,99),
               'take_profit_pct':(0,100), 'stop_loss_pct':(0,100),
               'max_entries_round':(1,100),
-              'daily_loss_dollars':(1,100000), 'daily_goal_dollars':(0,100000),
+              'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20), 'risk_pct':(1,100)}
     out = {}
@@ -992,6 +992,8 @@ class Bot:
     def view(self):
         with self.lock:
             result=dict(self.snapshot)
+            if 'Límite diario de pérdida alcanzado' in str(result.get('message','')):
+                result['message']='Esperando la siguiente oportunidad de entrada.'
             result.update(running=self.running,close_requested=self.close_requested,settings=self.settings.copy(),
                           positions=self.positions(),totals=self.totals(),
                           trades=[dict(r) for r in self.db.execute('SELECT * FROM trades ORDER BY id DESC LIMIT 200')],
@@ -1302,7 +1304,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <input type="hidden" name="contracts" value="1">
 <input type="hidden" name="maxTrade" value="10">
-<input type="hidden" name="loss" value="25">
+
 <div class="field">
 <label>Porcentaje del saldo por apuesta (%)<small>Se recalcula con el saldo virtual disponible antes de cada compra.</small></label>
 <select name="riskPct"><option value="5">5%</option><option value="10" selected>10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
@@ -1449,7 +1451,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
@@ -1494,7 +1496,7 @@ $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(fresh?'DATOS PÚBLICOS CONECTADOS':'ESPERANDO DATOS PÚBLICOS')+' · '+(s.connection?.message||'Simulación local activa; no requiere API privada.');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#profitOrbit').style.opacity='0';$('#profitOrbit').setAttribute('aria-hidden','true');$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='settings')dirty=false;if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
@@ -1557,7 +1559,7 @@ class Controller:
                 reply['message']={'start':'Simulación activada.','pause':'Entradas pausadas; salidas vigiladas.',
                                   'close':'Cierre solicitado; esperando liquidez actual.'}[command]
             elif action=='settings':
-                self.bot.save_settings(payload);reply['message']='Ajustes guardados. Take Profit actualizado también en posiciones abiertas.'
+                self.bot.save_settings(payload);reply['saved_settings']=dict(self.bot.settings);reply['message']='Ajustes guardados. Meta diaria: $'+str(self.bot.settings['daily_goal_dollars'])+'.'
             elif action=='public':
                 market=self.bot.feed.current();book=self.bot.feed.book(market['ticker'])
                 reply['message']='Kalshi responde: '+market['ticker']
