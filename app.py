@@ -992,8 +992,6 @@ class Bot:
     def view(self):
         with self.lock:
             result=dict(self.snapshot)
-            if 'Límite diario de pérdida alcanzado' in str(result.get('message','')):
-                result['message']='Esperando la siguiente oportunidad de entrada.'
             result.update(running=self.running,close_requested=self.close_requested,settings=self.settings.copy(),
                           positions=self.positions(),totals=self.totals(),
                           trades=[dict(r) for r in self.db.execute('SELECT * FROM trades ORDER BY id DESC LIMIT 200')],
