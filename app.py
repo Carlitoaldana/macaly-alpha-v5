@@ -962,7 +962,11 @@ class Bot:
                 raise ValueError('El saldo inicial ya tiene operaciones y no puede cambiarse.')
             self.settings=settings
             self.put('settings',settings)
-            self.event('AJUSTES','Ajustes guardados; se aplican a entradas nuevas. Las posiciones conservan su plan de salida.')
+            # A saved profit target must also control a position already open.
+            # Keep its stop loss and reversal plan unchanged.
+            self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
+                            (settings['take_profit_pct'],))
+            self.event('AJUSTES','Ajustes guardados. Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
 
     def command(self,name):
         with self.lock:
@@ -1494,8 +1498,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="maxEntry" value="60" min="1" max="99" required>
 </div>
 <div class="field">
-<label>Tomar profit (%)<small>Nivel del contrato: 90% = vender a 90¢ o más; requiere liquidez suficiente.</small></label>
-<select name="tp"><option value="0">Desactivado</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option></select>
+<label>Tomar profit (%)<small>Porcentaje del contrato en Kalshi: 90% = vender a 90¢ o más. Se aplica al guardar, también a posiciones abiertas.</small></label>
+<select name="tp"><option value="0">Desactivado</option><option value="5">5%</option><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
 </div>
 <div class="field">
 <label>Stop loss (%)<small>Porcentaje de pérdida sobre lo pagado; 0 desactiva.</small></label>
@@ -1732,7 +1736,7 @@ class Controller:
                 reply['message']={'start':'Simulación activada.','pause':'Entradas pausadas; salidas vigiladas.',
                                   'close':'Cierre solicitado; esperando liquidez actual.'}[command]
             elif action=='settings':
-                self.bot.save_settings(payload);reply['message']='Ajustes guardados y aplicados a compras nuevas.'
+                self.bot.save_settings(payload);reply['message']='Ajustes guardados. Take Profit actualizado también en posiciones abiertas.'
             elif action=='public':
                 market=self.bot.feed.current();book=self.bot.feed.book(market['ticker'])
                 reply['message']='Kalshi responde: '+market['ticker']
