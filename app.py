@@ -384,7 +384,12 @@ def _structure_context(df, price, atr, now=None):
     prior,last=bars.iloc[:-1],bars.iloc[-1]
     o,h,l,c=(float(last[k]) for k in ("open","high","low","close"))
     values=bars[["open","high","low","close"]].to_numpy(dtype=float)
-    if not np.isfinite(values).all() or h<max(o,c) or l>min(o,c) or h<=l:
+    volumes=bars['volume'].to_numpy(dtype=float)
+    if (not np.isfinite(values).all() or (values<=0).any()
+            or not np.isfinite(volumes).all() or (volumes<0).any()
+            or (bars['high']<bars[['open','close','low']].max(axis=1)).any()
+            or (bars['low']>bars[['open','close','high']].min(axis=1)).any()
+            or h<=l):
         return {"valid":False,"sides":{}}
     upper,lower=float(prior["high"].max()),float(prior["low"].min())
     recent=bars["close"].tail(6).to_numpy(dtype=float)
@@ -432,6 +437,13 @@ def _structure_context(df, price, atr, now=None):
                      and abs(probe-obstacle)<=.20*atr and sign*(c-obstacle)>.12*atr
                      and body>.12 and wick>=.30*(h-l) and close_location>=.65
                      and room>=.75)
+        # Local obstacles count too: a bounce off the bottom of the 20-bar
+        # range must not buy straight into a more recent lower high (or low).
+        local=prior.tail(5)
+        obstacles=local['high'] if sign==1 else local['low']
+        ahead=[sign*(float(v)-price)/atr for v in obstacles if sign*(float(v)-price)>0]
+        room_ahead=min(ahead) if ahead else float('inf')
+        reversal_room=room_ahead>=.60 and room>=.75
         fresh= -.10<=sign*(price-c)/atr<=.50
         not_extended=(h-l)/atr<=2.2 and abs(move)<=2.5
         sides[side]={"breakout":bool(breakout),"rejection":bool(rejection),
@@ -442,166 +454,152 @@ def _structure_context(df, price, atr, now=None):
                      "body_atr":body,"close_location":close_location,
                      "live_change_atr":sign*(price-c)/atr,
                      "range_efficiency":range_efficiency,"remaining_room_atr":room}
+        sides[side]['reversal_room']=bool(reversal_room)
+        sides[side]['continuation_room']=bool(room_ahead>=.60)
     return {"valid":True,"sides":sides,"bar_time":str(last["time"]),
             "closed_price":c,"live_price":price,"atr":atr,"efficiency":efficiency}
 
 
 def _entry_route_checks(sig, seconds_left):
-    """One independent price-structure strategy, mirrored for UP and DOWN."""
-    context=sig.get("structure_internal") or {}
-    valid=context.get("valid",False) and sig.get("data_valid") is not False
-    sides={}
-    for side in ("UP","DOWN"):
-        info=context.get("sides",{}).get(side,{})
-        sides[side]=[]
-        for name,key in (("RUPTURA Y RETEST","retest"),("RUPTURA DE ESTRUCTURA","breakout")):
-            checks=[("Estructura cerrada y datos actuales",valid),
-                    (name,info.get(key,False)),
-                    ("Precio actual confirma sin perseguir",info.get("fresh",False)),
-                    ("Movimiento sin extensión excesiva",info.get("not_extended",False)),
-                    ("Volumen de vela cerrada suficiente",info.get("volume_ok",False))]
-            sides[side].append({"name":name,"checks":checks,"met":sum(bool(v) for _,v in checks),
-                                "total":len(checks),"complete":all(bool(v) for _,v in checks)})
-    return {"valid":bool(valid),"sides":sides,"noise_ok":bool(valid)}
+    decision=sig.get('decision_internal') or {}
+    valid=bool(decision.get('valid')) and sig.get('data_valid') is not False
+    routes={}
+    for side in ('UP','DOWN'):
+        info=decision.get('sides',{}).get(side,{})
+        checks=[('Datos actuales y suficientes',valid),
+                ('Regresión, Aroon y eficiencia respaldan el lado',info.get('direction_ok',False)),
+                ('Precio actual sin extensión excesiva para comprar',info.get('entry_ok',False)),
+                ('Ronda abierta',seconds_left is None or seconds_left>0)]
+        routes[side]=[{'name':'REGRESIÓN + AROON','checks':checks,
+                       'met':sum(bool(v) for _,v in checks),'total':len(checks),
+                       'complete':all(bool(v) for _,v in checks)}]
+    return {'valid':valid,'sides':routes,'noise_ok':bool(decision.get('efficiency',0)>=.30)}
 
-def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
-    now=pd.Timestamp.now(tz="UTC")
-    completed=df[pd.to_datetime(df["time"],utc=True)+pd.Timedelta(minutes=1)<=now]
-    if len(completed)<25:
-        raise ValueError("Esperando al menos 25 velas cerradas para evaluar el motor.")
-    one=add_indicators(completed); three=_resample_indicators(completed,3); five=_resample_indicators(completed,5)
-    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
-    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
-    def direction(row):
-        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
-        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
-    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
-    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
-    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
-    target_atr=(distance/atr) if distance is not None else 0.0
-    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
-    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
-    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
-    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
-    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
-    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
-    # Evaluate all routes for both directions before choosing any candidate.
-    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
-    flow_context = {"direction":flow_side, "valid":False}
-    if isinstance(whale,dict):
-        flow_context["valid"] = (flow_side in ("UP","DOWN") and
-            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
-            float(whale.get("flow_strength") or 0)>=.20)
-    level_context = _price_level_context(df, price, atr)
-    structure = _structure_context(df, price, atr)
-    route_input = {"structure_internal":structure,"level_context_internal":level_context,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
-        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
-        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
-        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
-        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
-        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    route_view = _entry_route_checks(route_input, seconds_left)
-    eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
-                for side in ("UP","DOWN")}
-    choices = [side for side in ("UP","DOWN") if eligible[side]]
-    candidate = choices[0] if len(choices)==1 else None
-    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
-    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
-                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
-    evidence=1.0 if candidate=="UP" else -1.0 if candidate=="DOWN" else 0.0
-    up_probability=50.0; down_probability=50.0  # No calibrated probability model.
-    momentum="ALCISTA" if candidate=="UP" else "BAJISTA" if candidate=="DOWN" else "NEUTRAL"
-    return {"structure_internal":structure,"level_context_internal":level_context,"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+STRUCTURE_ENGINE_REVISION = "jc_regression_aroon_v1"
+
+def _regression_aroon_context(df, price, now=None):
+    now=pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
+    x=df.sort_values('time').drop_duplicates('time',keep='last')
+    x=x[pd.to_datetime(x['time'],utc=True)+pd.Timedelta(minutes=1)<=now].tail(30)
+    if len(x)<20 or not math.isfinite(price) or price<=0:
+        return {'valid':False,'reason':'Esperando 20 velas cerradas y precio actual','sides':{}}
+    times=pd.to_datetime(x['time'],utc=True)
+    if (times.diff().dropna().dt.total_seconds().ne(60).any()
+            or (now-times.iloc[-1]).total_seconds()>150):
+        return {'valid':False,'reason':'Velas discontinuas o atrasadas','sides':{}}
+    values=x[['open','high','low','close']].to_numpy(dtype=float)
+    if (not np.isfinite(values).all() or (values<=0).any()
+            or (x['high']<x[['open','close','low']].max(axis=1)).any()
+            or (x['low']>x[['open','close','high']].min(axis=1)).any()):
+        return {'valid':False,'reason':'Velas inválidas','sides':{}}
+    c=x['close'].to_numpy(dtype=float)
+    previous=x['close'].shift(1)
+    tr=pd.concat([x['high']-x['low'],(x['high']-previous).abs(),
+                  (x['low']-previous).abs()],axis=1).max(axis=1)
+    atr=float(tr.tail(14).mean())
+    if not math.isfinite(atr) or atr<=0:
+        return {'valid':False,'reason':'Sin rango de precio medible','sides':{}}
+    # Five closed prices plus the verified current price. No EMA, RSI, MACD,
+    # volume gate, 20-bar breakout, or remembered direction participates.
+    path=np.append(c[-5:],price)
+    t=np.arange(len(path),dtype=float); centered=t-t.mean()
+    slope=float(np.dot(centered,path-path.mean())/np.dot(centered,centered))
+    projected=slope*(len(path)-1)/atr
+    travel=float(np.abs(np.diff(path)).sum())
+    efficiency=abs(float(path[-1]-path[0]))/max(travel,1e-9)
+    highs=x['high'].tail(8).to_numpy(dtype=float)
+    lows=x['low'].tail(8).to_numpy(dtype=float)
+    high_age=int(np.argmax(highs[::-1]));low_age=int(np.argmin(lows[::-1]))
+    aroon_up=100*(7-high_age)/7;aroon_down=100*(7-low_age)/7
+    oscillator=(aroon_up-aroon_down)/100
+    displacement=(price-c[-4])/atr
+    live_delta=(price-c[-1])/atr
+    score=(.50*float(np.clip(projected,-1,1))+.30*oscillator+
+           .20*float(np.clip(displacement,-1,1)))
+    sides={}
+    for side,sign in (('UP',1),('DOWN',-1)):
+        votes=sum((sign*projected>=.12,sign*oscillator>=.25,sign*displacement>=.12))
+        # A fresh adverse movement can veto stale closed-price momentum.
+        adverse=sign*live_delta<-.15
+        direction_ok=(sign*score>=.35 and votes>=2 and efficiency>=.30 and not adverse)
+        entry_ok=direction_ok and abs(live_delta)<=.75
+        sides[side]={'direction_ok':bool(direction_ok),'entry_ok':bool(entry_ok),
+                     'votes':int(votes),'score':round(sign*score,4),
+                     'adverse_live':bool(adverse)}
+    return {'valid':True,'sides':sides,'atr':atr,'score':score,
+            'regression_atr':projected,'aroon_up':aroon_up,'aroon_down':aroon_down,
+            'efficiency':efficiency,'live_delta_atr':live_delta}
+
+def _signal_engine_without_trace(df,target,seconds_left,live_price=None,whale=None):
+    price=_plan_number(live_price)
+    if price is None or price<=0:
+        raise ValueError('El motor necesita un precio actual verificado.')
+    context=_regression_aroon_context(df,price)
+    if not context['valid']:
+        raise ValueError(context['reason'])
+    choices=[side for side in ('UP','DOWN') if context['sides'][side]['direction_ok']]
+    candidate=choices[0] if len(choices)==1 and (seconds_left is None or seconds_left>0) else None
+    entry_ready=bool(candidate and context['sides'][candidate]['entry_ok'])
+    quality=('DIRECCIÓN '+candidate+' · '+('ENTRADA RESPALDADA' if entry_ready else 'SIN COMPRA: PRECIO EXTENDIDO')
+             if candidate else 'SIN DIRECCIÓN CLARA: REGRESIÓN / AROON / EFICIENCIA')
+    distance=price-target if target is not None else None
+    return {'engine_revision':STRUCTURE_ENGINE_REVISION,'decision_internal':context,
+            'price':price,'candle_price':float(df.sort_values('time')['close'].iloc[-1]),
+            'candidate':candidate,'direction_valid':bool(candidate),'entry_ready':entry_ready,
+            'quality':quality,'entry_route_internal':'REGRESIÓN + AROON',
+            'technical_score':context['score'],'final_score':context['score'],
+            'distance':distance,'distance_pct':distance/target*100 if target else None,
+            'target_atr':distance/context['atr'] if distance is not None else None,
+            'target_score':0.,'atr':context['atr'],'ema':None,'rsi':None,
+            'mom3':None,'mom5':None,'mom15':None,'vol_ratio':None,'vwap':None,
+            'momentum':candidate or 'NEUTRAL','up_probability':50,'down_probability':50}
 
 def _retention_assessment(state, signal):
-    """Separate affirmative, opposite and unknown evidence for an active side."""
-    side = state.get("active_direction")
-    if side not in ("UP", "DOWN") or not signal or signal.get("data_valid") is False:
-        return 0, 0
-    sign = 1 if side == "UP" else -1
-    support = contrary = 0
-    level = (signal.get("level_context_internal") or {}).get("sides", {}).get(side, {})
-    if level.get("rejected"):
-        contrary += 1
-    ema = signal.get("ema")
-    if ema in ("BULL", "BEAR"):
-        if ema == ("BULL" if sign == 1 else "BEAR"):
-            support += 1
-        else:
-            contrary += 1
-    for name in ("mom5", "distance"):
-        value = _plan_number(signal.get(name))
-        if value is None:
-            continue
-        if value * sign > 0:
-            support += 1
-        elif value * sign < 0:
-            contrary += 1
-    return support, contrary
+    """Compatibility helper: no legacy indicator can sustain a structure signal."""
+    side=state.get('active_direction')
+    if side not in ('UP','DOWN') or not signal or signal.get('data_valid') is not True:
+        return 0,0
+    routes=_entry_route_checks(signal,None)
+    allowed=lambda direction:any(r['complete'] for r in routes['sides'].get(direction,[]))
+    return int(allowed(side)),int(allowed('DOWN' if side=='UP' else 'UP'))
 
 def _retention_supported(state, signal, seconds_left):
-    """Partial weakening is not sufficient to withdraw an existing signal."""
-    if seconds_left is None or seconds_left <= 0:
-        return False
-    support, _ = _retention_assessment(state, signal)
-    return support >= 2
+    return (seconds_left is not None and seconds_left>0
+            and _retention_assessment(state,signal)[0]>0)
 
 def _reset_withdrawal(state):
     state.update(withdraw_direction=None, withdraw_source=None, withdraw_count=0,
                  withdraw_since=None, withdraw_last_at=None, retention_warning=None)
 
 def _review_active_retention(state, signal, seconds_left, now):
-    """Withdraw only after two opposite conditions persist in spaced readings.
-
-    Neutral/missing evidence never counts as an opposite vote. This helper is
-    only for candidate=None; entry and reversal confirmation are unchanged.
-    """
-    side = state.get("active_direction")
-    if side not in ("UP", "DOWN"):
-        _reset_withdrawal(state)
-        return
-    support, contrary = _retention_assessment(state, signal)
-    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if support < 3 else None
-    if contrary < 2:
-        _reset_withdrawal(state)
-        state["retention_warning"] = warning
-        return
-    source = (signal or {}).get("price_source")
-    stamp = now.timestamp()
-    last = state.get("withdraw_last_at")
-    same = (state.get("withdraw_direction") == side and state.get("withdraw_source") == source
-            and last is not None and 0 <= stamp-last <= SIGNAL_CONFIRM_MAX_GAP)
-    if not same:
-        state.update(withdraw_direction=side, withdraw_source=source, withdraw_count=1,
-                     withdraw_since=stamp, withdraw_last_at=stamp)
-    elif stamp-last >= SIGNAL_CONFIRM_INTERVAL:
-        state["withdraw_count"] += 1
-        state["withdraw_last_at"] = stamp
-    state["retention_warning"] = warning
-    if (state["withdraw_count"] >= SIGNAL_CONFIRM_READINGS and
-            stamp-state["withdraw_since"] >= SIGNAL_CONFIRM_INTERVAL*(SIGNAL_CONFIRM_READINGS-1)):
-        state["active_direction"] = None
-        state["active_since"] = None
-        _reset_withdrawal(state)
+    """An unconfirmed structure never leaves an old direction on screen."""
+    if not _retention_supported(state,signal,seconds_left):
+        state['active_direction']=None
+        state['active_since']=None
+    _reset_withdrawal(state)
 
 def _round_opening_crosscheck(state, candidate, signal, now):
     """Use the same price-action evidence for first and later signals."""
     if not signal or signal.get("data_valid") is not True:
         state["opening_conflict"]="Esperando datos actuales"
         return None
-    routes=_entry_route_checks(signal,None)
-    allowed=candidate in ("UP","DOWN") and any(r["complete"] for r in routes["sides"].get(candidate,[]))
-    state["opening_conflict"]=None if allowed else "Esperando estructura confirmada"
+    allowed=candidate in ('UP','DOWN') and signal.get('direction_valid') is True
+    state["opening_conflict"]=None if allowed else "Esperando dirección respaldada por regresión, Aroon y eficiencia"
     return candidate if allowed else None
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
     """Confirmación compartida por la pantalla y el registrador de fondo.
 
-    La primera señal queda inmutable. Un cambio UP/DOWN posterior también
-    necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
-    la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
+    La primera señal queda como historial. Cada dirección necesita estructura
+    actual y dos lecturas; una señal anterior no se conserva mientras se espera
+    confirmar la contraria. EMA/RSI/MACD no intervienen.
     """
+    if state.get('engine_revision') != STRUCTURE_ENGINE_REVISION:
+        # Keep round history; discard pending/active decisions from older engines.
+        state.update(engine_revision=STRUCTURE_ENGINE_REVISION,active_direction=None,
+                     active_since=None,pending_direction=None,pending_count=0,
+                     pending_since=None,pending_last_at=None,pending_price_source=None)
+        _reset_withdrawal(state)
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
@@ -623,7 +621,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
-        # Una interrupción no demuestra neutralidad ni permite confirmar.
+        # No current data means no actionable displayed direction.
+        state['active_direction'] = None
+        state['active_since'] = None
         state["pending_direction"] = None
         state["pending_count"] = 0
         state["pending_since"] = None
@@ -659,6 +659,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         return
 
+    # Withdraw the former direction while the opposite structure is confirmed.
+    state['active_direction'] = None
+    state['active_since'] = None
     last = state.get("pending_last_at")
     if isinstance(last, str):
         try:
@@ -728,6 +731,7 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 API = 'https://external-api.kalshi.com/trade-api/v2'
+APP_REVISION = 'JC-20261028-REG-AROON-R3'
 DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_loss_dollars=25, daily_goal_dollars=50,
@@ -782,19 +786,59 @@ class MarketData:
         self.candle_at = 0
         self.market = None
         self.retry_at = 0
+        self._http_lock = threading.RLock()
+        self._responses = {}
+        self._limit_failures = 0
+        self._last_limit_at = 0.
+
+    def _request_key(self, path, params=None):
+        return (path, tuple(sorted((params or {}).items())))
+
+    def response_time(self, path, params=None):
+        cached = self._responses.get(self._request_key(path,params))
+        return cached[0] if cached else time.monotonic()
 
     def get(self, path, params=None):
-        if time.monotonic() < self.retry_at:
-            raise ValueError('Kalshi en espera tras límite de consultas.')
-        try:
-            result = requests.get(API+path, params=params, timeout=7).json()
-        except Exception as e:
-            if getattr(e, 'code', None) == 429:
-                self.retry_at = time.monotonic()+15
-            raise
-        if not isinstance(result, dict):
-            raise ValueError('Respuesta Kalshi incompleta.')
-        return result
+        # Share short-lived responses between settlement, exits and signals.
+        # Preserve fetch timestamps; cached books are never relabeled as new.
+        with self._http_lock:
+            now = time.monotonic()
+            if now < self.retry_at:
+                raise ValueError(f'Kalshi: límite de consultas; reintento en {math.ceil(self.retry_at-now)} s. Sin lectura nueva.')
+            key = self._request_key(path,params)
+            cached = self._responses.get(key)
+            if cached and now-cached[0] < 2:
+                return cached[1]
+            try:
+                result = requests.get(API+path, params=params, timeout=7).json()
+            except Exception as exc:
+                if getattr(exc, 'code', None) == 429:
+                    if now-self._last_limit_at > 60:
+                        self._limit_failures = 0
+                    self._last_limit_at = now
+                    self._limit_failures += 1
+                    delay = min(60., 2. ** min(self._limit_failures-1,6))
+                    header = getattr(exc,'headers',None)
+                    raw = header.get('Retry-After') if header else None
+                    if raw:
+                        try:
+                            required = float(raw)
+                        except (ValueError,TypeError):
+                            try:
+                                from email.utils import parsedate_to_datetime
+                                required = (parsedate_to_datetime(raw)-utcnow()).total_seconds()
+                            except (ValueError,TypeError,OverflowError):
+                                required = 0
+                        if math.isfinite(required):
+                            delay = max(delay,required)
+                    self.retry_at = time.monotonic()+delay
+                raise
+            if not isinstance(result, dict):
+                raise ValueError('Respuesta Kalshi incompleta.')
+            self._responses[key] = (time.monotonic(),result)
+            # A successful unrelated request does not erase rate-limit history.
+            self._responses = {k:v for k,v in self._responses.items() if time.monotonic()-v[0]<10}
+            return result
 
     def current(self):
         now = utcnow()
@@ -862,7 +906,7 @@ class MarketData:
         # Bid on NO is an ask on YES at 1 - price, and conversely.
         return {'UP':{'bids':yes,'asks':sorted([(100-p,q) for p,q in no])},
                 'DOWN':{'bids':no,'asks':sorted([(100-p,q) for p,q in yes])},
-                'at':time.monotonic(), 'ticker':ticker}
+                'at':self.response_time('/markets/'+quote(ticker,safe='')+'/orderbook',{'depth':0}), 'ticker':ticker}
 
     @staticmethod
     def _levels(levels, dollar):
@@ -952,6 +996,8 @@ class Bot:
         for column in ('tp_pct','sl_pct','entry_evidence'):
             if column not in columns:
                 self.db.execute('ALTER TABLE trades ADD COLUMN '+column+(' TEXT' if column=='entry_evidence' else ' REAL'))
+        if 'tp_triggered' not in columns:
+            self.db.execute('ALTER TABLE trades ADD COLUMN tp_triggered INTEGER NOT NULL DEFAULT 0')
         saved=self.kv('settings') or {}
         self.settings={key:saved.get(key,value) for key,value in DEFAULTS.items()}
         self.put('settings',self.settings)
@@ -960,6 +1006,7 @@ class Bot:
         self.close_requested = False
         self.snapshot = {'status':'INICIANDO','message':'Esperando la primera lectura verificada.', 'mode':'SIMULACIÓN', 'signal':None}
         self.thread = None
+        self.revision = APP_REVISION
         self.event('SISTEMA','Servidor iniciado. Nuevas entradas pausadas; salidas siguen vigiladas.')
 
     def kv(self,key):
@@ -980,7 +1027,11 @@ class Bot:
                 raise ValueError('El saldo inicial ya tiene operaciones y no puede cambiarse.')
             self.settings=settings
             self.put('settings',settings)
-            self.event('AJUSTES','Ajustes guardados; se aplican a entradas nuevas. Las posiciones conservan su plan de salida.')
+            # A saved profit target must also control a position already open.
+            # Keep its stop loss and reversal plan unchanged.
+            self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
+                            (settings['take_profit_pct'],))
+            self.event('AJUSTES','Ajustes guardados. Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
 
     def command(self,name):
         with self.lock:
@@ -1038,12 +1089,34 @@ class Bot:
             except Exception:
                 continue  # Position remains open/pending, not guessed.
 
+    def _arm_take_profit(self, p, market):
+        # Quote for the owned side, not ROI and not the opposite contract.
+        if not market or market.get('ticker') != p['ticker']:
+            return
+        quote_price = get_yes_ask(market) if p['side']=='UP' else get_no_ask(market)
+        target = p.get('tp_pct')
+        if target is None:
+            target = p['entry'] + p['tp'] if p.get('tp') else 0
+        if (not target or quote_price is None or not math.isfinite(quote_price)
+                or not 0 <= quote_price <= 1 or quote_price*100+1e-9 < target):
+            return
+        cur=self.db.execute('UPDATE trades SET tp_triggered=1 WHERE id=? AND closed IS NULL AND tp_triggered=0',
+                            (p['id'],))
+        if cur.rowcount:
+            self.event('TAKE PROFIT ACTIVADO',
+                       f"#{p['id']} {p['side']} · cotización {quote_price*100:.2f}% · "
+                       f"objetivo {target:.2f}% · cierre completo al precio de venta disponible")
+        p['tp_triggered']=1
+
     def manage(self,p,book,signal,remaining):
         if book['ticker']!=p['ticker'] or time.monotonic()-book['at']>5:
             return
         bids=book[p['side']]['bids']
         price=fill_book(bids,p['quantity'])
         if price is None:
+            if p.get('tp_triggered'):
+                # Do not fabricate a fill or disarm a previously triggered exit.
+                self.snapshot['message']='Take Profit activado; cierre completo pendiente de precio ejecutable.'
             return
         paid=p['entry']*p['quantity']/100+p['entry_fee']
         net=(price-p['entry'])*p['quantity']/100-p['entry_fee']-self.settings['fee_cents_per_contract']*p['quantity']/100
@@ -1051,7 +1124,7 @@ class Bot:
         reason=None
         if self.close_requested:
             reason='CIERRE MANUAL'
-        elif (p.get('tp_pct') is not None and p['tp_pct'] and price+1e-9>=p['tp_pct']) or (p.get('tp_pct') is None and p['tp'] and price>=p['entry']+p['tp']):
+        elif p.get('tp_triggered'):
             reason='TAKE PROFIT'
         elif (p.get('sl_pct') is not None and p['sl_pct'] and roi<=-p['sl_pct']+1e-9) or (p.get('sl_pct') is None and p['sl'] and price<=p['entry']-p['sl']):
             reason='STOP LOSS'
@@ -1098,10 +1171,10 @@ class Bot:
             return 'La compra supera el importe o el saldo virtual disponible.'
         entry_cursor=self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse,tp_pct,sl_pct) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                         (market['ticker'],side,quantity,price,fee,stamp(),0,0,0,s['close_on_reverse'],s['take_profit_pct'],s['stop_loss_pct']))
-        evidence={"engine_revision":"structure_break_retest_v2","side":side,
+        evidence={"engine_revision":STRUCTURE_ENGINE_REVISION,"side":side,
                   "candidate":signal.get("candidate"),"route":signal.get("quality"),
                   "price_source":signal.get("price_source"),"remaining":remaining,
-                  "structure":signal.get("structure_internal"),
+                  "decision":signal.get("decision_internal"),
                   "checks":current_routes["sides"].get(side,[])}
         self.db.execute('UPDATE trades SET entry_evidence=? WHERE id=?',
                         (dumps(evidence),entry_cursor.lastrowid))
@@ -1118,11 +1191,14 @@ class Bot:
                 m=self.feed.get('/markets/'+quote(p['ticker'],safe=''))['market']
                 rem=engine.get_seconds_remaining(m)
                 if m.get('status') in ('active','open') and rem is not None and rem>0:
+                    with self.lock:
+                        self._arm_take_profit(p,m)
                     b=self.feed.book(p['ticker'])
                     with self.lock:
                         self.manage(p,b,None,engine.get_seconds_remaining(m))
-            except Exception:
-                pass
+            except Exception as exc:
+                with self.lock:
+                    self.event('ERROR DE SALIDA', f"#{p['id']} {p['side']} · {type(exc).__name__}: {exc}")
         market=self.feed.current()
         sig=self.feed.signal(market)
         signal_at=time.monotonic()
@@ -1140,6 +1216,7 @@ class Bot:
             had_position=bool(self.positions())
             for p in self.positions():
                 if p['ticker']==market['ticker']:
+                    self._arm_take_profit(p,market)
                     self.manage(p,book,active,remaining)
             # Do not reuse the same liquidity snapshot for both a close and a new buy.
             message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
@@ -1176,6 +1253,8 @@ class Bot:
                           positions=self.positions(),totals=self.totals(),
                           trades=[dict(r) for r in self.db.execute('SELECT * FROM trades ORDER BY id DESC LIMIT 200')],
                           events=[dict(r) for r in self.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 60')])
+            result['app_revision']=getattr(self,'revision','SIN VERSION')
+            result['signal_routes']=engine._entry_route_checks(result.get('metrics') or {},result.get('seconds_left'))
             result['rounds']=[{'ticker':r['ticker'],**json.loads(r['state'])} for r in self.db.execute('SELECT * FROM rounds ORDER BY rowid DESC LIMIT 50')]
             return clean_json(result)
 
@@ -1512,8 +1591,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="maxEntry" value="60" min="1" max="99" required>
 </div>
 <div class="field">
-<label>Tomar profit (%)<small>Nivel del contrato: 90% = vender a 90¢ o más; requiere liquidez suficiente.</small></label>
-<select name="tp"><option value="0">Desactivado</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option></select>
+<label>Tomar profit (%)<small>Activa el cierre al alcanzar la cotización configurada de tu lado. La venta se registra al precio ejecutable, que puede ser menor.</small></label>
+<select name="tp"><option value="0">Desactivado</option><option value="5">5%</option><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
 </div>
 <div class="field">
 <label>Stop loss (%)<small>Porcentaje de pérdida sobre lo pagado; 0 desactiva.</small></label>
@@ -1531,7 +1610,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
 </form>
-<div class="notice">Los ajustes se guardan en el servidor y se aplican a compras nuevas. Las posiciones abiertas conservan su plan de salida.</div>
+<div class="notice">El Take Profit guardado también se aplica a posiciones abiertas. Descarga una copia antes de reiniciar o cambiar el alojamiento.</div>
 </section>
 <section id="entradas" class="page hidden">
 <article class="panel">
@@ -1555,7 +1634,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </section>
 <section id="registro" class="page hidden">
 <article class="panel">
-<h2>Registro de operaciones y eventos</h2>
+<h2>Registro de operaciones y eventos</h2><button id="fullBackup">DESCARGAR COPIA COMPLETA</button>
 <div class="table-wrap">
 <table>
 <thead>
@@ -1597,17 +1676,18 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 <article class="panel">
-<h2>Indicadores</h2>
+<h2>Indicadores informativos</h2>
 <div class="body">
-<div class="field">EMA 9 / EMA 21<strong id="emaValue">—</strong>
+<div class="notice" id="engineRevision">Versión pendiente</div><div class="notice" id="routeReasons" style="white-space:pre-line">Esperando diagnóstico</div>
+<div class="field">Aroon UP / DOWN<strong id="emaValue">—</strong>
 </div>
-<div class="field">RSI 14<strong id="rsiValue">—</strong>
+<div class="field">Pendiente de regresión / ATR<strong id="rsiValue">—</strong>
 </div>
-<div class="field">Momentum<strong id="momentumValue">—</strong>
+<div class="field">Eficiencia del movimiento<strong id="momentumValue">—</strong>
 </div>
-<div class="field">Volumen relativo<strong id="volumeValue">—</strong>
+<div class="field">Permiso de entrada<strong id="volumeValue">—</strong>
 </div>
-<div class="notice"><span id="indicatorNote">Indicadores del cerebro original. No son probabilidades calibradas.</span></div>
+<div class="notice"><span id="indicatorNote">Regresión, Aroon y eficiencia. Los valores no son probabilidades de acierto.</span></div>
 </div>
 </article>
 </div>
@@ -1654,7 +1734,7 @@ $('#start').onclick=()=>action('command',{command:'start'});$('#pause').onclick=
 const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
 form.onsubmit=e=>{e.preventDefault();let cfg={};for(const [name,key]of Object.entries(names)){let el=form.elements[name];cfg[key]=el.type==='checkbox'?el.checked:Number(el.value)}action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');$('#testApi').onclick=()=>{if($('#connectionMode').value!=='demo'){toast('Selecciona Kalshi Demo para verificar tu API.');return}action('verify_demo',{key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
-$('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');
+$('#forgetApi').onclick=()=>{$('#apiKey').value='';$('#privateKey').value='';action('forget_demo')};$('#exportCSV').onclick=()=>action('export');$('#fullBackup').onclick=()=>action('backup');
 function profitRingProgress(positions,net,marked,fresh,fee){
  if(!fresh||!marked||!positions.length||!Number.isFinite(net))return null;
  let target=0;
@@ -1683,10 +1763,10 @@ updateProfitRing(s,net,marked,fresh);$('#positionPaid').textContent=money(s.posi
 if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}el.value=String(value)}}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.has_trades;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
-$('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
+$('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);let d=s.metrics?.decision_internal;$('#emaValue').textContent=d?d.aroon_up.toFixed(0)+' / '+d.aroon_down.toFixed(0):'—';$('#rsiValue').textContent=d?d.regression_atr.toFixed(3):'—';$('#momentumValue').textContent=d?(d.efficiency*100).toFixed(0)+'%':'—';$('#volumeValue').textContent=!fresh?'SIN DATOS ACTUALES':s.metrics?.entry_ready?'RESPALDADA':'ESPERANDO';$('#engineRevision').textContent='Motor: '+(s.app_revision||'SIN VERSION')+' · '+(s.metrics?.engine_revision||'Sin evaluación');let routeLines=[];for(const side of ['UP','DOWN'])for(const route of s.signal_routes?.sides?.[side]||[]){let missing=route.checks.filter(x=>!x[1]).map(x=>x[0]);routeLines.push(side+' · '+route.name+': '+(missing.length?'FALTA '+missing.join('; '):'CUMPLE'))}$('#routeReasons').textContent=(!fresh?'DATOS ATRASADOS: no usar este diagnóstico para entrar.\n':'')+routeLines.join('\n');$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(fresh?'DATOS PÚBLICOS CONECTADOS':'ESPERANDO DATOS PÚBLICOS')+' · '+(s.connection?.message||'Simulación local activa; no requiere API privada.');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#profitOrbit').style.opacity='0';$('#profitOrbit').setAttribute('aria-hidden','true');$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.snapshot)update(args.snapshot);let reply=args.reply;if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.ok&&reply.kind==='settings'){dirty=false;if(args.snapshot)update(args.snapshot)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};if(args.snapshot)update(args.snapshot);let reply=args.reply;if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.ok&&reply.kind==='settings'){dirty=false;if(args.snapshot)update(args.snapshot)}if(reply.backup){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob([reply.backup],{type:'application/json'}));a.download='JC_copia_completa.json';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
@@ -1750,7 +1830,7 @@ class Controller:
                 reply['message']={'start':'Simulación activada.','pause':'Entradas pausadas; salidas vigiladas.',
                                   'close':'Cierre solicitado; esperando liquidez actual.'}[command]
             elif action=='settings':
-                self.bot.save_settings(payload);reply['message']='Ajustes guardados y aplicados a compras nuevas.'
+                self.bot.save_settings(payload);reply['message']='Ajustes guardados. Take Profit actualizado también en posiciones abiertas.'
             elif action=='public':
                 market=self.bot.feed.current();book=self.bot.feed.book(market['ticker'])
                 reply['message']='Kalshi responde: '+market['ticker']
@@ -1762,6 +1842,12 @@ class Controller:
             elif action=='forget_demo':
                 self.connection={'message':'Verificación de API eliminada. Datos públicos disponibles.'}
                 reply['message']='Campos de credenciales limpiados. No se guardaron claves en disco.'
+            elif action=='backup':
+                with self.bot.lock:
+                    archive={'format':'jc-backup-v1','saved_at':stamp(),'revision':APP_REVISION}
+                    for table in ('kv','rounds','trades','events'):
+                        archive[table]=[dict(row) for row in self.bot.db.execute('SELECT * FROM '+table)]
+                reply.update(backup=dumps(archive),message='Copia generada. Conserva el archivo descargado; el disco del alojamiento puede reiniciarse.')
             elif action=='export':
                 stream=io.StringIO();writer=csv.writer(stream)
                 with self.bot.lock:
@@ -1783,6 +1869,51 @@ class Controller:
             result['has_trades']=bool(self.bot.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone())
         result['connection']=self.connection.copy()
         return result
+
+
+
+def upgrade_running_bot(bot):
+    if getattr(bot,'revision',None) == APP_REVISION:
+        return bot
+    # Keep the exact open database and process lock; do not reboot the server.
+    old_thread = bot.thread
+    bot.stop_event.set()
+    if old_thread and old_thread.is_alive():
+        old_thread.join(timeout=1)
+    if old_thread and old_thread.is_alive():
+        raise RuntimeError('Actualización pendiente: termina la consulta en curso. Espera y vuelve a cargar la página; no reinicies el servidor.')
+    with bot.lock:
+        # Preserve a local rollback snapshot, not a claim of remote persistence.
+        old_class,old_feed_class=bot.__class__,bot.feed.__class__
+        old_revision=getattr(bot,'revision',None)
+        backup=sqlite3.connect(':memory:')
+        bot.db.backup(backup)
+        try:
+            bot.__class__=Bot
+            bot.feed.__class__=MarketData
+            bot.feed._http_lock=threading.RLock()
+            bot.feed._responses={}
+            bot.feed._limit_failures=0
+            bot.feed._last_limit_at=0.
+            columns={r[1] for r in bot.db.execute('PRAGMA table_info(trades)')}
+            if 'tp_triggered' not in columns:
+                bot.db.execute('ALTER TABLE trades ADD COLUMN tp_triggered INTEGER NOT NULL DEFAULT 0')
+            bot.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
+                           (bot.settings['take_profit_pct'],))
+            bot.db.commit()
+            bot.revision=APP_REVISION
+            bot.event('ACTUALIZACIÓN',APP_REVISION+' · misma base y ajustes; Take Profit sincronizado; nuevas consultas y diagnóstico activos.')
+        except Exception:
+            bot.db.rollback()
+            backup.backup(bot.db)
+            bot.__class__,bot.feed.__class__=old_class,old_feed_class
+            bot.revision=old_revision
+            raise
+        finally:
+            backup.close()
+            bot.stop_event.clear()
+            bot.start_worker()
+    return bot
 
 
 def streamlit_main():
@@ -1822,8 +1953,10 @@ def streamlit_main():
         bot=Bot(db);bot._process_lock=lock
         bot.start_worker()
         return bot
-    bot=shared_bot()
-    if 'alpha_controller' not in st.session_state:
+    bot=upgrade_running_bot(shared_bot())
+    if ('alpha_controller' not in st.session_state or
+            st.session_state.alpha_controller.bot is not bot or
+            not isinstance(st.session_state.alpha_controller,Controller)):
         st.session_state.alpha_controller=Controller(bot)
     controller=st.session_state.alpha_controller
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
