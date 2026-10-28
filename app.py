@@ -537,7 +537,7 @@ DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_loss_dollars=25, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=1000,
-                fee_cents_per_contract=2, close_on_reverse=True)
+                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10)
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -569,7 +569,7 @@ def valid_settings(raw):
               'max_entries_round':(1,100),
               'daily_loss_dollars':(1,100000), 'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
-              'fee_cents_per_contract':(0,20)}
+              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100)}
     out = {}
     for key, (low, high) in bounds.items():
         v = raw[key]
@@ -902,9 +902,10 @@ class Bot:
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:
             return 'Máximo de entradas de esta ronda alcanzado.'
-        budget=s['max_trade_dollars']
-        if Decimal(str(total['cash'])) < Decimal(str(budget)):
-            return 'Saldo virtual insuficiente para el importe configurado.'
+        # Porcentaje configurable del efectivo virtual disponible al entrar.
+        budget=round(max(0.0, total['cash'])*s['risk_pct']/100.0, 4)
+        if budget<=0:
+            return 'Saldo virtual agotado.'
         sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
         if sized is None:
             return 'Sin liquidez suficiente para el importe configurado dentro del precio máximo.'
@@ -1304,8 +1305,12 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <input type="hidden" name="contracts" value="1">
 <div class="field">
-<label>Importe a comprar ($)</label>
+<label>Importe fijo anterior ($)<small>Con el modo porcentual no determina las compras.</small></label>
 <input type="number" name="maxTrade" value="10" min="1" max="100000" step="0.01" required>
+</div>
+<div class="field">
+<label>Porcentaje del saldo por apuesta (%)<small>Se recalcula con el saldo virtual disponible antes de cada compra.</small></label>
+<input type="number" name="riskPct" value="10" min="1" max="100" step="1" required>
 </div>
 <div class="field">
 <label>Máximo de entradas por ronda</label>
@@ -1449,7 +1454,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',loss:'daily_loss_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
