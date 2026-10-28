@@ -859,28 +859,33 @@ class Bot:
             p['tp_triggered'] = 1
 
     def manage(self,p,book,signal,remaining):
-        if book['ticker']!=p['ticker'] or time.monotonic()-book['at']>5:
+        if book.get('ticker') != p['ticker'] or time.monotonic()-book.get('at',0)>5:
             return
-        bids=book[p['side']]['bids']
-        price=fill_book(bids,p['quantity'])
-        
+        try:
+            bids=book.get(p['side'],{}).get('bids',[])
+            price=fill_book(bids,p['quantity']) if bids else None
+        except (ValueError,TypeError,KeyError,ZeroDivisionError):
+            return
+        # No registrar ventas sin liquidez suficiente para toda la posición.
+        if price is None or not math.isfinite(price):
+            return
         reason=None
         if self.close_requested:
             reason='CIERRE MANUAL'
         elif p.get('tp_triggered'):
             reason='TAKE PROFIT AUTOMÁTICO'
-            if price is None and bids:
-                price = bids[0][0]
-            elif price is None:
-                price = p['entry']
-        elif (p.get('sl_pct') is not None and p['sl_pct'] and ((price if price is not None else p['entry'])-p['entry'])*p['quantity']/100-p['entry_fee']/(p['entry']*p['quantity']/100+p['entry_fee'])*100<=-p['sl_pct']+1e-9) or (p.get('sl_pct') is None and p['sl'] and (price if price is not None else p['entry'])<=p['entry']-p['sl']):
-            reason='STOP LOSS'
-        elif p['reverse'] and signal in ('UP','DOWN') and signal!=p['side']:
-            reason='CAMBIO DE SEÑAL'
-            
+        else:
+            entry_cost=p['entry']*p['quantity']/100+p['entry_fee']
+            exit_fee=self.settings['fee_cents_per_contract']*p['quantity']/100
+            net_pct=(((price-p['entry'])*p['quantity']/100-p['entry_fee']-exit_fee)
+                     /entry_cost*100) if entry_cost>0 else 0
+            if p.get('sl_pct') is not None and p['sl_pct'] and net_pct<=-p['sl_pct']+1e-9:
+                reason='STOP LOSS'
+            elif p.get('sl_pct') is None and p.get('sl') and price<=p['entry']-p['sl']:
+                reason='STOP LOSS'
+            elif p['reverse'] and signal in ('UP','DOWN') and signal!=p['side']:
+                reason='CAMBIO DE SEÑAL'
         if reason:
-            if price is None:
-                price = bids[0][0] if bids else p['entry']
             self._close(p,price,reason)
 
     def enter(self,market,book,side,remaining,signal=None):
