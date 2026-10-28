@@ -483,7 +483,7 @@ def _entry_route_checks(sig, seconds_left):
                                 "total":len(checks),"complete":all(bool(v) for _,v in checks)})
     return {"valid":bool(valid),"sides":sides,"noise_ok":bool(valid)}
 
-STRUCTURE_ENGINE_REVISION = "jc_price_structure_v3"
+STRUCTURE_ENGINE_REVISION = "jc_price_structure_target_v4"
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     """JC decides from price structure alone; indicators below are display-only.
@@ -509,6 +509,20 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     eligible={side:[r for r in routes['sides'][side] if r['complete']] for side in ('UP','DOWN')}
     choices=[side for side in ('UP','DOWN') if eligible[side]]
     candidate=choices[0] if len(choices)==1 and (seconds_left is None or seconds_left>0) else None
+    # La dirección se decide sin mirar quién gana ahora. Solo después
+    # evaluamos si hay recorrido razonable hasta el objetivo de Kalshi.
+    target_feasibility = "SIN OBJETIVO"
+    target_gap_atr = None
+    if target is not None and np.isfinite(target) and target > 0 and atr > 0:
+        target_gap_atr = abs(float(target)-price)/atr
+        minutes_left = max(0.0, float(seconds_left or 0))/60.0
+        # Margen amplio y simétrico; es un filtro de alcance, no una predicción.
+        reachable_atr = 3.0 * math.sqrt(max(minutes_left, 0.0))
+        target_feasibility = "ALCANZABLE" if target_gap_atr <= reachable_atr else "LEJANO"
+        if candidate == "UP" and price < target and target_gap_atr > reachable_atr:
+            candidate = None
+        elif candidate == "DOWN" and price > target and target_gap_atr > reachable_atr:
+            candidate = None
     quality=(eligible[candidate][0]['name'] if candidate else
              'ESTRUCTURA CONTRADICTORIA' if len(choices)>1 else 'ESPERANDO ESTRUCTURA CONFIRMADA')
     evidence=1.0 if candidate=='UP' else -1.0 if candidate=='DOWN' else 0.0
@@ -524,7 +538,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
             'technical_score':evidence,'final_score':evidence,
             'distance':distance,'distance_pct':distance/target*100 if target else None,
             'target_atr':distance/atr if distance is not None and atr>0 else None,
-            'target_score':0.0,'atr':atr,
+            'target_score':0.0,'target_feasibility':target_feasibility,
+            'target_gap_atr':target_gap_atr,'atr':atr,
             'ema':'BULL' if last['ema9']>last['ema21'] else 'BEAR',
             'rsi':display_number('rsi',50),'mom3':display_number('mom3'),
             'mom5':display_number('mom5'),'mom15':display_number('mom15'),
