@@ -1304,10 +1304,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="number" name="loss" value="25" min="1" required>
 </div>
 <input type="hidden" name="contracts" value="1">
-<div class="field">
-<label>Importe fijo anterior ($)<small>Con el modo porcentual no determina las compras.</small></label>
-<input type="number" name="maxTrade" value="10" min="1" max="100000" step="0.01" required>
-</div>
+<input type="hidden" name="maxTrade" value="10">
 <div class="field">
 <label>Porcentaje del saldo por apuesta (%)<small>Se recalcula con el saldo virtual disponible antes de cada compra.</small></label>
 <input type="number" name="riskPct" value="10" min="1" max="100" step="1" required>
