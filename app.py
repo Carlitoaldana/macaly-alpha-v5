@@ -888,29 +888,26 @@ class Bot:
                 continue  # Position remains open/pending, not guessed.
 
     def _arm_take_profit(self, p, market, book=None):
-        # Trigger solely on Kalshi's displayed contract percentage for the owned side.
-        if not market or market.get('ticker') != p['ticker']:
+        """Arm a paper exit from the owned side's Kalshi percentage (0..100)."""
+        if not market or market.get('ticker') != p['ticker'] or not book or book.get('ticker') != p['ticker'] or time.monotonic() - book['at'] > 5:
             return
         target = p.get('tp_pct')
         if target is None:
             target = self.settings['take_profit_pct']
-        if target is None or not (0 < float(target) <= 100):
+        if target is None or not 0 < float(target) <= 100:
             return
-        quote_price = get_yes_ask(market) if p['side']=='UP' else get_no_ask(market)
-        quote_pct = quote_price*100 if quote_price is not None and math.isfinite(quote_price) and 0 <= quote_price <= 1 else None
-        # Fallback to the same-side live Kalshi orderbook ask when market quote is absent.
-        if book and book.get('ticker') == p['ticker'] and time.monotonic()-book['at'] <= 5:
-            asks = book.get(p['side'], {}).get('asks', [])
-            prices = [level[0] for level in asks if level[1] > 0]
-            if prices:
-                book_ask = min(prices)
-                quote_pct = max(quote_pct, book_ask) if quote_pct is not None else book_ask
-        if quote_pct is None or quote_pct + 1e-9 < float(target):
+        quote = get_yes_ask(market) if p['side'] == 'UP' else get_no_ask(market)
+        pct = 100 * quote if quote is not None and math.isfinite(quote) and 0 <= quote <= 1 else None
+        if book and book['ticker'] == p['ticker'] and time.monotonic() - book['at'] <= 5:
+            asks = [price for price, size in book[p['side']]['asks'] if size > 0]
+            if asks:
+                pct = max(pct, min(asks)) if pct is not None else min(asks)
+        if pct is None or pct < float(target) - 1e-9:
             return
-        cur=self.db.execute('UPDATE trades SET tp_triggered=1 WHERE id=? AND closed IS NULL AND tp_triggered=0', (p['id'],))
+        cur = self.db.execute('UPDATE trades SET tp_triggered=1 WHERE id=? AND closed IS NULL AND tp_triggered=0', (p['id'],))
         if cur.rowcount:
-            self.event('TAKE PROFIT ACTIVADO', f"#{p['id']} {p['side']} · Kalshi {quote_pct:.2f}% · objetivo {float(target):.2f}% · cierre simulado solicitado")
-        p['tp_triggered']=1
+            self.event('TAKE PROFIT ACTIVADO', f"#{p['id']} {p['side']} · Kalshi {pct:.2f}% · objetivo {float(target):.2f}%")
+        p['tp_triggered'] = 1
 
     def manage(self,p,book,signal,remaining):
         if book['ticker']!=p['ticker'] or time.monotonic()-book['at']>5:
@@ -920,7 +917,7 @@ class Bot:
         if price is None:
             if p.get('tp_triggered'):
                 # Do not fabricate a fill or disarm a previously triggered exit.
-                self.snapshot['message']='Take Profit activado; cierre completo pendiente de precio ejecutable.'
+                self.snapshot['message']='Take Profit alcanzado; simulación pendiente: no hay profundidad suficiente para valorar la salida completa.'
             return
         paid=p['entry']*p['quantity']/100+p['entry_fee']
         net=(price-p['entry'])*p['quantity']/100-p['entry_fee']-self.settings['fee_cents_per_contract']*p['quantity']/100
