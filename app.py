@@ -895,8 +895,6 @@ class Bot:
         if actual is None or actual<=0:
             return 'Fuera de ventana de entrada.'
         total=self.totals()
-        if total['daily']<=-s['daily_loss_dollars']:
-            return 'Límite diario de pérdida alcanzado.'
         if s['daily_goal_dollars'] and total['daily']>=s['daily_goal_dollars']:
             return 'Meta diaria alcanzada.'
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
@@ -1299,12 +1297,9 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Meta diaria ($)</label>
 <input type="number" name="goal" value="50" min="0" required>
 </div>
-<div class="field">
-<label>Límite de pérdida diaria ($)</label>
-<input type="number" name="loss" value="25" min="1" required>
-</div>
 <input type="hidden" name="contracts" value="1">
 <input type="hidden" name="maxTrade" value="10">
+<input type="hidden" name="loss" value="25">
 <div class="field">
 <label>Porcentaje del saldo por apuesta (%)<small>Se recalcula con el saldo virtual disponible antes de cada compra.</small></label>
 <select name="riskPct"><option value="5">5%</option><option value="10" selected>10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
