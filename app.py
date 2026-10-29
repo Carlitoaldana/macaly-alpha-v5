@@ -727,117 +727,6 @@ def size_for_budget(levels, dollars, fee_cents, limit):
         return None
     return quantity, float(value / quantity)
 
-def _chart_panel_payload(df, tick=None, tape=(), flow_ok=False, now=None):
-    """Display-only Coinbase data. Never mutates engine candles or chooses trades."""
-    now = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
-    tick = tick or {}
-    rows=[]
-    if df is not None and len(df):
-        frame=df.copy().sort_values('time').drop_duplicates('time',keep='last')
-        frame['time']=pd.to_datetime(frame['time'],utc=True)
-        # Plot source candles as received: never fabricate volume or patch closes
-        # from the Kalshi reference. A separate dotted line marks the Coinbase tick.
-        indicators=_indicator_frame(frame)
-        typical=(frame['high']+frame['low']+frame['close'])/3
-        day=frame['time'].dt.floor('D')
-        indicators['vwap']=(typical*frame['volume']).groupby(day).cumsum()/frame['volume'].groupby(day).cumsum().replace(0,np.nan)
-        for _,r in indicators.tail(180).iterrows():
-            row={k:_plan_number(r[k]) for k in ('open','high','low','close','volume','ema9','ema21','vwap','rsi')}
-            row['t']=int(r['time'].timestamp());rows.append(row)
-    stamp=now.timestamp()
-    points=[r for r in tape if 0<=stamp-r['t']<=30]
-    buy=sum(r['notional'] for r in points if r['side']=='COMPRA')
-    sell=sum(r['notional'] for r in points if r['side']=='VENTA')
-    recent=sum(r['notional'] for r in points if stamp-r['t']<=10)
-    prior=sum(r['notional'] for r in points if stamp-r['t']>10)
-    total=buy+sell;imbalance=abs(buy-sell)/total if total else 0
-    tick_at=pd.to_datetime(tick.get('time'),utc=True,errors='coerce')
-    price=_plan_number(tick.get('price'))
-    if pd.isna(tick_at) or not -5<=(now-tick_at).total_seconds()<=30 or not price or price<=0:
-        price=None
-    closed=[r for r in rows if r['t']+60<=stamp][-20:]
-    last_at=rows[-1]['t'] if rows else None
-    return {'rows':rows,'timeframe':'1m','price':price,'target':None,'signal':'ESPERANDO',
-            'quality':'Esperando lectura de JC','up':None,'down':None,
-            'support':min((r['low'] for r in closed),default=None),
-            'resistance':max((r['high'] for r in closed),default=None),
-            'round_start':None,'round_end':None,'mom3':None,'mom5':None,'mom15':None,
-            'observed_at':tick_at.isoformat() if price is not None else None,
-            'candle_at':last_at,'updated':now.tz_convert('America/New_York').strftime('%I:%M:%S %p · Miami'),
-            'age':max(0,stamp-last_at) if last_at else None,
-            'flow':{'ok':bool(flow_ok),'buy':buy,'sell':sell,
-                    'buys':sum(r['side']=='COMPRA' and r['notional']>=10000 for r in points),
-                    'sells':sum(r['side']=='VENTA' and r['notional']>=10000 for r in points),
-                    'direction':'UP' if buy>sell else 'DOWN' if sell>buy else 'NEUTRAL',
-                    'strength':'ALTA' if imbalance>=.6 else 'MEDIA' if imbalance>=.3 else 'BAJA',
-                    'activity':(recent/10)/(prior/20) if prior else None,'threshold':10000}}
-
-
-class _ChartPanelFeed:
-    """Independent read-only sampler: chart failures cannot block the trading loop."""
-    def __init__(self, feed, stop_event):
-        self.feed=feed;self.stop_event=stop_event
-        self.lock=threading.Lock();self.thread=None
-        self.data=_chart_panel_payload(None);self.tape=[];self.seen={}
-        self.tick={}
-    def _ingest(self, rows, now):
-        if not isinstance(rows,list):
-            raise ValueError('Flujo no disponible.')
-        for row in rows:
-            try:
-                trade_id=str(row['trade_id'])
-                if trade_id in self.seen:continue
-                ts=pd.to_datetime(row['time'],utc=True,errors='coerce')
-                price,size=float(row['price']),float(row['size'])
-                maker=str(row['side']).lower()
-                if pd.isna(ts) or not 0<=now-ts.timestamp()<=75:continue
-                if not math.isfinite(price*size) or price<=0 or size<=0 or maker not in ('buy','sell'):continue
-                self.tape.append({'id':trade_id,'t':ts.timestamp(),'notional':price*size,
-                                  'side':'COMPRA' if maker=='sell' else 'VENTA'})
-                self.seen[trade_id]=ts.timestamp()
-            except (KeyError,TypeError,ValueError,OverflowError):continue
-        self.tape=[r for r in self.tape if 0<=now-r['t']<=75]
-        self.seen={k:v for k,v in self.seen.items() if 0<=now-v<=90}
-    def poll(self):
-        try:
-            tick=requests.get('https://api.exchange.coinbase.com/products/BTC-USD/ticker',timeout=3).json()
-            if isinstance(tick,dict):self.tick=tick
-        except Exception:pass
-        flow_ok=False
-        try:
-            rows=requests.get('https://api.exchange.coinbase.com/products/BTC-USD/trades',params={'limit':100},timeout=3).json()
-            self._ingest(rows,pd.Timestamp.now(tz='UTC').timestamp());flow_ok=True
-        except Exception:pass
-        payload=_chart_panel_payload(getattr(self.feed,'candles',None),self.tick,self.tape,flow_ok)
-        payload['flow_at']=stamp() if flow_ok else None
-        with self.lock:self.data=payload
-    def loop(self):
-        while not self.stop_event.is_set():
-            try:self.poll()
-            except Exception:
-                with self.lock:self.data={**self.data,'observed_at':None,'flow':{**self.data['flow'],'ok':False}}
-            self.stop_event.wait(3)
-    def start(self):
-        if self.thread is None or not self.thread.is_alive():
-            self.thread=threading.Thread(target=self.loop,name='jc-chart-readonly',daemon=True)
-            self.thread.start()
-    def view(self):
-        with self.lock:return dict(self.data)
-
-
-def _ensure_chart_panel(bot):
-    """Upgrade an already cached Bot in place, keeping its DB and worker alive."""
-    with bot.lock:
-        panel=getattr(bot,'chart_panel',None)
-        if panel is None:
-            panel=_ChartPanelFeed(bot.feed,bot.stop_event)
-            bot.chart_panel=panel
-        worker=getattr(bot,'thread',None)
-        if worker is not None and worker.is_alive() and not bot.stop_event.is_set():
-            panel.start()
-        return panel
-
-
 class Bot:
     def __init__(self, db_path=None, feed=None):
         self.lock = threading.RLock()
@@ -870,7 +759,6 @@ class Bot:
         self.close_requested = False
         self.snapshot = {'status':'INICIANDO','message':'Esperando la primera lectura verificada.', 'mode':'SIMULACIÓN', 'signal':None}
         self.thread = None
-        self.chart_panel = _ChartPanelFeed(self.feed,self.stop_event)
         self.event('SISTEMA','Servidor iniciado. Nuevas entradas pausadas; salidas siguen vigiladas.')
 
     def kv(self,key):
@@ -1112,21 +1000,12 @@ class Bot:
             self.stop_event.wait(2)
 
     def start_worker(self):
-        _ensure_chart_panel(self).start()
         self.thread=threading.Thread(target=self.loop,name='alpha-paper-worker',daemon=True)
         self.thread.start()
 
     def view(self):
         with self.lock:
             result=dict(self.snapshot)
-            result['chart_panel']=_ensure_chart_panel(self).view()
-            fresh=(self.snapshot.get('status')!='SIN DATOS' and self.snapshot.get('updated')
-                   and (utcnow()-datetime.fromisoformat(self.snapshot['updated'])).total_seconds()<=15)
-            metrics=self.snapshot.get('metrics') or {}
-            result['chart_panel'].update(signal=self.snapshot.get('signal') if fresh else 'ESPERANDO',
-                target=self.snapshot.get('target'),quality=self.snapshot.get('quality') if fresh else 'Esperando lectura de JC',
-                signal_at=self.snapshot.get('updated') if fresh else None,
-                **{key:metrics.get(key) if fresh else None for key in ('mom3','mom5','mom15')})
             result.update(running=self.running,close_requested=self.close_requested,settings=self.settings.copy(),
                           positions=self.positions(),totals=self.totals(),
                           trades=[dict(r) for r in self.db.execute('SELECT * FROM trades ORDER BY id DESC LIMIT 200')],
@@ -1401,171 +1280,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <button class="danger" id="close">□ CERRAR TODO</button>
 </div>
 <div class="notice"><span id="radarNotice">El radar sigue las señales confirmadas. Pausar entradas conserva la gestión de salidas.</span></div>
-<iframe id="jcChartPanel" title="BTC/USD · Indicadores de JC" sandbox="allow-scripts allow-same-origin" style="display:block;width:100%;height:1500px;border:0;margin-top:18px" srcdoc="&lt;!DOCTYPE html&gt;&lt;html lang=&quot;es&quot;&gt;&lt;meta charset=&quot;utf-8&quot;&gt;&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width,initial-scale=1&quot;&gt;
-&lt;style&gt;
-*{box-sizing:border-box}body{margin:0;background:#06121a;color:#e8edf6;font-family:Inter,system-ui,sans-serif}button,summary{-webkit-tap-highlight-color:transparent}button{font:inherit;cursor:pointer}.panel{box-shadow:0 0 18px #00dfb555,inset 0 0 16px #00dfb518;border:1px solid #00dfb5;border-radius:27px;overflow:hidden;background:radial-gradient(ellipse at 95% 0,rgba(0,100,85,.12),transparent 40%),#06121a;box-shadow:inset 0 0 18px #7b3de31c,0 0 12px #9b54ff20;margin:4px 3px}.header{padding:24px 21px 17px;display:flex;align-items:start;justify-content:space-between;gap:8px}.header h2{margin:0;font-size:25px;letter-spacing:-.8px}.sub{color:#949bb6;font-size:11px;font-weight:700;letter-spacing:1px;margin-top:8px}.price{font-size:25px;letter-spacing:-1px;font-weight:900;color:#00dfb5;text-shadow:0 0 19px #00e4ba40}.live{font-size:10px;color:#00dfb5;text-align:right;margin-top:7px}.cards{padding:0 20px 20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{min-height:104px;padding:17px;border:1px solid #35324d;border-radius:19px;background:linear-gradient(130deg,#0c1421,#080a14)}.card .label{font-size:10px;letter-spacing:1.8px;font-weight:800;color:#7c879d}.card strong{font-size:24px;display:block;margin-top:10px;line-height:1.2}.card small{color:#7e8b9f;font-size:10px;display:block;margin-top:8px}.purple{color:#c080ff}.cyan{color:#54d5f7}.green{color:#00dfb5}.red{color:#e64b4b}.status{font-size:17px!important}.signal{border-color:#9e355b;background:linear-gradient(120deg,#21101e55,#0b0a15)}details{border-top:1px solid #26303c;border-bottom:1px solid #26303c;border-radius:20px;margin:0 0 12px;background:#070c14}summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:22px 20px;font-size:14px;font-weight:850;letter-spacing:.5px}summary::-webkit-details-marker{display:none}summary small{font-size:9px;color:#758894;margin-left:auto;max-width:170px;letter-spacing:1px}summary:after{content:&#x27;+&#x27;;color:#00dfb5;font-size:24px}details[open]&gt;summary:after{content:&#x27;−&#x27;}.detail{padding:18px 20px 20px;border-top:1px solid #19232e}.detail h3{font-size:13px;margin:0 0 5px}.note{font-size:10px;color:#7e8b9f;line-height:1.7}.watch{font-size:14px;font-weight:800;color:#ffd057;padding:15px 0}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:9px}.metric{border:1px solid #1c2733;background:#080d17;padding:15px;border-radius:13px}.metric small{display:block;color:#8692a9;font-size:10px;font-weight:750;letter-spacing:.4px}.metric b{display:block;font-size:20px;margin-top:9px}.bars{margin:20px 0}.bar{display:flex;gap:12px;align-items:center;font-size:10px;color:#8b96ac;margin:12px 0}.track{height:7px;background:#19202c;border-radius:8px;flex:1}.track i{height:100%;display:block;border-radius:8px}.bar b{width:65px;text-align:right}.count{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}.count .metric{display:flex;align-items:center;justify-content:space-between;gap:6px}.count b{font-size:29px}.difference{margin-top:10px;display:flex;justify-content:space-between;align-items:center}.difference b{font-size:24px}.tools{padding:0 20px}.tools h3{font-size:12px;color:#7f8ca6;letter-spacing:2px;margin:15px 0 12px}.toggles{display:flex;flex-wrap:wrap;gap:9px}.toggle{padding:11px 13px;border:1px solid #23685e;border-radius:30px;background:#130f24;color:#e3e3f5;font-size:11px;font-weight:750}.toggle:before{content:&#x27;●&#x27;;color:var(--c);margin-right:8px;text-shadow:0 0 11px var(--c)}.toggle span{font-size:9px;color:#9390a7;margin-left:6px}.toggle.off{opacity:.4}.legend{font-size:10px;color:#99a4bd;margin:16px 0 10px;display:flex;gap:10px;flex-wrap:wrap;font-weight:700}.canvas{position:relative;width:100%;touch-action:none;cursor:grab}.canvas svg{display:block;width:100%;height:auto;user-select:none}.floatcounts{display:flex;gap:10px;padding:0 20px;margin-top:4px}.floatcounts div{flex:1;border:1px solid #00dfb5;border-radius:14px;padding:10px;color:#00dfb5;font-size:11px;font-weight:800}.floatcounts div:last-child{border-color:#e64b4b;color:#e64b4b}.floatcounts b{font-size:22px;margin-left:8px}.chartnav{display:flex;align-items:center;gap:8px;padding:10px 20px;border-top:1px solid #202738;flex-wrap:wrap}.chartnav button{border:1px solid #393254;border-radius:8px;color:#bec2d6;background:#0e1421;padding:6px 11px;font-size:11px}.chartnav span{font-size:10px;color:#7b879d;margin-left:auto}.tooltip{min-height:33px;padding:6px 20px;color:#aab6cc;font-size:10px;line-height:1.6}.footer{font-size:9px;line-height:1.6;color:#7c889e;padding:10px 20px 18px}.empty{padding:80px 20px;text-align:center;color:#95a0b6}@media(max-width:460px){.header{padding:20px 16px 16px}.header h2,.price{font-size:22px}.cards{grid-template-columns:1fr;padding:0 16px 18px}.card{min-height:106px}.card strong{font-size:25px}.tools,.detail{padding-left:16px;padding-right:16px}summary{padding:20px 16px;font-size:13px}summary small{max-width:135px;font-size:8px}.toggle{padding:10px 12px}.count .metric{padding:10px}.count small{font-size:8px}.count b{font-size:25px}.metric b{font-size:20px}}
-
-/* Strong neon and readable labels across both visual surfaces. */
-.green{color:#00dfb5!important;text-shadow:0 0 5px #00dfb588,0 0 14px #00dfb555!important}
-.red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
-.pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
-.pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
-.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
-.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
-.rhero{filter:drop-shadow(0 0 9px var(--accent))}
-.note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
-.floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
-.canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
-@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
-
-
-/* Purple neon outlines, consistent across dashboard and chart cards. */
-.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp&gt;section[style],
-.finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
-.panel,.card,.metric,details,.floatcounts div{
- border-color:#23685e!important;
- box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
-}
-.panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
-.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
-.techrow,.rnav,.chartnav{border-color:#23685e!important}
-
-
-/* Uniform turquoise presentation. Signal values and timing are unchanged. */
-.stApp,[data-testid=&quot;stAppViewContainer&quot;]{background:#06121a!important}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
-.refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp&gt;section[style],
-.panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
- background:linear-gradient(125deg,#0c2026,#0a151e)!important;
- border-color:#23685e!important;box-shadow:none!important;
-}
-.refapp .techrow,.refapp .techrow&gt;div,.refapp .rnav,.panel .chartnav{border-color:#244047!important}
-.refapp .gear,.panel summary:after{color:#00dfb5!important;text-shadow:none!important}
-.refapp .finalcard,.refapp .finalclose,.refapp .analysisbox,.refapp .probbox{border-color:#244047!important}
-.stRadio label,[data-testid=&quot;stButton&quot;] button,.panel .toggle,.panel .chartnav button{
- background:#0a151e!important;border-color:#23685e!important;color:#e3f0ee!important;
-}
-.panel{background:#06121a!important}
-
-
-#model{font-size:17px;line-height:1.5}body{background:transparent}.panel{max-width:1100px;margin:8px auto!important}.header .price{white-space:nowrap}@media(min-width:700px){.cards{grid-template-columns:1fr 1fr 1fr}.canvas{max-width:940px;margin:auto}}
-&lt;/style&gt;
-&lt;section class=&quot;panel&quot;&gt;
-&lt;header class=&quot;header&quot;&gt;&lt;div&gt;&lt;h2&gt;BTC / USD&lt;/h2&gt;&lt;div class=&quot;sub&quot; id=&quot;subtitle&quot;&gt;&lt;/div&gt;&lt;/div&gt;&lt;div&gt;&lt;div class=&quot;price&quot; id=&quot;price&quot;&gt;&lt;/div&gt;&lt;div class=&quot;live&quot; id=&quot;live&quot;&gt;&lt;/div&gt;&lt;/div&gt;&lt;/header&gt;
-&lt;div class=&quot;cards&quot;&gt;&lt;div class=&quot;card signal&quot;&gt;&lt;div class=&quot;label&quot;&gt;SEÑAL OFICIAL DE JC&lt;/div&gt;&lt;strong id=&quot;signal&quot;&gt;&lt;/strong&gt;&lt;small&gt;Motor de JC ALPHA EDGE&lt;/small&gt;&lt;/div&gt;&lt;div class=&quot;card&quot;&gt;&lt;div class=&quot;label&quot;&gt;LECTURA DEL MOTOR&lt;/div&gt;&lt;strong class=&quot;cyan&quot; id=&quot;model&quot;&gt;&lt;/strong&gt;&lt;small&gt;Lectura actual del propio JC&lt;/small&gt;&lt;/div&gt;&lt;div class=&quot;card&quot;&gt;&lt;div class=&quot;label&quot;&gt;ESTADO DE LA GRÁFICA&lt;/div&gt;&lt;strong class=&quot;status&quot; id=&quot;status&quot;&gt;&lt;/strong&gt;&lt;small id=&quot;updated&quot;&gt;&lt;/small&gt;&lt;/div&gt;&lt;/div&gt;
-&lt;details id=&quot;whale&quot;&gt;&lt;summary&gt;🐋 WHALE FLOW &lt;small&gt;EN VIVO · TOCA PARA ABRIR&lt;/small&gt;&lt;/summary&gt;&lt;div class=&quot;detail&quot;&gt;&lt;h3&gt;🐋 WHALE FLOW — LIVE&lt;/h3&gt;&lt;div class=&quot;note&quot;&gt;Operaciones observadas de Coinbase · últimos 30 s&lt;/div&gt;&lt;div class=&quot;watch&quot; id=&quot;watch&quot;&gt;&lt;/div&gt;&lt;div class=&quot;metrics&quot;&gt;&lt;div class=&quot;metric&quot;&gt;&lt;small&gt;BUY FLOW&lt;/small&gt;&lt;b class=&quot;green&quot; id=&quot;buy&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;div class=&quot;metric&quot;&gt;&lt;small&gt;SELL FLOW&lt;/small&gt;&lt;b class=&quot;red&quot; id=&quot;sell&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;div class=&quot;metric&quot;&gt;&lt;small&gt;DIFERENCIA&lt;/small&gt;&lt;b id=&quot;diff&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;div class=&quot;metric&quot;&gt;&lt;small&gt;ACTIVIDAD&lt;/small&gt;&lt;b id=&quot;activity&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;div class=&quot;metric&quot;&gt;&lt;small&gt;FUERZA DEL DESEQUILIBRIO&lt;/small&gt;&lt;b id=&quot;strength&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;bars&quot;&gt;&lt;div class=&quot;bar&quot;&gt;BUY&lt;div class=&quot;track&quot;&gt;&lt;i id=&quot;buybar&quot; style=&quot;background:#00dfb5&quot;&gt;&lt;/i&gt;&lt;/div&gt;&lt;b id=&quot;buytotal&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;div class=&quot;bar&quot;&gt;SELL&lt;div class=&quot;track&quot;&gt;&lt;i id=&quot;sellbar&quot; style=&quot;background:#e64b4b&quot;&gt;&lt;/i&gt;&lt;/div&gt;&lt;b id=&quot;selltotal&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;count&quot;&gt;&lt;div class=&quot;metric&quot;&gt;&lt;small&gt;🐋 BUY WHALES&lt;/small&gt;&lt;b class=&quot;green&quot; id=&quot;buys&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;div class=&quot;metric&quot;&gt;&lt;small&gt;🐋 SELL WHALES&lt;/small&gt;&lt;b class=&quot;red&quot; id=&quot;sells&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;metric difference&quot;&gt;&lt;small&gt;DIFERENCIA DE OPERACIONES&lt;/small&gt;&lt;b id=&quot;countdiff&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;p class=&quot;note&quot;&gt;«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. Este panel es informativo; el flujo no modifica las señales ni las operaciones de JC.&lt;/p&gt;&lt;/div&gt;&lt;/details&gt;
-&lt;details id=&quot;momentum&quot;&gt;&lt;summary&gt;⚡ SHORT-TERM MOMENTUM &lt;small&gt;EN VIVO · TOCA PARA ABRIR&lt;/small&gt;&lt;/summary&gt;&lt;div class=&quot;detail&quot;&gt;&lt;h3&gt;MOVIMIENTO RECIENTE DE BTC&lt;/h3&gt;&lt;div class=&quot;metrics&quot; id=&quot;momrows&quot;&gt;&lt;/div&gt;&lt;p class=&quot;note&quot;&gt;Cambio porcentual calculado por el motor en 3, 5 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.&lt;/p&gt;&lt;/div&gt;&lt;/details&gt;
-&lt;div class=&quot;tools&quot;&gt;&lt;h3&gt;INDICADORES&lt;/h3&gt;&lt;div class=&quot;toggles&quot; id=&quot;toggles&quot;&gt;&lt;/div&gt;&lt;div class=&quot;legend&quot; id=&quot;legend&quot;&gt;&lt;/div&gt;&lt;/div&gt;
-&lt;div class=&quot;floatcounts&quot;&gt;&lt;div&gt;🐋 BUY WHALES &lt;b id=&quot;floatbuy&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;div&gt;🐋 SELL WHALES &lt;b id=&quot;floatsell&quot;&gt;&lt;/b&gt;&lt;/div&gt;&lt;/div&gt;
-&lt;div class=&quot;tooltip&quot; id=&quot;tooltip&quot;&gt;Arrastra con un dedo · amplía con dos · AHORA vuelve al precio actual.&lt;/div&gt;&lt;div class=&quot;canvas&quot; id=&quot;canvas&quot;&gt;&lt;/div&gt;
-&lt;div class=&quot;chartnav&quot;&gt;&lt;button id=&quot;older&quot; aria-label=&quot;Velas anteriores&quot;&gt;←&lt;/button&gt;&lt;button id=&quot;newer&quot; aria-label=&quot;Velas siguientes&quot;&gt;→&lt;/button&gt;&lt;button id=&quot;zoomin&quot; aria-label=&quot;Acercar&quot;&gt;＋&lt;/button&gt;&lt;button id=&quot;zoomout&quot; aria-label=&quot;Alejar&quot;&gt;−&lt;/button&gt;&lt;button id=&quot;reset&quot;&gt;AHORA&lt;/button&gt;&lt;span id=&quot;viewtf&quot;&gt;&lt;/span&gt;&lt;/div&gt;
-&lt;div class=&quot;footer&quot;&gt;COINBASE · BTC/USD · Objetivo de la ronda Kalshi. Soporte/resistencia: extremos de las últimas 20 velas anteriores. VWAP: sesión UTC, con las velas disponibles. Actualización al recibir nuevos datos; Flujo muestreado cada 3 s; velas según datos recibidos. La línea BTC usa Coinbase; la señal y el target corresponden a JC.&lt;/div&gt;&lt;/section&gt;
-&lt;script&gt;
-let D={&quot;rows&quot;: [], &quot;timeframe&quot;: &quot;1m&quot;, &quot;price&quot;: null, &quot;signal&quot;: &quot;ESPERANDO&quot;, &quot;quality&quot;: &quot;Esperando lectura de JC&quot;, &quot;flow&quot;: {&quot;ok&quot;: false, &quot;buy&quot;: 0, &quot;sell&quot;: 0, &quot;buys&quot;: 0, &quot;sells&quot;: 0}, &quot;updated&quot;: &quot;\u2014&quot;}; const $=id=&gt;document.getElementById(id), fmt=(v,n=2)=&gt;v==null?&#x27;—&#x27;:Number(v).toLocaleString(&#x27;en-US&#x27;,{minimumFractionDigits:n,maximumFractionDigits:n}), usd=v=&gt;v==null?&#x27;—&#x27;:&#x27;$&#x27;+fmt(v), compact=v=&gt;v==null?&#x27;—&#x27;:v&gt;=1e6?&#x27;$&#x27;+(v/1e6).toFixed(2)+&#x27;M&#x27;:v&gt;=1000?&#x27;$&#x27;+(v/1000).toFixed(0)+&#x27;K&#x27;:&#x27;$&#x27;+fmt(v,0);
-let saved={};try{saved=JSON.parse(localStorage.getItem(&#x27;jc-chart-panel-v1&#x27;)||&#x27;{}&#x27;)}catch(e){}
-let toggles=Object.assign({ema9:true,ema21:true,vwap:true,volume:true,rsi:true,},saved.toggles),visible=saved.visible||32,offset=saved.offset||0,pricePan=Number.isFinite(saved.pricePan)?saved.pricePan:0;
-function persist(){try{localStorage.setItem(&#x27;jc-chart-panel-v1&#x27;,JSON.stringify({toggles,visible,offset,pricePan,whale:$(&#x27;whale&#x27;).open,momentum:$(&#x27;momentum&#x27;).open}))}catch(e){}}
-for(const name of [&#x27;whale&#x27;,&#x27;momentum&#x27;]){$(name).open=!!saved[name];$(name).addEventListener(&#x27;toggle&#x27;,persist)}
-function refreshLabels(){
-$(&#x27;subtitle&#x27;).textContent=D.timeframe.toUpperCase()+&#x27; · COINBASE · JC ALPHA EDGE&#x27;;$(&#x27;price&#x27;).textContent=usd(D.price);$(&#x27;live&#x27;).textContent=D.price==null?&#x27;● SIN COTIZACIÓN&#x27;:&#x27;● PRECIO RECIBIDO&#x27;;$(&#x27;signal&#x27;).textContent=(D.signal===&#x27;UP&#x27;?&#x27;▲ &#x27;:D.signal===&#x27;DOWN&#x27;?&#x27;▼ &#x27;:&#x27;&#x27;)+D.signal;$(&#x27;signal&#x27;).className=D.signal===&#x27;UP&#x27;?&#x27;green&#x27;:D.signal===&#x27;DOWN&#x27;?&#x27;red&#x27;:&#x27;cyan&#x27;;$(&#x27;model&#x27;).textContent=D.quality||&#x27;Esperando lectura de JC&#x27;;$(&#x27;status&#x27;).textContent=D.rows.length?&#x27;DATOS RECIBIDOS&#x27;:&#x27;SIN VELAS&#x27;;$(&#x27;updated&#x27;).textContent=&#x27;Actualizado &#x27;+D.updated;$(&#x27;viewtf&#x27;).textContent=D.timeframe+&#x27; · VELAS REALES&#x27;;
-const F=D.flow,total=F.buy+F.sell,known=F.ok;
-$(&#x27;watch&#x27;).textContent=!known?&#x27;SIN DATOS DE FLUJO&#x27;:total===0?&#x27;ESPERANDO OPERACIONES&#x27;:F.direction===&#x27;NEUTRAL&#x27;?&#x27;FLUJO EQUILIBRADO&#x27;:&#x27;WATCH &#x27;+F.direction;
-for(const [id,value] of [[&#x27;buy&#x27;,F.buy],[&#x27;sell&#x27;,F.sell],[&#x27;buytotal&#x27;,F.buy],[&#x27;selltotal&#x27;,F.sell]])$(id).textContent=known?compact(value):&#x27;—&#x27;;
-$(&#x27;diff&#x27;).textContent=known?compact(Math.abs(F.buy-F.sell))+&#x27; &#x27;+(F.buy&gt;F.sell?&#x27;BUY&#x27;:F.sell&gt;F.buy?&#x27;SELL&#x27;:&#x27;NEUTRAL&#x27;):&#x27;—&#x27;;$(&#x27;diff&#x27;).className=F.buy&gt;F.sell?&#x27;green&#x27;:&#x27;red&#x27;;$(&#x27;activity&#x27;).textContent=known&amp;&amp;F.activity!=null?fmt(F.activity,1)+&#x27;×&#x27;:&#x27;—&#x27;;$(&#x27;strength&#x27;).textContent=known&amp;&amp;total?F.strength:&#x27;—&#x27;;
-for(const [id,v] of [[&#x27;buys&#x27;,F.buys],[&#x27;sells&#x27;,F.sells],[&#x27;floatbuy&#x27;,F.buys],[&#x27;floatsell&#x27;,F.sells]])$(id).textContent=known?v:&#x27;—&#x27;;
-$(&#x27;countdiff&#x27;).textContent=known?Math.abs(F.buys-F.sells)+&#x27; &#x27;+(F.buys&gt;F.sells?&#x27;BUY&#x27;:F.sells&gt;F.buys?&#x27;SELL&#x27;:&#x27;NEUTRAL&#x27;):&#x27;—&#x27;;$(&#x27;buybar&#x27;).style.width=(total?100*F.buy/total:0)+&#x27;%&#x27;;$(&#x27;sellbar&#x27;).style.width=(total?100*F.sell/total:0)+&#x27;%&#x27;;
-$(&#x27;momrows&#x27;).replaceChildren();
-for(const key of [&#x27;mom3&#x27;,&#x27;mom5&#x27;,&#x27;mom15&#x27;]){const v=D[key],box=document.createElement(&#x27;div&#x27;);box.className=&#x27;metric&#x27;;box.innerHTML=&#x27;&lt;small&gt;&#x27;+key.slice(3)+&#x27; MINUTOS&lt;/small&gt;&lt;b class=&quot;&#x27;+(v&gt;=0?&#x27;green&#x27;:&#x27;red&#x27;)+&#x27;&quot;&gt;&#x27;+(v==null?&#x27;—&#x27;:(v&gt;0?&#x27;+&#x27;:&#x27;&#x27;)+fmt(v,2)+&#x27;%&#x27;)+&#x27;&lt;/b&gt;&#x27;;$(&#x27;momrows&#x27;).append(box)}
-}
-refreshLabels();
-const colors={ema9:&#x27;#f000ff&#x27;,ema21:&#x27;#00eaff&#x27;,vwap:&#x27;#6261ff&#x27;,volume:&#x27;#00d7b0&#x27;,rsi:&#x27;#f000ff&#x27;};
-for(const [key,label] of Object.entries({ema9:&#x27;EMA9&#x27;,ema21:&#x27;EMA21&#x27;,vwap:&#x27;VWAP&#x27;,volume:&#x27;VOLUME&#x27;,rsi:&#x27;RSI&#x27;})){const b=document.createElement(&#x27;button&#x27;);b.style.setProperty(&#x27;--c&#x27;,colors[key]);b.dataset.key=key;b.onclick=()=&gt;{toggles[key]=!toggles[key];persist();draw()};$(&#x27;toggles&#x27;).append(b);b.dataset.label=label}
-let geometry=null;
-function draw(){
-document.querySelectorAll(&#x27;.toggle&#x27;).forEach(x=&gt;x.removeAttribute(&#x27;data-unused&#x27;));
-for(const b of $(&#x27;toggles&#x27;).children){const k=b.dataset.key;b.className=&#x27;toggle&#x27;+(toggles[k]?&#x27;&#x27;:&#x27; off&#x27;);b.setAttribute(&#x27;aria-pressed&#x27;,String(toggles[k]));b.innerHTML=b.dataset.label+&#x27;&lt;span&gt;&#x27;+(toggles[k]?&#x27;ON&#x27;:&#x27;OFF&#x27;)+&#x27;&lt;/span&gt;&#x27;}
-const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(0,Math.min(offset,Math.max(0,n-visible)));const end=n-Math.round(offset),start=Math.max(0,end-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$(&#x27;canvas&#x27;).innerHTML=&#x27;&lt;div class=&quot;empty&quot;&gt;Esperando velas actuales…&lt;/div&gt;&#x27;;return}
-const last=all[n-1];$(&#x27;legend&#x27;).innerHTML=[&#x27;ema9&#x27;,&#x27;ema21&#x27;,&#x27;vwap&#x27;].filter(k=&gt;toggles[k]).map(k=&gt;&#x27;&lt;span&gt;&lt;i style=&quot;color:&#x27;+colors[k]+&#x27;&quot;&gt;●&lt;/i&gt; &#x27;+k.toUpperCase()+&#x27; &#x27;+usd(last[k])+&#x27;&lt;/span&gt;&#x27;).join(&#x27;&#x27;);
-const W=720,H=toggles.rsi?780:615,L=10,R=126,T=28,B=580,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
-let vals=rows.flatMap(r=&gt;[r.low,r.high]);for(const k of [&#x27;ema9&#x27;,&#x27;ema21&#x27;,&#x27;vwap&#x27;])if(toggles[k])vals.push(...rows.map(r=&gt;r[k]).filter(v=&gt;v!=null));for(const v of [D.target,D.support,D.resistance,D.price])if(v!=null)vals.push(v);let lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,5);lo-=pad;hi+=pad;lo+=pricePan;hi+=pricePan;const y=v=&gt;T+(hi-v)/(hi-lo)*(B-T),x=i=&gt;L+(i+.5)*step;
-let s=&#x27;&lt;svg viewBox=&quot;0 0 &#x27;+W+&#x27; &#x27;+H+&#x27;&quot; role=&quot;img&quot; aria-label=&quot;Gráfica BTC con velas, indicadores y RSI&quot;&gt;&lt;defs&gt;&lt;clipPath id=&quot;plot&quot;&gt;&lt;rect x=&quot;0&quot; y=&quot;0&quot; width=&quot;&#x27;+(W-R)+&#x27;&quot; height=&quot;&#x27;+B+&#x27;&quot;/&gt;&lt;/clipPath&gt;&lt;/defs&gt;&#x27;;
-for(let k=0;k&lt;7;k++){const yy=T+(B-T)*k/6;s+=&#x27;&lt;line x1=&quot;0&quot; y1=&quot;&#x27;+yy+&#x27;&quot; x2=&quot;&#x27;+(W-R)+&#x27;&quot; y2=&quot;&#x27;+yy+&#x27;&quot; stroke=&quot;#202039&quot;/&gt;&lt;text x=&quot;&#x27;+(W-R+10)+&#x27;&quot; y=&quot;&#x27;+(yy+5)+&#x27;&quot; fill=&quot;#9ca6c2&quot; font-size=&quot;14&quot;&gt;&#x27;+fmt(hi-(hi-lo)*k/6)+&#x27;&lt;/text&gt;&#x27;}
-for(let k=0;k&lt;=4;k++){const xx=L+plot*k/4;s+=&#x27;&lt;line x1=&quot;&#x27;+xx+&#x27;&quot; y1=&quot;&#x27;+T+&#x27;&quot; x2=&quot;&#x27;+xx+&#x27;&quot; y2=&quot;&#x27;+(toggles.rsi?H-30:B)+&#x27;&quot; stroke=&quot;#191c34&quot;/&gt;&#x27;}
-s+=&#x27;&lt;g clip-path=&quot;url(#plot)&quot;&gt;&#x27;;if(toggles.volume){const max=Math.max(...rows.map(r=&gt;r.volume),1);rows.forEach((r,i)=&gt;{let h=r.volume/max*105;s+=&#x27;&lt;rect x=&quot;&#x27;+(x(i)-body/2)+&#x27;&quot; y=&quot;&#x27;+(B-h)+&#x27;&quot; width=&quot;&#x27;+body+&#x27;&quot; height=&quot;&#x27;+h+&#x27;&quot; fill=&quot;&#x27;+(r.close&gt;=r.open?&#x27;#00dfb5&#x27;:&#x27;#e64b4b&#x27;)+&#x27;&quot; opacity=&quot;.9&quot;/&gt;&#x27;})}
-rows.forEach((r,i)=&gt;{const c=r.close&gt;=r.open?&#x27;#00dfb5&#x27;:&#x27;#e64b4b&#x27;;s+=&#x27;&lt;line x1=&quot;&#x27;+x(i)+&#x27;&quot; x2=&quot;&#x27;+x(i)+&#x27;&quot; y1=&quot;&#x27;+y(r.high)+&#x27;&quot; y2=&quot;&#x27;+y(r.low)+&#x27;&quot; stroke=&quot;&#x27;+c+&#x27;&quot; stroke-width=&quot;2.1&quot;/&gt;&lt;rect x=&quot;&#x27;+(x(i)-body/2)+&#x27;&quot; y=&quot;&#x27;+Math.min(y(r.open),y(r.close))+&#x27;&quot; width=&quot;&#x27;+body+&#x27;&quot; height=&quot;&#x27;+Math.max(1.8,Math.abs(y(r.open)-y(r.close)))+&#x27;&quot; fill=&quot;&#x27;+c+&#x27;&quot;/&gt;&#x27;});
-for(const k of [&#x27;ema9&#x27;,&#x27;ema21&#x27;,&#x27;vwap&#x27;])if(toggles[k]){let points=rows.map((r,i)=&gt;r[k]==null?&#x27;&#x27;:x(i)+&#x27;,&#x27;+y(r[k])).filter(Boolean).join(&#x27; &#x27;);s+=&#x27;&lt;polyline points=&quot;&#x27;+points+&#x27;&quot; fill=&quot;none&quot; stroke=&quot;&#x27;+colors[k]+&#x27;&quot; stroke-width=&quot;3&quot; &#x27;+(k===&#x27;vwap&#x27;?&#x27;stroke-dasharray=&quot;8 6&quot;&#x27;:&#x27;&#x27;)+&#x27;/&gt;&#x27;}
-s+=&#x27;&lt;/g&gt;&#x27;;let levels=[[D.resistance,&#x27;RESISTANCE&#x27;,&#x27;#e64b4b&#x27;],[D.target,&#x27;TARGET&#x27;,&#x27;#00dfb5&#x27;],[D.price,&#x27;BTC&#x27;,&#x27;#00dfb5&#x27;],[D.support,&#x27;SUPPORT&#x27;,&#x27;#00dfb5&#x27;]].filter(r=&gt;r[0]!=null).map(r=&gt;({v:r[0],label:r[1],c:r[2],yy:y(r[0]),labelY:y(r[0])})).filter(l=&gt;l.yy&gt;=T&amp;&amp;l.yy&lt;=B).sort((a,b)=&gt;a.yy-b.yy);
-let previous=-100;for(const l of levels){l.labelY=Math.max(T+12,previous+42,l.yy);previous=l.labelY}let excess=previous-(B-10);if(excess&gt;0)for(const l of levels)l.labelY-=excess;
-for(const l of levels){s+=&#x27;&lt;line x1=&quot;0&quot; y1=&quot;&#x27;+l.yy+&#x27;&quot; x2=&quot;&#x27;+(W-R)+&#x27;&quot; y2=&quot;&#x27;+l.yy+&#x27;&quot; stroke=&quot;&#x27;+l.c+&#x27;&quot; stroke-dasharray=&quot;4 5&quot; opacity=&quot;.8&quot;/&gt;&lt;path d=&quot;M &#x27;+(W-R-6)+&#x27; &#x27;+l.yy+&#x27; L &#x27;+(W-R+5)+&#x27; &#x27;+l.labelY+&#x27;&quot; stroke=&quot;&#x27;+l.c+&#x27;&quot; fill=&quot;none&quot;/&gt;&lt;rect x=&quot;&#x27;+(W-R+4)+&#x27;&quot; y=&quot;&#x27;+(l.labelY-17)+&#x27;&quot; width=&quot;118&quot; height=&quot;36&quot; rx=&quot;4&quot; fill=&quot;&#x27;+l.c+&#x27;&quot;/&gt;&lt;text x=&quot;&#x27;+(W-R+11)+&#x27;&quot; y=&quot;&#x27;+(l.labelY-3)+&#x27;&quot; fill=&quot;#06101b&quot; font-size=&quot;10&quot; font-weight=&quot;850&quot;&gt;&#x27;+l.label+&#x27;&lt;/text&gt;&lt;text x=&quot;&#x27;+(W-R+11)+&#x27;&quot; y=&quot;&#x27;+(l.labelY+12)+&#x27;&quot; fill=&quot;#06101b&quot; font-size=&quot;14&quot; font-weight=&quot;750&quot;&gt;&#x27;+fmt(l.v)+&#x27;&lt;/text&gt;&#x27;}
-if(toggles.rsi){const rt=620,rh=120,ry=v=&gt;rt+(100-v)/100*rh;s+=&#x27;&lt;text x=&quot;14&quot; y=&quot;610&quot; fill=&quot;#aa8dc5&quot; font-size=&quot;12&quot;&gt;RSI 14&lt;/text&gt;&#x27;;for(const v of [30,70])s+=&#x27;&lt;line x1=&quot;0&quot; y1=&quot;&#x27;+ry(v)+&#x27;&quot; x2=&quot;&#x27;+(W-R)+&#x27;&quot; y2=&quot;&#x27;+ry(v)+&#x27;&quot; stroke=&quot;#3c284c&quot; stroke-dasharray=&quot;5 5&quot;/&gt;&#x27;;s+=&#x27;&lt;polyline points=&quot;&#x27;+rows.map((r,i)=&gt;r.rsi==null?&#x27;&#x27;:x(i)+&#x27;,&#x27;+ry(r.rsi)).filter(Boolean).join(&#x27; &#x27;)+&#x27;&quot; fill=&quot;none&quot; stroke=&quot;#f000ff&quot; stroke-width=&quot;3&quot;/&gt;&#x27;;if(last.rsi!=null)s+=&#x27;&lt;rect x=&quot;&#x27;+(W-R+4)+&#x27;&quot; y=&quot;&#x27;+(ry(last.rsi)-12)+&#x27;&quot; width=&quot;65&quot; height=&quot;25&quot; rx=&quot;3&quot; fill=&quot;#f000ff&quot;/&gt;&lt;text x=&quot;&#x27;+(W-R+11)+&#x27;&quot; y=&quot;&#x27;+(ry(last.rsi)+6)+&#x27;&quot; fill=&quot;white&quot; font-size=&quot;15&quot;&gt;&#x27;+fmt(last.rsi)+&#x27;&lt;/text&gt;&#x27;}
-for(let k=0;k&lt;4;k++){const i=Math.round((rows.length-1)*k/3),tm=new Date(rows[i].t*1000).toLocaleString(&#x27;en-US&#x27;,{timeZone:&#x27;America/New_York&#x27;,hour:&#x27;numeric&#x27;,minute:&#x27;2-digit&#x27;,...(D.timeframe===&#x27;1D&#x27;?{month:&#x27;short&#x27;,day:&#x27;numeric&#x27;}:{})});s+=&#x27;&lt;text x=&quot;&#x27;+x(i)+&#x27;&quot; y=&quot;&#x27;+(H-7)+&#x27;&quot; fill=&quot;#95a1bc&quot; font-size=&quot;11&quot; text-anchor=&quot;middle&quot;&gt;&#x27;+tm+&#x27;&lt;/text&gt;&#x27;}
-s+=&#x27;&lt;g id=&quot;crosshair&quot;&gt;&lt;/g&gt;&lt;/svg&gt;&#x27;;$(&#x27;canvas&#x27;).innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end};
-}
-$(&#x27;zoomin&#x27;).onclick=()=&gt;{visible=Math.max(12,Math.round(visible*.75));persist();draw()};$(&#x27;zoomout&#x27;).onclick=()=&gt;{visible=Math.round(visible*1.3);persist();draw()};$(&#x27;older&#x27;).onclick=()=&gt;{offset+=Math.max(5,Math.floor(visible/4));persist();draw()};$(&#x27;newer&#x27;).onclick=()=&gt;{offset-=Math.max(5,Math.floor(visible/4));persist();draw()};$(&#x27;reset&#x27;).onclick=()=&gt;{offset=0;visible=32;pricePan=0;draw();persist()};
-const touchPoints=new Map();let gesture=null;
-function chartPoint(e){const r=$(&#x27;canvas&#x27;).getBoundingClientRect();return {x:(e.clientX-r.left)/r.width*geometry.W,y:(e.clientY-r.top)/r.height*geometry.H}}
-function beginGesture(){
- if(!geometry||!touchPoints.size){gesture=null;return}
- const p=[...touchPoints.values()],g=geometry;
- gesture={points:p.map(v=&gt;({...v})),visible:g.rows.length,offset,pricePan,range:g.hi-g.lo,plot:g.W-g.L-g.R,height:g.B-g.T,end:g.end};
- if(p.length&gt;=2){gesture.distance=Math.max(12,Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y));gesture.center=(p[0].x+p[1].x)/2;gesture.anchor=g.start+Math.max(0,Math.min(1,(gesture.center-g.L)/gesture.plot))*g.rows.length}
-}
-$(&#x27;canvas&#x27;).addEventListener(&#x27;pointerdown&#x27;,e=&gt;{
- if(!geometry||(e.pointerType===&#x27;mouse&#x27;&amp;&amp;e.button!==0))return;
- e.preventDefault();touchPoints.set(e.pointerId,chartPoint(e));try{$(&#x27;canvas&#x27;).setPointerCapture(e.pointerId)}catch(_){}beginGesture();
-});
-$(&#x27;canvas&#x27;).addEventListener(&#x27;pointermove&#x27;,e=&gt;{
- if(!geometry)return;
- if(touchPoints.has(e.pointerId)){
-  e.preventDefault();touchPoints.set(e.pointerId,chartPoint(e));const p=[...touchPoints.values()],a=gesture;if(!a)return;
-  if(p.length&gt;=2&amp;&amp;a.points.length&gt;=2){
-   const distance=Math.max(12,Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y));
-   visible=Math.max(12,Math.min(D.rows.length,Math.round(a.visible*a.distance/distance)));
-   const center=(p[0].x+p[1].x)/2,fraction=Math.max(0,Math.min(1,(center-geometry.L)/a.plot));
-   offset=Math.round(D.rows.length-a.anchor-(1-fraction)*visible);
-  }else if(p.length===1&amp;&amp;a.points.length===1){
-   offset=Math.round(a.offset+(p[0].x-a.points[0].x)/a.plot*a.visible);
-   pricePan=a.pricePan+(p[0].y-a.points[0].y)/a.height*a.range;
-  }
-  draw();persist();return;
- }
- inspectCandle(chartPoint(e).x);
-});
-function endGesture(e){
- if(!touchPoints.has(e.pointerId))return;
- const wasTap=gesture&amp;&amp;gesture.points.length===1&amp;&amp;touchPoints.size===1&amp;&amp;Math.hypot(touchPoints.get(e.pointerId).x-gesture.points[0].x,touchPoints.get(e.pointerId).y-gesture.points[0].y)&lt;5;
- const point=touchPoints.get(e.pointerId);touchPoints.delete(e.pointerId);beginGesture();persist();if(wasTap)inspectCandle(point.x);
-}
-for(const event of [&#x27;pointerup&#x27;,&#x27;pointercancel&#x27;,&#x27;lostpointercapture&#x27;])$(&#x27;canvas&#x27;).addEventListener(event,endGesture);
-$(&#x27;canvas&#x27;).addEventListener(&#x27;dblclick&#x27;,()=&gt;{$(&#x27;reset&#x27;).onclick()});
-$(&#x27;canvas&#x27;).addEventListener(&#x27;wheel&#x27;,e=&gt;{
- if(!geometry)return;e.preventDefault();const p=chartPoint(e),g=geometry,fraction=Math.max(0,Math.min(1,(p.x-g.L)/(g.W-g.L-g.R))),anchor=g.start+fraction*g.rows.length;
- visible=Math.max(12,Math.min(D.rows.length,Math.round(g.rows.length*(e.deltaY&gt;0?1.15:.85))));offset=Math.round(D.rows.length-anchor-(1-fraction)*visible);draw();persist();
-},{passive:false});
-function inspectCandle(px){if(!geometry)return;const g=geometry,i=Math.max(0,Math.min(g.rows.length-1,Math.floor((px-g.L)/(g.W-g.L-g.R)*g.rows.length))),r=g.rows[i],time=new Date(r.t*1000).toLocaleString(&#x27;en-US&#x27;,{timeZone:&#x27;America/New_York&#x27;});$(&#x27;tooltip&#x27;).textContent=time+&#x27; · O &#x27;+fmt(r.open)+&#x27;  H &#x27;+fmt(r.high)+&#x27;  L &#x27;+fmt(r.low)+&#x27;  C &#x27;+fmt(r.close)+&#x27; · Vol &#x27;+fmt(r.volume,3);$(&#x27;crosshair&#x27;).innerHTML=&#x27;&lt;line x1=&quot;&#x27;+g.x(i)+&#x27;&quot; x2=&quot;&#x27;+g.x(i)+&#x27;&quot; y1=&quot;&#x27;+g.T+&#x27;&quot; y2=&quot;&#x27;+g.B+&#x27;&quot; stroke=&quot;#b8a5e0&quot; stroke-dasharray=&quot;4 4&quot;/&gt;&#x27;}
-
-window.addEventListener(&#x27;message&#x27;,event=&gt;{
- if(event.source!==window.parent||event.data?.kind!==&#x27;alpha-chart-update&#x27;)return;
- const next=event.data.payload;if(!next||!Array.isArray(next.rows))return;
- if(offset&gt;0&amp;&amp;D.rows.length){const oldLast=D.rows[D.rows.length-1].t;offset+=next.rows.filter(r=&gt;r.t&gt;oldLast).length}
- D=next;refreshLabels();draw();reportHeight();
-});
-function reportHeight(){window.parent.postMessage({kind:&#x27;jc-chart-height&#x27;,height:Math.ceil(document.body.getBoundingClientRect().height)+16},&#x27;*&#x27;)}
-new ResizeObserver(reportHeight).observe(document.body);
-window.addEventListener(&#x27;resize&#x27;,()=&gt;{draw();reportHeight()});
-setInterval(()=&gt;{refreshFreshness();},1000);
-function refreshFreshness(){
- const quoteFresh=D.observed_at&amp;&amp;Date.now()-Date.parse(D.observed_at)&lt;=30000;
- $(&#x27;live&#x27;).textContent=quoteFresh?&#x27;● PRECIO RECIBIDO&#x27;:&#x27;● SIN PRECIO ACTUAL&#x27;;
- const candleFresh=D.candle_at&amp;&amp;Date.now()/1000-D.candle_at&lt;=120;
- $(&#x27;status&#x27;).textContent=!D.rows.length?&#x27;SIN VELAS&#x27;:candleFresh?&#x27;DATOS RECIBIDOS&#x27;:&#x27;VELAS ATRASADAS&#x27;;
- if(!D.signal_at||Date.now()-Date.parse(D.signal_at)&gt;15000){$(&#x27;signal&#x27;).textContent=&#x27;ESPERANDO&#x27;;$(&#x27;signal&#x27;).className=&#x27;cyan&#x27;}
- if(!D.observed_at||Date.now()-Date.parse(D.observed_at)&gt;30000){$(&#x27;price&#x27;).textContent=&#x27;—&#x27;}
- if(!D.flow_at||Date.now()-Date.parse(D.flow_at)&gt;15000){for(const id of [&#x27;buy&#x27;,&#x27;sell&#x27;,&#x27;buytotal&#x27;,&#x27;selltotal&#x27;,&#x27;buys&#x27;,&#x27;sells&#x27;,&#x27;floatbuy&#x27;,&#x27;floatsell&#x27;,&#x27;diff&#x27;,&#x27;countdiff&#x27;,&#x27;strength&#x27;,&#x27;activity&#x27;])$(id).textContent=&#x27;—&#x27;;$(&#x27;watch&#x27;).textContent=&#x27;SIN DATOS DE FLUJO&#x27;;}
-}
-draw();refreshFreshness();reportHeight();
-window.parent.postMessage({kind:&#x27;jc-chart-ready&#x27;},&#x27;*&#x27;);
-&lt;/script&gt;&lt;/html&gt;"></iframe>
 </section>
 <section id="operacion" class="page hidden">
 <article class="panel" style="margin-bottom:12px">
@@ -1783,7 +1497,7 @@ function updateProfitRing(s,net,marked,fresh){
  orbit.setAttribute('aria-valuenow',String(Math.round(progress||0)));
  $('#profitOrbitValue').style.strokeDashoffset=String(100-(progress||0));
 }
-function update(s){current=s;sendChartPanel(s);const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
+function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent='SIMULACIÓN · '+s.message;
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
@@ -1796,16 +1510,6 @@ $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$(
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(fresh?'DATOS PÚBLICOS CONECTADOS':'ESPERANDO DATOS PÚBLICOS')+' · '+(s.connection?.message||'Simulación local activa; no requiere API privada.');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#profitOrbit').style.opacity='0';$('#profitOrbit').setAttribute('aria-hidden','true');$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
 window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
-const chartPanel=document.getElementById('jcChartPanel');
-function sendChartPanel(s){if(chartPanel?.contentWindow&&s?.chart_panel)chartPanel.contentWindow.postMessage({kind:'alpha-chart-update',payload:s.chart_panel},'*')}
-window.addEventListener('message',e=>{
- if(e.source!==chartPanel?.contentWindow)return;
- if(e.data?.kind==='jc-chart-ready')sendChartPanel(current);
- if(e.data?.kind==='jc-chart-height'&&Number.isFinite(e.data.height)){
-  const next=Math.max(400,Math.min(7000,e.data.height));
-  if(Math.abs(parseFloat(chartPanel.style.height)-next)>2){chartPanel.style.height=next+'px';height()}
- }
-});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
