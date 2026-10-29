@@ -1027,12 +1027,14 @@ class KalshiAPIError(ValueError):
 
 
 class KalshiAccount:
-    BASES={'demo':'https://external-api.demo.kalshi.co/trade-api/v2',
-           'live':'https://external-api.kalshi.com/trade-api/v2'}
+    BASES={'live':'https://external-api.kalshi.com/trade-api/v2'}
     def __init__(self,environment,key_id,pem,transport=None):
-        from cryptography.hazmat.primitives import serialization
-        from cryptography.hazmat.primitives.asymmetric import rsa,ed25519
-        if environment not in self.BASES:raise ValueError('Selecciona Demo o cuenta real.')
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa,ed25519
+        except ImportError:
+            raise ValueError('Falta la dependencia cryptography en el servidor. Añade cryptography>=43,<47 a requirements.txt y vuelve a desplegar la app.') from None
+        if environment not in self.BASES:raise ValueError('Selecciona REAL para conectar tu cuenta de Kalshi.')
         if not isinstance(key_id,str) or not key_id.strip() or len(key_id)>200:raise ValueError('API Key ID inválido.')
         if not isinstance(pem,str) or not pem.strip() or len(pem)>16000:raise ValueError('Clave PEM inválida.')
         try:self._key=serialization.load_pem_private_key(pem.strip().encode(),password=None)
@@ -1250,24 +1252,28 @@ class ConnectedBot(Bot):
     def view(self):
         result=super().view()
         if self.pending_orders():result['message']='Orden de Kalshi pendiente de confirmar; no se enviará otra hasta resolverla.'
-        result.update(mode='KALSHI REAL' if self.account.environment=='live' else 'KALSHI DEMO',
+        result.update(mode='REAL',
                       execution_mode=self.account.environment,pending_orders=len(self.pending_orders()),
                       account_balance=self.account_cash,account_balance_age=max(0,time.monotonic()-self.balance_at))
         return result
 
 
 def _connect_kalshi(controller,payload):
+    controller.connection_stage='validar el modo y el estado del bot'
     if controller.bot.running or controller.bot.positions():
         raise ValueError('Pausa las entradas y espera a no tener posiciones antes de cambiar de modo.')
     if isinstance(controller.bot,ConnectedBot) and controller.bot.pending_orders():raise ValueError('Hay órdenes pendientes; primero sincroniza.')
     env=payload.get('environment')
     if env=='live' and payload.get('accept_real') is not True:raise ValueError('Marca la casilla de cuenta real para conectar ese entorno.')
+    controller.connection_stage='cargar las dependencias y la clave privada'
     client=KalshiAccount(env,payload.get('key_id'),payload.get('pem'))
+    controller.connection_stage='firmar la solicitud y consultar el saldo en Kalshi'
     cash=client.balance() # Read only: connecting never submits an order.
     if isinstance(controller.bot,ConnectedBot) and controller.bot.account.identity!=client.identity:
         raise ValueError('Vuelve a simulación antes de conectar otra cuenta o entorno.')
     root=getattr(controller,'simulation_bot',controller.bot)
     controller.simulation_bot=root
+    controller.connection_stage='preparar el historial de la cuenta'
     with root.lock:
         registry=getattr(root,'connected_accounts',None)
         if registry is None:registry={};root.connected_accounts=registry
@@ -1285,15 +1291,26 @@ def _connect_kalshi(controller,payload):
                     fcntl.flock(process_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
             except OSError:
                 process_lock.close();raise ValueError('Otra instancia ya administra esta cuenta.') from None
-            linked=ConnectedBot(path,client);linked._process_lock=process_lock
-            # New account ledger inherits allocation/settings but never paper trades.
-            if not linked.kv('account_configured'):
-                linked.settings=dict(root.settings);linked.put('settings',linked.settings);linked.put('account_configured',True);linked.db.commit()
-            registry[client.identity]=linked;linked.start_worker()
+            linked=None
+            try:
+                linked=ConnectedBot(path,client);linked._process_lock=process_lock
+                # New account ledger inherits allocation/settings but never paper trades.
+                if not linked.kv('account_configured'):
+                    linked.settings=dict(root.settings);linked.put('settings',linked.settings);linked.put('account_configured',True);linked.db.commit()
+                controller.connection_stage='iniciar la vigilancia de la cuenta'
+                linked.start_worker()
+                registry[client.identity]=linked
+            except Exception:
+                if linked is not None:
+                    linked.stop_event.set()
+                    if linked.thread is not None:linked.thread.join(timeout=10)
+                    if linked.thread is None or not linked.thread.is_alive():linked.db.close()
+                process_lock.close()
+                raise
         elif linked.running:raise ValueError('Esta cuenta ya está operando. Paúsala antes de reconectar.')
         else:linked.account=client;linked.feed.account=client
         controller.bot=linked
-    return {'message':('Cuenta REAL' if env=='live' else 'Kalshi Demo')+f' conectada · saldo ${cash:.2f}. Entradas pausadas; pulsa INICIAR cuando quieras operar.',
+    return {'message':'Cuenta REAL'+f' conectada · saldo ${cash:.2f}. Entradas pausadas; pulsa INICIAR cuando quieras operar.',
             'verified_at':stamp(),'environment':env,'balance':cash}
 
 
@@ -1309,7 +1326,7 @@ def _return_to_simulation(controller):
         registry=getattr(root,'connected_accounts',{});registry.pop(current.account.identity,None)
         current.account._key=None;current.db.close();current._process_lock.close()
     controller.bot=root
-    return {'message':'Simulación local seleccionada. Credenciales retiradas de memoria.'}
+    return {'message':'Modo NO REAL seleccionado. Credenciales retiradas de memoria.'}
 
 
 _TERMINAL_HTML = r"""
@@ -1466,7 +1483,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <small>OBJETIVO ACUMULADO</small>
 </div>
 <footer>
-<span class="gold" id="executionFooter">ENTORNO DE SIMULACIÓN</span>
+<span class="gold" id="executionFooter">ENTORNO NO REAL</span>
 <br>BTC · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
 <span class="green"><span id="feedStatus">● Esperando datos</span></span>
 </footer>
@@ -1487,7 +1504,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <div>
 <small>MODO</small>
-<strong class="green" id="executionModeLabel">● SIMULACIÓN</strong>
+<strong class="green" id="executionModeLabel">● NO REAL</strong>
 </div>
 </header>
 <div class="demo"><span id="liveMessage">Conectando el motor con Kalshi y Coinbase…</span></div>
@@ -1572,7 +1589,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 <div class="controls">
-<button class="primary" id="start">▶ INICIAR SIMULACIÓN</button>
+<button class="primary" id="start">▶ INICIAR NO REAL</button>
 <button id="pause">Ⅱ PAUSAR</button>
 <button class="danger" id="close">□ CERRAR TODO</button>
 </div>
@@ -1736,10 +1753,10 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Conexión Kalshi</h2>
 <div class="body">
-<p class="muted">Elige simulación, Kalshi Demo o tu cuenta real. Conectar verifica la cuenta y deja las entradas pausadas. INICIAR activa las compras y las salidas del bot en el modo elegido.</p>
+<p class="muted">NO REAL usa dinero ficticio dentro del bot. REAL usa tu cuenta de Kalshi. Conectar verifica la cuenta y deja las entradas pausadas; INICIAR activa las operaciones.</p>
 <div class="field">
-<label>Entorno</label>
-<select id="connectionMode"><option value="public">Simulación local</option><option value="demo">Kalshi Demo · operar</option><option value="live">Kalshi real · dinero real</option></select>
+<label>Modo</label>
+<select id="connectionMode"><option value="public">NO REAL</option><option value="live">REAL</option></select>
 </div>
 <div class="field">
 <label>API Key ID</label>
@@ -1749,9 +1766,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Clave privada</label>
 <textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM del entorno elegido" spellcheck="false" autocomplete="off"></textarea>
 </div>
-<div class="field"><label for="acceptReal">Usar mi cuenta real y permitir órdenes cuando pulse INICIAR</label><input id="acceptReal" type="checkbox"></div>
-<p class="muted">Las claves permanecen en memoria mientras la cuenta está conectada; un reinicio exige reconectar para vigilar salidas. El capital configurado limita la asignación del bot y no mueve dinero entre cuentas. Demo y real conservan un historial separado de la simulación.</p>
-<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testPublic">VERIFICAR DATOS</button><button id="testApi" class="primary">CONECTAR CUENTA</button><button id="syncAccount">SINCRONIZAR</button><button id="forgetApi">VOLVER A SIMULACIÓN</button></div><div class="notice"><span id="connectionNotice">Consultando conexión pública…</span></div>
+<p class="muted">En REAL, las claves permanecen en memoria; si el servidor se reinicia, hay que reconectar para vigilar salidas. REAL y NO REAL conservan sus historiales separados.</p>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testPublic">VERIFICAR DATOS</button><button id="testApi" class="primary">CONECTAR CUENTA</button><button id="syncAccount">SINCRONIZAR</button><button id="forgetApi">USAR NO REAL</button></div><div class="notice"><span id="connectionNotice">Consultando conexión pública…</span></div>
 </div>
 </article>
 </section>
@@ -1776,9 +1792,9 @@ $('#start').onclick=()=>{if(current?.execution_mode==='live'&&!confirm('¿Inicia
 const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
 form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
 $('#testPublic').onclick=()=>action('public');
-$('#testApi').onclick=()=>{const environment=$('#connectionMode').value;if(!['demo','live'].includes(environment)){toast('Selecciona Kalshi Demo o cuenta real.');return}if(environment==='live'&&!$('#acceptReal').checked){toast('Marca la casilla para conectar tu cuenta real.');return}action('verify_demo',{environment,accept_real:$('#acceptReal').checked,key_id:$('#apiKey').value.trim(),pem:$('#privateKey').value});$('#privateKey').value=''};
+$('#testApi').onclick=()=>{const environment=$('#connectionMode').value;if(environment==='public'){action('forget_demo');return}const key_id=$('#apiKey').value.trim(),pem=$('#privateKey').value;if(!key_id||!pem.trim()){toast('Para REAL completa el API Key ID y la clave privada PEM.');return}action('verify_demo',{environment:'live',accept_real:true,key_id,pem});$('#privateKey').value=''};
 $('#syncAccount').onclick=()=>action('sync_account');
-$('#forgetApi').onclick=()=>{action('forget_demo');$('#privateKey').value='';$('#apiKey').value='';$('#acceptReal').checked=false};$('#exportCSV').onclick=()=>action('export');
+$('#forgetApi').onclick=()=>{action('forget_demo');$('#privateKey').value='';$('#apiKey').value=''};$('#exportCSV').onclick=()=>action('export');
 function profitRingProgress(positions,net,marked,fresh,fee){
  if(!fresh||!marked||!positions.length||!Number.isFinite(net))return null;
  let target=0;
@@ -1799,7 +1815,7 @@ function updateProfitRing(s,net,marked,fresh){
  $('#profitOrbitValue').style.strokeDashoffset=String(100-(progress||0));
 }
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent=linked?'▶ INICIAR '+s.mode:'▶ INICIAR SIMULACIÓN';$('#executionModeLabel').textContent='● '+(s.mode||'SIMULACIÓN');$('#executionFooter').textContent=s.mode||'ENTORNO DE SIMULACIÓN';$('#accountTypeLabel').textContent=linked?'Cuenta de Kalshi conectada':'Cuenta de prueba individual';$('#positionNote').dataset.connected=String(linked);
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent=linked?'▶ INICIAR REAL':'▶ INICIAR NO REAL';$('#executionModeLabel').textContent='● '+(s.mode||'SIMULACIÓN');$('#executionFooter').textContent=s.mode||'ENTORNO DE SIMULACIÓN';$('#accountTypeLabel').textContent=linked?'Cuenta de Kalshi conectada':'Cuenta de prueba individual';$('#positionNote').dataset.connected=String(linked);
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
@@ -1810,45 +1826,11 @@ $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(fresh?'DATOS PÚBLICOS CONECTADOS':'ESPERANDO DATOS PÚBLICOS')+' · '+(s.connection?.message||'Simulación local activa; no requiere API privada.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:'');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#profitOrbit').style.opacity='0';$('#profitOrbit').setAttribute('aria-hidden','true');$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='forget_demo')$('#connectionMode').value='public';if(reply&&reply.ok&&reply.kind==='verify_demo')$('#connectionMode').value='live';if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
 """
-
-def verify_demo_credentials(payload, getter=None):
-    import base64
-    from cryptography.hazmat.primitives import serialization, hashes
-    from cryptography.hazmat.primitives.asymmetric import padding, rsa, ed25519
-    key_id=payload.get('key_id','')
-    pem=payload.get('pem','')
-    if not isinstance(key_id,str) or not isinstance(pem,str) or not key_id.strip() or len(key_id)>200 or len(pem)>16000:
-        raise ValueError('Introduce el API Key ID y la clave privada PEM de Kalshi Demo.')
-    try:
-        key=serialization.load_pem_private_key(pem.strip().encode(),password=None)
-    except Exception:
-        raise ValueError('La clave privada no es un PEM válido sin contraseña.') from None
-    timestamp=str(int(time.time()*1000));path='/trade-api/v2/portfolio/balance'
-    message=(timestamp+'GET'+path).encode()
-    if isinstance(key,ed25519.Ed25519PrivateKey):
-        signature=key.sign(message)
-    elif isinstance(key,rsa.RSAPrivateKey):
-        signature=key.sign(message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=padding.PSS.DIGEST_LENGTH),hashes.SHA256())
-    else:
-        raise ValueError('Kalshi requiere una clave RSA o Ed25519 compatible.')
-    headers={'KALSHI-ACCESS-KEY':key_id.strip(),'KALSHI-ACCESS-TIMESTAMP':timestamp,
-             'KALSHI-ACCESS-SIGNATURE':base64.b64encode(signature).decode()}
-    try:
-        result=(getter or requests.get)('https://external-api.demo.kalshi.co'+path,headers=headers,timeout=8).json()
-        balance=float(result['balance'])/100
-        if not math.isfinite(balance):
-            raise ValueError('Saldo inválido.')
-    except Exception as e:
-        code=getattr(e,'code',None)
-        if code in (401,403):
-            raise ValueError('Kalshi rechazó estas credenciales. Usa claves del entorno Demo, no de la cuenta real.') from None
-        raise ValueError('No se pudo verificar el saldo de Kalshi Demo. Comprueba la conexión y las credenciales.') from None
-    return {'message':f'API DEMO VERIFICADA · saldo de prueba ${balance:.2f}. Ejecución local simulada.', 'balance':balance,'verified_at':stamp()}
 
 class Controller:
     def __init__(self,bot):
@@ -1902,8 +1884,22 @@ class Controller:
                 raise ValueError('Acción desconocida.')
         except ValueError as e:
             reply.update(ok=False,message=str(e))
-        except Exception:
-            reply.update(ok=False,message='No se pudo completar la operación. No se confirmó el cambio.')
+        except Exception as exc:
+            if action=='verify_demo':
+                stage=getattr(self,'connection_stage','preparar la conexión')
+                if isinstance(exc,ImportError):
+                    message='Falta cryptography en el servidor. Añade cryptography>=43,<47 a requirements.txt y vuelve a desplegar.'
+                elif isinstance(exc,(OSError,sqlite3.Error)):
+                    message=f'No se pudo preparar el historial de Kalshi ({type(exc).__name__}). Comprueba que ALPHA_DB apunte a una carpeta escribible.'
+                else:
+                    # Report type/stage only: raw exceptions may contain credentials.
+                    message=f'No se pudo conectar al {stage} ({type(exc).__name__}). No se activaron compras.'
+                reply.update(ok=False,message=message)
+            else:
+                reply.update(ok=False,message='No se pudo completar la operación. No se confirmó el cambio.')
+        if action=='verify_demo':
+            self.connection={**self.connection,'message':reply['message'],
+                             'state':'connected' if reply['ok'] else 'error','checked_at':stamp()}
         self.seen[event_id]=reply
         if len(self.seen)>500:self.seen.pop(next(iter(self.seen)))
         return reply
@@ -1912,6 +1908,7 @@ class Controller:
         with self.bot.lock:
             result['has_trades']=bool(self.bot.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone())
         result['connection']=self.connection.copy()
+        if not isinstance(self.bot,ConnectedBot):result['mode']='NO REAL'
         return result
 
 
