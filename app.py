@@ -1023,7 +1023,7 @@ class Bot:
 class KalshiAPIError(ValueError):
     def __init__(self, code):
         self.code=code
-        super().__init__(f'Kalshi respondió HTTP {code}. Revisa permisos, entorno y disponibilidad de la API.')
+        super().__init__('Kalshi limita las consultas (HTTP 429). Se esperará antes de reintentar; no necesitas generar otra clave por este error.' if code==429 else f'Kalshi respondió HTTP {code}. Revisa permisos, entorno y disponibilidad de la API.')
 
 
 class KalshiAccount:
@@ -1041,8 +1041,19 @@ class KalshiAccount:
         except Exception:raise ValueError('La clave privada no es un PEM válido sin contraseña.') from None
         if not isinstance(self._key,(rsa.RSAPrivateKey,ed25519.Ed25519PrivateKey)):raise ValueError('La API requiere RSA o Ed25519.')
         self.environment=environment;self._key_id=key_id.strip();self._transport=transport
+        self._balance_lock=threading.RLock();self._request_lock=threading.RLock()
+        self._balance_value=None;self._balance_time=0;self.retry_at=0
         self.identity=hashlib.sha256((environment+':'+self._key_id).encode()).hexdigest()[:24]
     def request(self,method,path,params=None,body=None):
+        with self._request_lock:
+            if time.monotonic()<self.retry_at:
+                raise ValueError(f'Kalshi limita las consultas (HTTP 429). Espera {math.ceil(self.retry_at-time.monotonic())} segundos antes de reintentar.')
+            try:
+                return self._request_once(method,path,params,body)
+            except KalshiAPIError as exc:
+                if exc.code==429:self.retry_at=time.monotonic()+max(30,getattr(exc,'retry_after',30))
+                raise
+    def _request_once(self,method,path,params=None,body=None):
         import base64
         from urllib.error import HTTPError
         from cryptography.hazmat.primitives import hashes
@@ -1062,7 +1073,11 @@ class KalshiAccount:
         try:
             with urlopen(Request(url,headers=headers,data=data,method=method),timeout=8) as response:
                 result=json.load(response)
-        except HTTPError as exc:raise KalshiAPIError(exc.code) from None
+        except HTTPError as exc:
+            error=KalshiAPIError(exc.code)
+            try:error.retry_after=float(exc.headers.get('Retry-After',30))
+            except (ValueError,TypeError,AttributeError):error.retry_after=30
+            raise error from None
         except Exception:raise ValueError('Sin respuesta verificable de Kalshi; se comprobará la orden antes de continuar.') from None
         if not isinstance(result,dict):raise ValueError('Respuesta de API inválida.')
         return result
@@ -1076,9 +1091,13 @@ class KalshiAccount:
             params['cursor']=cursor
         raise ValueError('Consulta demasiado extensa; no se supone un resultado incompleto.')
     def balance(self):
-        value=_plan_number(self.request('GET','/portfolio/balance').get('balance'))
-        if value is None or value<0:raise ValueError('Saldo de Kalshi no verificable.')
-        return value/100
+        with self._balance_lock:
+            if self._balance_value is not None and time.monotonic()-self._balance_time<5:
+                return self._balance_value
+            value=_plan_number(self.request('GET','/portfolio/balance').get('balance'))
+            if value is None or value<0:raise ValueError('Saldo de Kalshi no verificable.')
+            self._balance_value=value/100;self._balance_time=time.monotonic()
+            return self._balance_value
     def order(self,intent):
         if intent['order_id']:
             return self.request('GET','/portfolio/orders/'+quote(intent['order_id'],safe=''))['order']
@@ -1117,7 +1136,7 @@ class ConnectedBot(Bot):
     def command(self,name):
         if name=='start':
             self.reconcile_orders()
-            if self.pending_orders():raise ValueError('Hay una orden sin confirmar. Usa SINCRONIZAR antes de iniciar.')
+            if self.pending_orders():raise ValueError('Hay una orden sin confirmar. El bot la comprobará automáticamente antes de iniciar.')
             self.account_cash=self.account.balance();self.balance_at=time.monotonic()
             if self.account_cash<=0:raise ValueError('La cuenta seleccionada no tiene saldo disponible.')
         super().command(name)
@@ -1259,16 +1278,22 @@ class ConnectedBot(Bot):
 
 
 def _connect_kalshi(controller,payload):
+    if time.monotonic()<getattr(controller,'connect_retry_at',0):
+        raise ValueError(f'Espera {math.ceil(controller.connect_retry_at-time.monotonic())} segundos antes de volver a conectar (HTTP 429).')
     controller.connection_stage='validar el modo y el estado del bot'
     if controller.bot.running or controller.bot.positions():
         raise ValueError('Pausa las entradas y espera a no tener posiciones antes de cambiar de modo.')
-    if isinstance(controller.bot,ConnectedBot) and controller.bot.pending_orders():raise ValueError('Hay órdenes pendientes; primero sincroniza.')
+    if isinstance(controller.bot,ConnectedBot) and controller.bot.pending_orders():raise ValueError('Hay órdenes pendientes; espera a la comprobación automática.')
     env=payload.get('environment')
     if env=='live' and payload.get('accept_real') is not True:raise ValueError('Marca la casilla de cuenta real para conectar ese entorno.')
     controller.connection_stage='cargar las dependencias y la clave privada'
     client=KalshiAccount(env,payload.get('key_id'),payload.get('pem'))
     controller.connection_stage='firmar la solicitud y consultar el saldo en Kalshi'
-    cash=client.balance() # Read only: connecting never submits an order.
+    try:
+        cash=client.balance() # Read only: connecting never submits an order.
+    except KalshiAPIError as exc:
+        if exc.code==429:controller.connect_retry_at=client.retry_at
+        raise
     if isinstance(controller.bot,ConnectedBot) and controller.bot.account.identity!=client.identity:
         raise ValueError('Vuelve a simulación antes de conectar otra cuenta o entorno.')
     root=getattr(controller,'simulation_bot',controller.bot)
@@ -1767,7 +1792,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM del entorno elegido" spellcheck="false" autocomplete="off"></textarea>
 </div>
 <p class="muted">En REAL, las claves permanecen en memoria; si el servidor se reinicia, hay que reconectar para vigilar salidas. REAL y NO REAL conservan sus historiales separados.</p>
-<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testPublic">VERIFICAR DATOS</button><button id="testApi" class="primary">CONECTAR CUENTA</button><button id="syncAccount">SINCRONIZAR</button><button id="forgetApi">USAR NO REAL</button></div><div class="notice"><span id="connectionNotice">Consultando conexión pública…</span></div>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testApi" class="primary">CONECTAR</button></div><div class="notice"><span id="connectionNotice">Cuenta sin conectar.</span></div>
 </div>
 </article>
 </section>
@@ -1785,16 +1810,14 @@ let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=n
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
 let lastHeight=0;function height(){let h=Math.max(650,document.documentElement.scrollHeight);if(h!==lastHeight){lastHeight=h;post('streamlit:setFrameHeight',{height:h})}}
 function toast(msg){$('#toast').textContent=msg;$('#toast').classList.remove('hidden');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),4500)}
-function busy(on){for(const s of ['#start','#pause','#close','#testPublic','#testApi','#syncAccount','#forgetApi','#exportCSV','#settings button[type=submit]'])$(s).disabled=on}
+function busy(on){for(const s of ['#start','#pause','#close','#testApi','#exportCSV','#settings button[type=submit]'])$(s).disabled=on}
 function action(action,payload={}){if(pending){toast('Esperando confirmación del servidor.');return}let id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);pending=id;busy(true);post('streamlit:setComponentValue',{value:{id,action,payload},dataType:'json'});setTimeout(()=>{if(pending===id){pending=null;busy(false);toast('Sin confirmación del servidor. Revisa Registro antes de repetir.')}},25000)}
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>{if(current?.execution_mode==='live'&&!confirm('¿Iniciar el bot en tu cuenta REAL de Kalshi con los ajustes actuales?'))return;action('command',{command:'start'})};$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y cerrar las posiciones del bot en el modo actual?'))action('command',{command:'close'})};
 const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
 form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
-$('#testPublic').onclick=()=>action('public');
-$('#testApi').onclick=()=>{const environment=$('#connectionMode').value;if(environment==='public'){action('forget_demo');return}const key_id=$('#apiKey').value.trim(),pem=$('#privateKey').value;if(!key_id||!pem.trim()){toast('Para REAL completa el API Key ID y la clave privada PEM.');return}action('verify_demo',{environment:'live',accept_real:true,key_id,pem});$('#privateKey').value=''};
-$('#syncAccount').onclick=()=>action('sync_account');
-$('#forgetApi').onclick=()=>{action('forget_demo');$('#privateKey').value='';$('#apiKey').value=''};$('#exportCSV').onclick=()=>action('export');
+$('#testApi').onclick=()=>{const environment=$('#connectionMode').value;if(environment==='public'){action('forget_demo');return}const key_id=$('#apiKey').value.trim(),pem=$('#privateKey').value;if(!key_id||!pem.trim()){toast('Para REAL completa el API Key ID y la clave privada PEM.');return}action('verify_demo',{environment:'live',accept_real:true,key_id,pem})};
+$('#exportCSV').onclick=()=>action('export');
 function profitRingProgress(positions,net,marked,fresh,fee){
  if(!fresh||!marked||!positions.length||!Number.isFinite(net))return null;
  let target=0;
@@ -1824,9 +1847,9 @@ if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.el
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
-endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(fresh?'DATOS PÚBLICOS CONECTADOS':'ESPERANDO DATOS PÚBLICOS')+' · '+(s.connection?.message||'Simulación local activa; no requiere API privada.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:'');height();tick()}
+endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:'');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#profitOrbit').style.opacity='0';$('#profitOrbit').setAttribute('aria-hidden','true');$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='forget_demo')$('#connectionMode').value='public';if(reply&&reply.ok&&reply.kind==='verify_demo')$('#connectionMode').value='live';if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='forget_demo')$('#connectionMode').value='public';if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#connectionMode').value='live';$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
