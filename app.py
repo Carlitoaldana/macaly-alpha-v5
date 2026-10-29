@@ -927,6 +927,9 @@ class Bot:
     def _execute_entry(self, *args, **kwargs):
         raise ValueError("Conecta la cuenta REAL de Kalshi antes de operar.")
 
+    def _prepare_entry(self, market):
+        pass
+
     def step(self):
         self.settle()
         with self.lock:
@@ -945,6 +948,7 @@ class Bot:
                 with self.lock:
                     self.event('ERROR DE SALIDA', f"#{p['id']} {p['side']} · {type(exc).__name__}: {exc}")
         market=self.feed.current()
+        self._prepare_entry(market)
         sig=self.feed.signal(market)
         signal_at=time.monotonic()
         book=self.feed.book(market['ticker'])
@@ -1232,30 +1236,48 @@ class ConnectedBot(Bot):
                     self.db.commit()
                 except Exception:
                     self.db.rollback();raise
+    def _prepare_entry(self,market):
+        # Prepare account checks before reading/confirming a new signal.
+        # Reuse only fee metadata; account/position checks are refreshed each cycle.
+        self._entry_ready=None
+        if not self.running or self.close_requested or self.positions() or self.pending_orders():return
+        now=time.monotonic()
+        cache=getattr(self,'_entry_fee_cache',None)
+        if cache is None or cache['event']!=market['event_ticker'] or now-cache['at']>60:
+            series=self.feed.get('/series/KXBTC15M')['series']
+            event=self.feed.get('/events/'+quote(market['event_ticker'],safe=''))['event']
+            fee_type=event.get('fee_type_override') or series.get('fee_type')
+            mult=event.get('fee_multiplier_override')
+            mult=_plan_number(series.get('fee_multiplier') if mult is None else mult)
+            if fee_type not in ('quadratic','quadratic_with_maker_fees') or mult is None or mult<0:
+                raise ValueError('Comisión de este mercado no verificable; no se envía la compra.')
+            cache={'event':market['event_ticker'],'at':time.monotonic(),'mult':mult}
+            self._entry_fee_cache=cache
+        self._position_check(market['ticker'],0)
+        self.account_cash=self.account.balance();self.balance_at=time.monotonic()
+        self._entry_ready={'ticker':market['ticker'],'at':time.monotonic(),'mult':cache['mult']}
+
     def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
         if self.pending_orders():return 'Esperando confirmación de Kalshi; no se repite la compra.'
-        self.account_cash=self.account.balance();self.balance_at=time.monotonic()
+        ready=getattr(self,'_entry_ready',None)
+        if not ready or ready['ticker']!=market['ticker'] or time.monotonic()-ready['at']>5:
+            return 'Comprobación de cuenta vencida; se actualiza antes de la siguiente señal.'
         budget=min(self.totals()['cash'],self.account_cash)*self.settings['risk_pct']/100
-        series=self.feed.get('/series/KXBTC15M')['series']
-        event=self.feed.get('/events/'+quote(market['event_ticker'],safe=''))['event']
-        fee_type=event.get('fee_type_override') or series.get('fee_type')
-        mult=event.get('fee_multiplier_override')
-        mult=_plan_number(series.get('fee_multiplier') if mult is None else mult)
-        if fee_type not in ('quadratic','quadratic_with_maker_fees') or mult is None or mult<0:
-            return 'Comisión de este mercado no verificable; no se envía la compra.'
         limit=int(self.settings['max_entry_cents'])
-        # Conservative fee reserve in addition to the maximum contract price.
-        reserve=.07*mult+.01
+        reserve=.07*ready['mult']+.01
         qty=min(quantity,int(max(0,budget-.01)/(limit/100+reserve)))
-        if qty<1:return 'El porcentaje asignado no alcanza para un contrato y sus comisiones.'
-        self._position_check(market['ticker'],0)
-        fresh=self.feed.book(market['ticker'])
-        if engine.get_seconds_remaining(market)<=0 or time.monotonic()-fresh['at']>5:return 'Ronda o libro vencido.'
-        available=sum(max(0,int(size)) for price,size in fresh[side]['asks'] if price<=limit)
+        if qty<1:return 'El importe asignado no alcanza para un contrato y sus comisiones.'
+        # The cycle has just fetched this order book. Do not fetch it again
+        # after confirmation; submit a price-capped IOC against current depth.
+        remaining=engine.get_seconds_remaining(market)
+        if remaining is None or remaining<=0 or book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
+            return 'Ronda o libro vencido.'
+        available=sum(max(0,int(size)) for price,size in book[side]['asks'] if price<=limit)
         qty=min(qty,available)
         if qty<1:return 'No hay contratos disponibles dentro de tu precio máximo en la lectura actual.'
         plan={'reverse':self.settings['close_on_reverse'],'tp_pct':self.settings['take_profit_pct'],
               'sl_pct':self.settings['stop_loss_pct'],'budget':budget}
+        self._entry_ready=None
         self._intent('buy',side,market['ticker'],qty,limit,plan)
         return 'Compra enviada a Kalshi; se registra únicamente lo ejecutado.'
     def _close(self,p,price,reason,settlement=False):
