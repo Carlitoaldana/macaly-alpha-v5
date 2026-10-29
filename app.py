@@ -825,6 +825,19 @@ class _ChartPanelFeed:
         with self.lock:return dict(self.data)
 
 
+def _ensure_chart_panel(bot):
+    """Upgrade an already cached Bot in place, keeping its DB and worker alive."""
+    with bot.lock:
+        panel=getattr(bot,'chart_panel',None)
+        if panel is None:
+            panel=_ChartPanelFeed(bot.feed,bot.stop_event)
+            bot.chart_panel=panel
+        worker=getattr(bot,'thread',None)
+        if worker is not None and worker.is_alive() and not bot.stop_event.is_set():
+            panel.start()
+        return panel
+
+
 class Bot:
     def __init__(self, db_path=None, feed=None):
         self.lock = threading.RLock()
@@ -1099,14 +1112,14 @@ class Bot:
             self.stop_event.wait(2)
 
     def start_worker(self):
-        self.chart_panel.start()
+        _ensure_chart_panel(self).start()
         self.thread=threading.Thread(target=self.loop,name='alpha-paper-worker',daemon=True)
         self.thread.start()
 
     def view(self):
         with self.lock:
             result=dict(self.snapshot)
-            result['chart_panel']=self.chart_panel.view()
+            result['chart_panel']=_ensure_chart_panel(self).view()
             fresh=(self.snapshot.get('status')!='SIN DATOS' and self.snapshot.get('updated')
                    and (utcnow()-datetime.fromisoformat(self.snapshot['updated'])).total_seconds()<=15)
             metrics=self.snapshot.get('metrics') or {}
