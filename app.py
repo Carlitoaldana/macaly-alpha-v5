@@ -1791,7 +1791,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Clave privada</label>
 <textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM del entorno elegido" spellcheck="false" autocomplete="off"></textarea>
 </div>
-<p class="muted">En REAL, las claves permanecen en memoria; si el servidor se reinicia, hay que reconectar para vigilar salidas. REAL y NO REAL conservan sus historiales separados.</p>
+<p class="muted">Para reconectar tras reinicios, guarda una vez KALSHI_API_KEY_ID y KALSHI_PRIVATE_KEY en los secretos del servidor. Las claves pegadas solo aquí duran hasta el reinicio. REAL y NO REAL conservan sus historiales separados.</p>
 <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testApi" class="primary">CONECTAR</button></div><div class="notice"><span id="connectionNotice">Cuenta sin conectar.</span></div>
 </div>
 </article>
@@ -1885,9 +1885,11 @@ class Controller:
                 reply['message']='Kalshi responde: '+market['ticker']
                 self.connection={'message':'Consulta pública verificada: '+market['ticker'],'verified_at':stamp()}
             elif action=='verify_demo':
+                self.auto_disabled=False
                 self.connection=_connect_kalshi(self,payload)
                 reply['message']=self.connection['message']
             elif action=='forget_demo':
+                self.auto_disabled=True
                 self.connection=_return_to_simulation(self)
                 reply['message']=self.connection['message']
             elif action=='sync_account':
@@ -1933,6 +1935,44 @@ class Controller:
         result['connection']=self.connection.copy()
         if not isinstance(self.bot,ConnectedBot):result['mode']='NO REAL'
         return result
+
+
+
+def _saved_kalshi_credentials(secrets_source=None):
+    def read(name):
+        value=os.environ.get(name)
+        if value is None and secrets_source is not None:
+            try:value=secrets_source.get(name,'')
+            except Exception:value=''
+        return value.strip() if isinstance(value,str) else ''
+    key_id=read('KALSHI_API_KEY_ID');pem=read('KALSHI_PRIVATE_KEY')
+    # Accept multiline secrets as well as escaped newlines in environment values.
+    return key_id,pem.replace('\\n','\n')
+
+def _auto_connect_saved(controller,credentials):
+    if getattr(controller,'auto_disabled',False) or isinstance(controller.bot,ConnectedBot):return
+    key_id,pem=credentials
+    if not key_id and not pem:return
+    root=controller.simulation_bot
+    with root.lock:
+        if time.monotonic()<getattr(root,'saved_retry_at',0):return
+        if not key_id or not pem:
+            controller.connection={'message':'Completa KALSHI_API_KEY_ID y KALSHI_PRIVATE_KEY en los secretos del servidor.'}
+            return
+        if root.running or root.positions():return
+        identity=hashlib.sha256(('live:'+key_id).encode()).hexdigest()[:24]
+        linked=getattr(root,'connected_accounts',{}).get(identity)
+        if linked is not None and not linked.stop_event.is_set():
+            controller.bot=linked
+            controller.connection={'message':'Cuenta REAL conectada con las claves guardadas en el servidor.','environment':'live'}
+            return
+        try:
+            controller.connection=_connect_kalshi(controller,dict(environment='live',accept_real=True,key_id=key_id,pem=pem))
+            controller.connection['message']='Cuenta REAL conectada automáticamente. Entradas pausadas; pulsa INICIAR para comprar.'
+        except Exception as exc:
+            root.saved_retry_at=max(time.monotonic()+30,getattr(controller,'connect_retry_at',0))
+            message=str(exc) if isinstance(exc,ValueError) else 'No se pudo completar la conexión automática.'
+            controller.connection={'message':message+' Se reintentará automáticamente en al menos 30 segundos.','state':'error'}
 
 
 def streamlit_main():
@@ -1981,6 +2021,9 @@ def streamlit_main():
             with linked.lock:
                 linked.__class__=ConnectedBot
                 linked.account.__class__=KalshiAccount
+                if not hasattr(linked.account,'_balance_lock'):
+                    linked.account._balance_lock=threading.RLock();linked.account._request_lock=threading.RLock()
+                    linked.account._balance_value=None;linked.account._balance_time=0;linked.account.retry_at=0
                 linked.feed.__class__=AccountMarketData
     if 'alpha_controller' not in st.session_state:
         st.session_state.alpha_controller=Controller(bot)
@@ -1988,6 +2031,7 @@ def streamlit_main():
     controller.__class__=Controller
     if not hasattr(controller,'simulation_bot'):
         controller.simulation_bot=bot
+    saved_credentials=_saved_kalshi_credentials(st.secrets)
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
@@ -1997,6 +2041,7 @@ def streamlit_main():
 
     @st.fragment(run_every=2)
     def live_terminal():
+        _auto_connect_saved(controller,saved_credentials)
         event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
         if isinstance(event,dict) and event.get('action')=='ack':
             st.session_state.alpha_reply=None
