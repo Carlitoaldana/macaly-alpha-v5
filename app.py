@@ -720,9 +720,8 @@ def size_for_budget(levels, dollars, fee_cents, limit):
         last_unit = unit
         if take < available:
             break
-    else:
-        if last_unit is not None and remaining >= last_unit:
-            return None
+    # Available depth may cover only part of the requested budget.
+    # Accept whole contracts already sized instead of discarding the purchase.
     if quantity == 0:
         return None
     return quantity, float(value / quantity)
@@ -914,7 +913,11 @@ class Bot:
         budget=float((Decimal(str(max(0.0,total['cash'])))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
         if budget<=0:return 'Saldo disponible agotado.'
         sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
-        if sized is None:return 'Sin liquidez suficiente para el importe configurado dentro del precio máximo.'
+        if sized is None:
+            offers=[(price,size) for price,size in book[side]['asks']
+                    if price<=s['max_entry_cents'] and int(size)>0]
+            if not offers:return 'No hay contratos disponibles dentro de tu precio máximo en la lectura actual.'
+            return 'El importe disponible no alcanza para un contrato y la reserva de comisiones.'
         quantity,price=sized
         fee=quantity*s['fee_cents_per_contract']/100
         cost=price*quantity/100+fee
@@ -999,9 +1002,32 @@ class Bot:
 
 
 class KalshiAPIError(ValueError):
-    def __init__(self, code):
+    def __init__(self, code, detail=None):
         self.code=code
-        super().__init__('Kalshi limita las consultas (HTTP 429). Se esperará antes de reintentar; no necesitas generar otra clave por este error.' if code==429 else f'Kalshi respondió HTTP {code}. Revisa permisos, entorno y disponibilidad de la API.')
+        message=('Kalshi limita las consultas (HTTP 429). Se esperará antes de reintentar; no necesitas generar otra clave por este error.'
+                 if code==429 else f'Kalshi respondió HTTP {code}.')
+        if detail:message+=' '+detail
+        super().__init__(message)
+
+
+def _kalshi_error_detail(raw, method, path, sensitive=()):
+    # Never show arbitrary server bodies, request headers, or credential material.
+    try:
+        payload=json.loads(raw)
+        error=payload.get('error',{})
+        if not isinstance(error,dict):return f'Solicitud: {method} {path}.'
+        parts=[]
+        for key in ('code','message'):
+            value=error.get(key)
+            if not isinstance(value,str):continue
+            if any(token in value.lower() for token in ('private key','access-signature','access-key','access-timestamp')):
+                value='Detalle omitido porque contiene datos de autenticación.'
+            for secret in sensitive:
+                if secret:value=value.replace(secret,'[oculto]')
+            parts.append(' '.join(value.split())[:300])
+        return f'Solicitud: {method} {path}. '+(' · '.join(parts) or 'Kalshi no devolvió un motivo detallado.')
+    except (ValueError,TypeError,AttributeError):
+        return f'Solicitud: {method} {path}. No se recibió un motivo estructurado.'
 
 
 class KalshiAccount:
@@ -1052,7 +1078,9 @@ class KalshiAccount:
             with urlopen(Request(url,headers=headers,data=data,method=method),timeout=8) as response:
                 result=json.load(response)
         except HTTPError as exc:
-            error=KalshiAPIError(exc.code)
+            try:detail=_kalshi_error_detail(exc.read(8192),method,path,(self._key_id,))
+            except Exception:detail=f'Solicitud: {method} {path}.'
+            error=KalshiAPIError(exc.code,detail)
             try:error.retry_after=float(exc.headers.get('Retry-After',30))
             except (ValueError,TypeError,AttributeError):error.retry_after=30
             raise error from None
@@ -1133,7 +1161,7 @@ class ConnectedBot(Bot):
         book_side=('bid' if side=='UP' else 'ask') if action=='buy' else ('ask' if side=='UP' else 'bid')
         body={'ticker':ticker,'client_order_id':client_id,'side':book_side,
               'count':format(Decimal(str(count)),'.2f'),'price':format(Decimal(str(yes_price))/100,'.4f'),
-              'time_in_force':'fill_or_kill' if action=='buy' else 'immediate_or_cancel',
+              'time_in_force':'immediate_or_cancel',
               'self_trade_prevention_type':'taker_at_cross','reduce_only':action=='sell',
               'cancel_order_on_pause':True}
         plan={**plan,'body':body}
@@ -1223,7 +1251,9 @@ class ConnectedBot(Bot):
         self._position_check(market['ticker'],0)
         fresh=self.feed.book(market['ticker'])
         if engine.get_seconds_remaining(market)<=0 or time.monotonic()-fresh['at']>5:return 'Ronda o libro vencido.'
-        if fill_book([x for x in fresh[side]['asks'] if x[0]<=limit],qty) is None:return 'Sin liquidez actual dentro del precio máximo.'
+        available=sum(max(0,int(size)) for price,size in fresh[side]['asks'] if price<=limit)
+        qty=min(qty,available)
+        if qty<1:return 'No hay contratos disponibles dentro de tu precio máximo en la lectura actual.'
         plan={'reverse':self.settings['close_on_reverse'],'tp_pct':self.settings['take_profit_pct'],
               'sl_pct':self.settings['stop_loss_pct'],'budget':budget}
         self._intent('buy',side,market['ticker'],qty,limit,plan)
