@@ -891,8 +891,35 @@ class Bot:
         if reason:
             self._close(p,price,reason)
 
-    def enter(self, *args, **kwargs):
-        raise ValueError("Conecta la cuenta REAL de Kalshi antes de operar.")
+    def enter(self,market,book,side,remaining,signal=None):
+        if not isinstance(self,ConnectedBot):
+            raise ValueError('Conecta la cuenta REAL de Kalshi antes de operar.')
+        s=self.settings
+        if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
+            return 'Entradas pausadas o posición en gestión.'
+        if not signal or signal.get('data_valid') is not True or signal.get('candidate') != side:
+            return 'Esperando respaldo actual para una compra nueva.'
+        routes=engine._entry_route_checks(signal,engine.get_seconds_remaining(market))
+        if not routes.get('valid') or not any(r['complete'] for r in routes.get('sides',{}).get(side,[])):
+            return 'La señal ya no cumple los requisitos actuales de entrada.'
+        if book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
+            return 'Libro atrasado; esperando datos actuales.'
+        actual=engine.get_seconds_remaining(market)
+        if actual is None or actual<=0:return 'Fuera de ventana de entrada.'
+        total=self.totals()
+        if s['daily_goal_dollars'] and total['accumulated']>=s['daily_goal_dollars']:
+            return 'Meta de ganancia acumulada alcanzada.'
+        count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
+        if count>=s['max_entries_round']:return 'Máximo de entradas de esta ronda alcanzado.'
+        budget=float((Decimal(str(max(0.0,total['cash'])))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
+        if budget<=0:return 'Saldo disponible agotado.'
+        sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
+        if sized is None:return 'Sin liquidez suficiente para el importe configurado dentro del precio máximo.'
+        quantity,price=sized
+        fee=quantity*s['fee_cents_per_contract']/100
+        cost=price*quantity/100+fee
+        if cost>budget+1e-8 or cost>total['cash']+1e-8:return 'La compra supera el importe o el saldo disponible.'
+        return self._execute_entry(market,book,side,quantity,price,fee,cost,signal,routes)
 
     def _execute_entry(self, *args, **kwargs):
         raise ValueError("Conecta la cuenta REAL de Kalshi antes de operar.")
