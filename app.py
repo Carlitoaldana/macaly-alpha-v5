@@ -536,7 +536,7 @@ API = 'https://external-api.kalshi.com/trade-api/v2'
 DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_goal_dollars=50,
-                max_trade_dollars=10, starting_balance=1000,
+                max_trade_dollars=10, starting_balance=20,
                 fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10)
 
 def utcnow():
@@ -778,13 +778,19 @@ class Bot:
             merged = dict(self.settings)
             merged.update(raw)
             settings = valid_settings(merged)
-            if settings['starting_balance'] != self.settings['starting_balance'] and self.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone():
-                raise ValueError('El saldo inicial ya tiene operaciones y no puede cambiarse.')
+            account_message=''
+            if settings['starting_balance'] != self.settings['starting_balance']:
+                if self.running or self.positions():
+                    raise ValueError('Para empezar con otro capital, pausa las entradas y espera a que no haya posición abierta. No se borrará el historial.')
+                previous=self.totals()
+                baseline=self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
+                self.put('account_start_id',baseline)
+                account_message=f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
             self.settings=settings
             self.put('settings',settings)
             self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
                             (settings['take_profit_pct'],))
-            self.event('AJUSTES','Ajustes guardados. Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
+            self.event('AJUSTES',account_message+'Ajustes guardados. Meta de ganancia acumulada; Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
 
     def command(self,name):
         with self.lock:
@@ -806,7 +812,8 @@ class Bot:
         return [dict(r) for r in self.db.execute('SELECT * FROM trades WHERE closed IS NULL')]
 
     def totals(self):
-        rows=[dict(r) for r in self.db.execute('SELECT * FROM trades')]
+        baseline=int(self.kv('account_start_id') or 0)
+        rows=[dict(r) for r in self.db.execute('SELECT * FROM trades WHERE id>?',(baseline,))]
         realized=sum(r['pnl'] or 0 for r in rows)
         cash=self.settings['starting_balance']+sum((r['exit']*r['quantity']/100-(r['exit_fee'] or 0)) if r['closed'] else 0 for r in rows)-sum(r['entry']*r['quantity']/100+r['entry_fee'] for r in rows)
         day=utcnow().astimezone(ZoneInfo('America/New_York')).date()
@@ -814,6 +821,8 @@ class Bot:
         open_fee=sum(r['entry_fee'] for r in rows if not r['closed'] and datetime.fromisoformat(r['opened']).astimezone(ZoneInfo('America/New_York')).date()==day)
         daily-=open_fee
         return dict(cash=round(cash,4), realized=round(realized,4), daily=round(daily,4),
+                    accumulated=round(realized-sum(r['entry_fee'] for r in rows if not r['closed']),4),
+                    account_start_id=baseline, target_balance=round(self.settings['starting_balance']+self.settings['daily_goal_dollars'],4),
                     completed=sum(bool(r['closed']) for r in rows), wins=sum((r['pnl'] or 0)>0 for r in rows),
                     open_cost=round(sum(r['entry']*r['quantity']/100 for r in rows if not r['closed']),4))
 
@@ -903,13 +912,13 @@ class Bot:
         if actual is None or actual<=0:
             return 'Fuera de ventana de entrada.'
         total=self.totals()
-        if s['daily_goal_dollars'] and total['daily']>=s['daily_goal_dollars']:
-            return 'Meta diaria alcanzada.'
+        if s['daily_goal_dollars'] and total['accumulated']>=s['daily_goal_dollars']:
+            return 'Meta de ganancia acumulada alcanzada. Nuevas entradas detenidas; el avance no se reinicia al cambiar de día.'
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:
             return 'Máximo de entradas de esta ronda alcanzado.'
         # Porcentaje configurable del efectivo virtual disponible al entrar.
-        budget=round(max(0.0, total['cash'])*s['risk_pct']/100.0, 4)
+        budget=float((Decimal(str(max(0.0,total['cash'])))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
         if budget<=0:
             return 'Saldo virtual agotado.'
         sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
@@ -1001,6 +1010,7 @@ class Bot:
                           positions=self.positions(),totals=self.totals(),
                           trades=[dict(r) for r in self.db.execute('SELECT * FROM trades ORDER BY id DESC LIMIT 200')],
                           events=[dict(r) for r in self.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 60')])
+            result['account_note']='Capital inicial configurable con entradas pausadas y sin posición. Operaciones anteriores conservadas en el historial.'
             result['rounds']=[{'ticker':r['ticker'],**json.loads(r['state'])} for r in self.db.execute('SELECT * FROM rounds ORDER BY rowid DESC LIMIT 50')]
             return clean_json(result)
 
@@ -1156,7 +1166,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </nav>
 <div class="mini-radar">
 <strong>0%</strong>
-<small>OBJETIVO DIARIO</small>
+<small>OBJETIVO ACUMULADO</small>
 </div>
 <footer>
 <span class="gold">ENTORNO DE SIMULACIÓN</span>
@@ -1243,7 +1253,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Performance</h2>
 <div class="body metrics">
 <div>
-<span class="label">RESULTADO DEL DÍA</span>
+<span class="label">RESULTADO ACUMULADO</span>
 <strong data-metric="result">$0.00</strong>
 </div>
 <div>
@@ -1251,7 +1261,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <strong data-metric="result">$0.00</strong>
 </div>
 <div>
-<span class="label">META DIARIA</span>
+<span class="label">META ACUMULADA</span>
 <strong class="gold" id="goalDisplay">$50</strong>
 </div>
 <div>
@@ -1297,13 +1307,13 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Control principal</h2>
 <div class="body">
 <div class="field">
-<label>Saldo de simulación<small><span id="cashLabel">Saldo inicial virtual</span></small>
+<label>Capital inicial de esta prueba ($)<small><span id="cashLabel">Capital de esta prueba</span></small>
 </label>
-<input type="number" name="balance" value="1000" min="1" max="1000000" required>
+<input type="number" name="balance" value="20" min="1" max="1000000" required>
 </div>
 <div class="field">
-<label>Meta diaria ($)</label>
-<input type="number" name="goal" value="50" min="0" required>
+<label>Meta de ganancia acumulada ($)</label>
+<input type="number" name="goal" value="50" min="0" required><small>No se reinicia cada día. Ejemplo: capital $20 + meta $10 = saldo objetivo $30. Al alcanzarla se detienen las entradas.</small>
 </div>
 <input type="hidden" name="contracts" value="1">
 <input type="hidden" name="maxTrade" value="10">
@@ -1344,7 +1354,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
 </form>
-<div class="notice">Los ajustes se guardan en el servidor y se aplican a compras nuevas. Las posiciones abiertas conservan su plan de salida.</div>
+<div class="notice">Las ganancias permanecen en el saldo de la prueba. La meta es acumulada y no vence a medianoche. Cambiar el capital inicia una prueba nueva conservando el historial anterior.</div>
 </section>
 <section id="entradas" class="page hidden">
 <article class="panel">
@@ -1490,10 +1500,10 @@ function updateProfitRing(s,net,marked,fresh){
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent='SIMULACIÓN · '+s.message;
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
-let metrics=document.querySelectorAll('[data-metric]');[s.totals.daily,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.daily/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
+let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
 updateProfitRing(s,net,marked,fresh);$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones simuladas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible: '+money(s.totals.cash);
-if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}el.value=String(value)}}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.has_trades;
+if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}el.value=String(value)}}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
@@ -1562,7 +1572,7 @@ class Controller:
                 reply['message']={'start':'Simulación activada.','pause':'Entradas pausadas; salidas vigiladas.',
                                   'close':'Cierre solicitado; esperando liquidez actual.'}[command]
             elif action=='settings':
-                self.bot.save_settings(payload);reply['saved_settings']=dict(self.bot.settings);reply['message']='Ajustes guardados. Meta diaria: $'+str(self.bot.settings['daily_goal_dollars'])+'.'
+                self.bot.save_settings(payload);reply['saved_settings']=dict(self.bot.settings);reply['message']='Ajustes guardados. Meta acumulada: $'+str(self.bot.settings['daily_goal_dollars'])+' de ganancia; no se reinicia cada día.'
             elif action=='public':
                 market=self.bot.feed.current();book=self.bot.feed.book(market['ticker'])
                 reply['message']='Kalshi responde: '+market['ticker']
@@ -1635,9 +1645,14 @@ def streamlit_main():
         bot.start_worker()
         return bot
     bot=shared_bot()
+    # Rebind updated accounting methods on the same cached object and database.
+    # The worker loop is unchanged and dynamically invokes self.step().
+    with bot.lock:
+        bot.__class__=Bot
     if 'alpha_controller' not in st.session_state:
         st.session_state.alpha_controller=Controller(bot)
     controller=st.session_state.alpha_controller
+    controller.__class__=Controller
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
