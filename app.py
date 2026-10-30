@@ -952,7 +952,7 @@ class Bot:
             offers=[(price,size) for price,size in book[side]['asks']
                     if price<=s['max_entry_cents'] and int(size)>0]
             if not offers:return 'No hay contratos disponibles dentro de tu precio máximo en la lectura actual.'
-            message=(f"Compra bloqueada · Saldo del mercado ${entry_cash:.4f} · "
+            message=(f"Compra bloqueada · Saldo disponible de la cuenta ${entry_cash:.4f} · "
                      f"{s['risk_pct']:g}% = ${budget:.4f} · "
                      f"mejor oferta {min(p for p,n in offers):g}¢ · "
                      "el presupuesto no cubre un contrato con comisión.")
@@ -1161,6 +1161,10 @@ class KalshiAccount:
             if cached and time.monotonic()-cached[1]<5:
                 return cached[0]
             params=None if exchange_index is None else {'exchange_index':exchange_index}
+            # This endpoint has a separate one-request-per-second Basic bucket.
+            delay=1.05-(time.monotonic()-getattr(self,'_last_balance_request',0))
+            if delay>0:time.sleep(delay)
+            self._last_balance_request=time.monotonic()
             data=self.request('GET','/portfolio/balance',params)
             dollars=data.get('balance_dollars')
             value=_plan_number(dollars if dollars is not None else data.get('balance'))
@@ -1169,10 +1173,12 @@ class KalshiAccount:
             now=time.monotonic()
             cache[exchange_index]=(value,now)
             if exchange_index is None:
+                self._balance_breakdown={}
                 for item in data.get('balance_breakdown',[]) or []:
                     index=item.get('exchange_index');amount=_plan_number(item.get('balance'))
                     if type(index) is int and index>=0 and amount is not None and amount>=0:
                         cache[index]=(amount,now) # Breakdown balances are fixed-point dollars.
+                        self._balance_breakdown[index]=amount
                 self._balance_value=value;self._balance_time=now
             self._balance_cache=cache
             return value
@@ -1318,6 +1324,85 @@ class ConnectedBot(Bot):
                     self.db.commit()
                 except Exception:
                     self.db.rollback();raise
+    def _fund_entry_market(self, exchange_index, budget):
+        """Fund only the entry budget inside the same primary event-contract account.
+
+        Journal before POST. A lost response is reconciled by client ID, never
+        repeated with a new ID. No orders use funds until a fresh balance shows them.
+        """
+        pending=self.kv('entry_funding')
+        if pending:
+            if pending.get('error'):
+                raise ValueError('Preparación de fondos detenida: '+pending['error'])
+            transfer_id=pending.get('transfer_id')
+            if transfer_id:
+                record=self.account.request('GET','/portfolio/intra_exchange_instance_transfers/'+quote(transfer_id,safe='')).get('transfer')
+            else:
+                records=self.account.pages('/portfolio/intra_exchange_instance_transfers','transfers')
+                record=next((r for r in records if r.get('client_transfer_id')==pending['body']['client_transfer_id']),None)
+            if not isinstance(record,dict):
+                raise ValueError('Esperando confirmación del movimiento interno; no se repite ni se compra todavía.')
+            body=pending['body']
+            if (record.get('source')!='event_contract' or record.get('destination')!='event_contract'
+                or record.get('client_transfer_id')!=body['client_transfer_id']
+                or record.get('source_exchange_shard')!=body['source_exchange_shard']
+                or record.get('destination_exchange_shard')!=body['destination_exchange_shard']
+                or Decimal(str(record.get('amount'))) != Decimal(body['amount'])/10000):
+                raise ValueError('El movimiento interno no coincide con el importe registrado; entradas bloqueadas.')
+            status=record.get('status')
+            if status=='failed':
+                pending['error']='Kalshi no completó el movimiento interno. Revisa el registro de la cuenta.'
+                self.put('entry_funding',pending);self.db.commit()
+                raise ValueError(pending['error'])
+            if status!='completed':
+                raise ValueError('Preparando automáticamente los fondos para BTC; esperando confirmación de Kalshi.')
+            self.account.invalidate_balance()
+            self.account.balance() # Refresh total and shard breakdown together.
+            credited=self.account.balance(exchange_index=body['destination_exchange_shard'])
+            expected=Decimal(str(pending['destination_before']))+Decimal(body['amount'])/10000
+            if Decimal(str(credited))<expected:
+                raise ValueError('Movimiento confirmado; esperando que Kalshi actualice el saldo disponible. No se repite.')
+            self.put('entry_funding',None);self.db.commit()
+            self.event('FONDOS PREPARADOS',f"Movimiento interno confirmado · ${body['amount']/10000:.4f} para el mercado BTC")
+
+        total=self.account.balance()
+        market_cash=self.account.balance(exchange_index=exchange_index)
+        target=Decimal(str(budget))
+        shortfall=target-Decimal(str(market_cash))
+        if shortfall<=0:return total,market_cash
+        # The aggregate response supplies dollar-valued balances per event shard.
+        breakdown=getattr(self.account,'_balance_breakdown',{})
+        sources=sorted(((idx,amount) for idx,amount in breakdown.items()
+                        if type(idx) is int and 0<=idx<=100 and idx!=exchange_index and amount>0),
+                       key=lambda item:item[1],reverse=True)
+        for source,available in sources:
+            # Do not move collateral backing other resting orders.
+            orders=self.account.pages('/portfolio/orders','orders',{'status':'resting','exchange_index':source})
+            if orders:continue
+            amount=int((min(shortfall,Decimal(str(available)))*10000).to_integral_value(rounding='ROUND_DOWN'))
+            if amount<=0:continue
+            import uuid
+            body={'source':'event_contract','destination':'event_contract',
+                  'source_exchange_shard':source,'destination_exchange_shard':exchange_index,
+                  'source_subaccount':0,'destination_subaccount':0,
+                  'amount':amount,'client_transfer_id':str(uuid.uuid4())}
+            pending={'body':body,'transfer_id':None,'destination_before':market_cash}
+            self.put('entry_funding',pending);self.db.commit()
+            try:
+                reply=self.account.request('POST','/portfolio/intra_exchange_instance_transfer',body=body)
+                pending['transfer_id']=reply.get('transfer_id')
+                self.put('entry_funding',pending);self.db.commit()
+            except KalshiAPIError as exc:
+                if exc.code in (400,401,403,404,422):
+                    pending['error']=str(exc)
+                    self.put('entry_funding',pending);self.db.commit()
+                raise
+            finally:
+                self.account.invalidate_balance()
+            self.event('PREPARANDO FONDOS',f"Movimiento interno solicitado · ${amount/10000:.4f} · sin compra hasta confirmar saldo")
+            raise ValueError('Preparando automáticamente los fondos para BTC; esperando confirmación de Kalshi.')
+        raise ValueError(f'Saldo total ${total:.4f}; disponible para este mercado ${market_cash:.4f}. No hay fondos internos libres verificables para completar la entrada.')
+
     def _prepare_entry(self,market):
         # Prepare account checks before reading/confirming a new signal.
         # Reuse only fee metadata; account/position checks are refreshed each cycle.
@@ -1339,9 +1424,12 @@ class ConnectedBot(Bot):
         exchange_index=market.get('exchange_index')
         if type(exchange_index) is not int or exchange_index<0:
             raise ValueError('No se pudo verificar el saldo de este mercado: falta su exchange_index.')
-        market_cash=self.account.balance(exchange_index=exchange_index)
+        total_cash=self.account.balance()
+        budget=float((Decimal(str(max(0,total_cash)))*Decimal(str(self.settings['risk_pct']))/100)
+                     .quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
+        total_cash,market_cash=self._fund_entry_market(exchange_index,budget)
         self._entry_ready={'ticker':market['ticker'],'at':time.monotonic(),'mult':cache['mult'],
-                           'exchange_index':exchange_index,'account_cash':market_cash}
+                           'exchange_index':exchange_index,'account_cash':total_cash,'market_cash':market_cash}
 
     def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
         if self.pending_orders():return 'Esperando confirmación de Kalshi; no se repite la compra.'
@@ -1351,9 +1439,10 @@ class ConnectedBot(Bot):
         cash_basis=ready['account_cash']
         budget=float((Decimal(str(max(0,cash_basis)))*Decimal(str(self.settings['risk_pct']))/100)
                      .quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
+        budget=min(budget,ready['market_cash'])
         sized=live_entry_size(book[side]['asks'],budget,ready['mult'],self.settings['max_entry_cents'])
         if sized is None:
-            return (f'Compra bloqueada · Saldo del mercado ${cash_basis:.4f} · '
+            return (f'Compra bloqueada · Saldo disponible de la cuenta ${cash_basis:.4f} · '
                     f"{self.settings['risk_pct']:g}% = ${budget:.4f} · "
                     'no cubre un contrato disponible con comisión.')
         qty,limit,reserve=sized
@@ -1369,7 +1458,7 @@ class ConnectedBot(Bot):
         plan={'reverse':self.settings['close_on_reverse'],'tp_pct':self.settings['take_profit_pct'],
               'sl_pct':self.settings['stop_loss_pct'],'budget':budget,
               'cash_basis':cash_basis,'risk_pct':self.settings['risk_pct'],
-              'fee_reserve':reserve,'account_cash':ready['account_cash'],
+              'fee_reserve':reserve,'account_cash':ready['market_cash'],
               'exchange_index':ready['exchange_index']}
         self._entry_ready=None
         self._intent('buy',side,market['ticker'],qty,limit,plan)
