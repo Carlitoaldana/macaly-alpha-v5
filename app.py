@@ -910,7 +910,11 @@ class Bot:
             return 'Meta de ganancia acumulada alcanzada.'
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:return 'Máximo de entradas de esta ronda alcanzado.'
-        budget=float((Decimal(str(max(0.0,total['cash'])))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
+        ready=getattr(self,'_entry_ready',None)
+        if not ready or ready['ticker']!=market['ticker'] or time.monotonic()-ready['at']>5:
+            return 'Comprobación de cuenta vencida; se actualiza antes de la siguiente señal.'
+        entry_cash=ready['account_cash']
+        budget=float((Decimal(str(max(0.0,entry_cash)))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
         if budget<=0:return 'Saldo disponible agotado.'
         sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
         if sized is None:
@@ -921,7 +925,7 @@ class Bot:
         quantity,price=sized
         fee=quantity*s['fee_cents_per_contract']/100
         cost=price*quantity/100+fee
-        if cost>budget+1e-8 or cost>total['cash']+1e-8:return 'La compra supera el importe o el saldo disponible.'
+        if cost>budget+1e-8 or cost>entry_cash+1e-8:return 'La compra supera el importe o el saldo disponible.'
         return self._execute_entry(market,book,side,quantity,price,fee,cost,signal,routes)
 
     def _execute_entry(self, *args, **kwargs):
@@ -1306,7 +1310,7 @@ class ConnectedBot(Bot):
         ready=getattr(self,'_entry_ready',None)
         if not ready or ready['ticker']!=market['ticker'] or time.monotonic()-ready['at']>5:
             return 'Comprobación de cuenta vencida; se actualiza antes de la siguiente señal.'
-        cash_basis=min(self.totals()['cash'],self.account_cash,ready['account_cash'])
+        cash_basis=ready['account_cash']
         budget=float((Decimal(str(max(0,cash_basis)))*Decimal(str(self.settings['risk_pct']))/100)
                      .quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
         limit=int(self.settings['max_entry_cents'])
