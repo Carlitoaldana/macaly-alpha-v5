@@ -967,12 +967,18 @@ class Bot:
                 if p['ticker']==market['ticker']:
                     self._arm_take_profit(p,market,book)
                     self.manage(p,book,active,remaining)
-            message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
+            order_rejected=False
+            try:
+                message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
+            except KalshiAPIError as exc:
+                if exc.code not in (400,401,403,404,422):raise
+                order_rejected=True
+                message='Compra rechazada por Kalshi. '+str(exc)+' Consulta Registro: importe y contratos enviados.'
             if not self.positions() and self.close_requested:
                 self.close_requested=False
             if active is None:
                 message=state.get('opening_conflict') or 'El cerebro todavía no confirma una dirección.'
-            self.snapshot={'status':'ACTIVO' if self.running else 'PAUSADO','message':message,
+            self.snapshot={'status':'COMPRA RECHAZADA' if order_rejected else ('ACTIVO' if self.running else 'PAUSADO'),'message':message,
                            'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
                            'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
                            'price':sig['price'],'source':sig['price_source'],'quality':sig['quality'],
@@ -1100,14 +1106,34 @@ class KalshiAccount:
             if not cursor:return items
             params['cursor']=cursor
         raise ValueError('Consulta demasiado extensa; no se supone un resultado incompleto.')
-    def balance(self):
+    def invalidate_balance(self):
         with self._balance_lock:
-            if self._balance_value is not None and time.monotonic()-self._balance_time<5:
-                return self._balance_value
-            value=_plan_number(self.request('GET','/portfolio/balance').get('balance'))
+            self._balance_value=None
+            self._balance_time=0
+            self._balance_cache={}
+
+    def balance(self, exchange_index=None):
+        with self._balance_lock:
+            cache=getattr(self,'_balance_cache',{})
+            cached=cache.get(exchange_index)
+            if cached and time.monotonic()-cached[1]<5:
+                return cached[0]
+            params=None if exchange_index is None else {'exchange_index':exchange_index}
+            data=self.request('GET','/portfolio/balance',params)
+            dollars=data.get('balance_dollars')
+            value=_plan_number(dollars if dollars is not None else data.get('balance'))
             if value is None or value<0:raise ValueError('Saldo de Kalshi no verificable.')
-            self._balance_value=value/100;self._balance_time=time.monotonic()
-            return self._balance_value
+            value=value if dollars is not None else value/100
+            now=time.monotonic()
+            cache[exchange_index]=(value,now)
+            if exchange_index is None:
+                for item in data.get('balance_breakdown',[]) or []:
+                    index=item.get('exchange_index');amount=_plan_number(item.get('balance'))
+                    if type(index) is int and index>=0 and amount is not None and amount>=0:
+                        cache[index]=(amount,now) # Breakdown balances are fixed-point dollars.
+                self._balance_value=value;self._balance_time=now
+            self._balance_cache=cache
+            return value
     def order(self,intent):
         if intent['order_id']:
             return self.request('GET','/portfolio/orders/'+quote(intent['order_id'],safe=''))['order']
@@ -1168,10 +1194,21 @@ class ConnectedBot(Bot):
               'time_in_force':'immediate_or_cancel',
               'self_trade_prevention_type':'taker_at_cross','reduce_only':action=='sell',
               'cancel_order_on_pause':True}
+        if plan.get('exchange_index') is not None:
+            body['exchange_index']=plan['exchange_index']
+        if action=='buy':
+            reserved=Decimal(str(count))*(Decimal(str(limit))/100+Decimal(str(plan['fee_reserve'])))
+            if reserved>Decimal(str(plan['budget'])) or reserved>Decimal(str(plan['account_cash'])):
+                raise ValueError('Orden bloqueada: importe con reserva de comisiones superior al presupuesto.')
+            plan={**plan,'reserved_cost':float(reserved)}
         plan={**plan,'body':body}
         self.db.execute('INSERT INTO account_orders VALUES (?,?,?,?,?,?,?,?)',
                         (client_id,ticker,action,side,None,'pending',dumps(plan),stamp()))
         self.db.commit() # Journal BEFORE the only POST: an ambiguous response is never resubmitted.
+        if action=='buy':
+            self.event('ENVÍO DE COMPRA',f"{side} · {count:g} contrato(s) · límite {limit:g}¢ · "
+                       f"{plan['risk_pct']:g}% de ${plan['cash_basis']:.4f} = ${plan['budget']:.4f} · "
+                       f"máximo con reserva ${plan['reserved_cost']:.4f} · saldo del mercado ${plan['account_cash']:.4f}")
         try:
             reply=self.account.request('POST','/portfolio/events/orders',body=body)
             oid=reply.get('order_id') or (reply.get('order') or {}).get('order_id')
@@ -1180,7 +1217,10 @@ class ConnectedBot(Bot):
         except KalshiAPIError as exc:
             if exc.code in (400,401,403,404,422,429):
                 self.db.execute("UPDATE account_orders SET status='rejected' WHERE client_id=?",(client_id,));self.db.commit()
+                self.event('ORDEN RECHAZADA',f'{action.upper()} {side} · {count:g} contrato(s) · límite {limit:g}¢ · {exc}')
             raise
+        finally:
+            self.account.invalidate_balance()
         self.reconcile_orders()
     def reconcile_orders(self):
         with self.lock:
@@ -1254,15 +1294,21 @@ class ConnectedBot(Bot):
             cache={'event':market['event_ticker'],'at':time.monotonic(),'mult':mult}
             self._entry_fee_cache=cache
         self._position_check(market['ticker'],0)
-        self.account_cash=self.account.balance();self.balance_at=time.monotonic()
-        self._entry_ready={'ticker':market['ticker'],'at':time.monotonic(),'mult':cache['mult']}
+        exchange_index=market.get('exchange_index')
+        if type(exchange_index) is not int or exchange_index<0:
+            raise ValueError('No se pudo verificar el saldo de este mercado: falta su exchange_index.')
+        market_cash=self.account.balance(exchange_index=exchange_index)
+        self._entry_ready={'ticker':market['ticker'],'at':time.monotonic(),'mult':cache['mult'],
+                           'exchange_index':exchange_index,'account_cash':market_cash}
 
     def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
         if self.pending_orders():return 'Esperando confirmación de Kalshi; no se repite la compra.'
         ready=getattr(self,'_entry_ready',None)
         if not ready or ready['ticker']!=market['ticker'] or time.monotonic()-ready['at']>5:
             return 'Comprobación de cuenta vencida; se actualiza antes de la siguiente señal.'
-        budget=min(self.totals()['cash'],self.account_cash)*self.settings['risk_pct']/100
+        cash_basis=min(self.totals()['cash'],self.account_cash,ready['account_cash'])
+        budget=float((Decimal(str(max(0,cash_basis)))*Decimal(str(self.settings['risk_pct']))/100)
+                     .quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
         limit=int(self.settings['max_entry_cents'])
         reserve=.07*ready['mult']+.01
         qty=min(quantity,int(max(0,budget-.01)/(limit/100+reserve)))
@@ -1276,7 +1322,10 @@ class ConnectedBot(Bot):
         qty=min(qty,available)
         if qty<1:return 'No hay contratos disponibles dentro de tu precio máximo en la lectura actual.'
         plan={'reverse':self.settings['close_on_reverse'],'tp_pct':self.settings['take_profit_pct'],
-              'sl_pct':self.settings['stop_loss_pct'],'budget':budget}
+              'sl_pct':self.settings['stop_loss_pct'],'budget':budget,
+              'cash_basis':cash_basis,'risk_pct':self.settings['risk_pct'],
+              'fee_reserve':reserve,'account_cash':ready['account_cash'],
+              'exchange_index':ready['exchange_index']}
         self._entry_ready=None
         self._intent('buy',side,market['ticker'],qty,limit,plan)
         return 'Compra enviada a Kalshi; se registra únicamente lo ejecutado.'
