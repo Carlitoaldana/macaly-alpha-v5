@@ -726,6 +726,37 @@ def size_for_budget(levels, dollars, fee_cents, limit):
         return None
     return quantity, float(value / quantity)
 
+def live_entry_size(levels, dollars, multiplier, max_price):
+    """One price-capped plan for preflight and submission, including rounded fees.
+
+    Reserve each contract's worst quadratic fee over possible execution prices.
+    Per-contract rounding also covers an IOC split into one-contract fills.
+    """
+    budget = Decimal(str(dollars))
+    mult = Decimal(str(multiplier))
+    ceiling = Decimal(str(max_price))
+    if not budget.is_finite() or not mult.is_finite() or budget < 0 or mult < 0:
+        raise ValueError('Presupuesto o comisión inválidos.')
+    depth = 0
+    best = None
+    for raw_price, raw_size in sorted(levels):
+        price = Decimal(str(raw_price))
+        size = Decimal(str(raw_size))
+        if not price.is_finite() or not size.is_finite() or price <= 0 or size < 0:
+            raise ValueError('Oferta de compra inválida.')
+        # Orders support hundredths of a cent; never round the ask down.
+        limit = price.quantize(Decimal('.01'), rounding='ROUND_CEILING')
+        if limit > ceiling or limit >= 100:
+            continue
+        depth += int(size)
+        prob = min(limit / 100, Decimal('.5'))
+        reserve = (Decimal('.07') * mult * prob * (1-prob)).quantize(
+            Decimal('.01'), rounding='ROUND_CEILING')
+        quantity = min(depth, int(budget // (limit/100 + reserve)))
+        if quantity > 0 and (best is None or quantity > best[0]):
+            best = (quantity, float(limit), float(reserve))
+    return best
+
 class Bot:
     def __init__(self, db_path=None, feed=None):
         self.lock = threading.RLock()
@@ -916,14 +947,21 @@ class Bot:
         entry_cash=ready['account_cash']
         budget=float((Decimal(str(max(0.0,entry_cash)))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
         if budget<=0:return 'Saldo disponible agotado.'
-        sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
+        sized=live_entry_size(book[side]['asks'],budget,ready['mult'],s['max_entry_cents'])
         if sized is None:
             offers=[(price,size) for price,size in book[side]['asks']
                     if price<=s['max_entry_cents'] and int(size)>0]
             if not offers:return 'No hay contratos disponibles dentro de tu precio máximo en la lectura actual.'
-            return 'El importe disponible no alcanza para un contrato y la reserva de comisiones.'
-        quantity,price=sized
-        fee=quantity*s['fee_cents_per_contract']/100
+            message=(f"Compra bloqueada · Saldo del mercado ${entry_cash:.4f} · "
+                     f"{s['risk_pct']:g}% = ${budget:.4f} · "
+                     f"mejor oferta {min(p for p,n in offers):g}¢ · "
+                     "el presupuesto no cubre un contrato con comisión.")
+            if getattr(self,'_last_sizing_message',None)!=message:
+                self.event('CÁLCULO DE COMPRA',message)
+                self._last_sizing_message=message
+            return message
+        quantity,price,reserve=sized
+        fee=quantity*reserve
         cost=price*quantity/100+fee
         if cost>budget+1e-8 or cost>entry_cash+1e-8:return 'La compra supera el importe o el saldo disponible.'
         return self._execute_entry(market,book,side,quantity,price,fee,cost,signal,routes)
@@ -1313,10 +1351,13 @@ class ConnectedBot(Bot):
         cash_basis=ready['account_cash']
         budget=float((Decimal(str(max(0,cash_basis)))*Decimal(str(self.settings['risk_pct']))/100)
                      .quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
-        limit=int(self.settings['max_entry_cents'])
-        reserve=.07*ready['mult']+.01
-        qty=min(quantity,int(max(0,budget-.01)/(limit/100+reserve)))
-        if qty<1:return 'El importe asignado no alcanza para un contrato y sus comisiones.'
+        sized=live_entry_size(book[side]['asks'],budget,ready['mult'],self.settings['max_entry_cents'])
+        if sized is None:
+            return (f'Compra bloqueada · Saldo del mercado ${cash_basis:.4f} · '
+                    f"{self.settings['risk_pct']:g}% = ${budget:.4f} · "
+                    'no cubre un contrato disponible con comisión.')
+        qty,limit,reserve=sized
+        qty=min(quantity,qty)
         # The cycle has just fetched this order book. Do not fetch it again
         # after confirmation; submit a price-capped IOC against current depth.
         remaining=engine.get_seconds_remaining(market)
