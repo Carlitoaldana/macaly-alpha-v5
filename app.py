@@ -990,7 +990,11 @@ class Bot:
                 with self.lock:
                     self.event('ERROR DE SALIDA', f"#{p['id']} {p['side']} · {type(exc).__name__}: {exc}")
         market=self.feed.current()
-        self._prepare_entry(market)
+        funding_message=None
+        try:
+            self._prepare_entry(market)
+        except EntryFundingPending as exc:
+            funding_message=str(exc)
         sig=self.feed.signal(market)
         signal_at=time.monotonic()
         book=self.feed.book(market['ticker'])
@@ -1011,7 +1015,7 @@ class Bot:
                     self.manage(p,book,active,remaining)
             order_rejected=False
             try:
-                message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
+                message=(funding_message or self.enter(market,book,active,remaining,signal=sig)) if not had_position else 'Gestión de posición abierta.'
             except KalshiAPIError as exc:
                 if exc.code not in (400,401,403,404,422):raise
                 order_rejected=True
@@ -1020,7 +1024,8 @@ class Bot:
                 self.close_requested=False
             if active is None:
                 message=state.get('opening_conflict') or 'El cerebro todavía no confirma una dirección.'
-            self.snapshot={'status':'COMPRA RECHAZADA' if order_rejected else ('ACTIVO' if self.running else 'PAUSADO'),'message':message,
+            if funding_message:message=funding_message
+            self.snapshot={'status':'PREPARANDO FONDOS' if funding_message else ('COMPRA RECHAZADA' if order_rejected else ('ACTIVO' if self.running else 'PAUSADO')),'message':message,
                            'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
                            'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
                            'price':sig['price'],'source':sig['price_source'],'quality':sig['quality'],
@@ -1080,6 +1085,10 @@ def _kalshi_error_detail(raw, method, path, sensitive=()):
         return f'Solicitud: {method} {path}. '+(' · '.join(parts) or 'Kalshi no devolvió un motivo detallado.')
     except (ValueError,TypeError,AttributeError):
         return f'Solicitud: {method} {path}. No se recibió un motivo estructurado.'
+
+
+class EntryFundingPending(ValueError):
+    """Expected asynchronous funding wait; market reads must keep running."""
 
 
 class KalshiAccount:
@@ -1217,6 +1226,11 @@ class ConnectedBot(Bot):
     def save_settings(self,raw):
         if self.pending_orders():raise ValueError('Primero se debe confirmar la orden pendiente de Kalshi.')
         super().save_settings(raw)
+    def _entry_capital(self,total_cash):
+        # Keep unassigned account funds outside the bot's loss budget. Realized
+        # losses reduce its remaining allocation; profits never raise the cap.
+        remaining=self.totals()['allocated_cash']
+        return max(0,min(total_cash,self.settings['starting_balance'],remaining))
     def command(self,name):
         if name=='start':
             self.reconcile_orders()
@@ -1341,7 +1355,7 @@ class ConnectedBot(Bot):
                 records=self.account.pages('/portfolio/intra_exchange_instance_transfers','transfers')
                 record=next((r for r in records if r.get('client_transfer_id')==pending['body']['client_transfer_id']),None)
             if not isinstance(record,dict):
-                raise ValueError('Esperando confirmación del movimiento interno; no se repite ni se compra todavía.')
+                raise EntryFundingPending('Esperando confirmación del movimiento interno; no se repite ni se compra todavía.')
             body=pending['body']
             if (record.get('source')!='event_contract' or record.get('destination')!='event_contract'
                 or record.get('client_transfer_id')!=body['client_transfer_id']
@@ -1355,13 +1369,13 @@ class ConnectedBot(Bot):
                 self.put('entry_funding',pending);self.db.commit()
                 raise ValueError(pending['error'])
             if status!='completed':
-                raise ValueError('Preparando automáticamente los fondos para BTC; esperando confirmación de Kalshi.')
+                raise EntryFundingPending('Preparando automáticamente los fondos para BTC; esperando confirmación de Kalshi.')
             self.account.invalidate_balance()
             self.account.balance() # Refresh total and shard breakdown together.
             credited=self.account.balance(exchange_index=body['destination_exchange_shard'])
             expected=Decimal(str(pending['destination_before']))+Decimal(body['amount'])/10000
             if Decimal(str(credited))<expected:
-                raise ValueError('Movimiento confirmado; esperando que Kalshi actualice el saldo disponible. No se repite.')
+                raise EntryFundingPending('Movimiento confirmado; esperando que Kalshi actualice el saldo disponible. No se repite.')
             self.put('entry_funding',None);self.db.commit()
             self.event('FONDOS PREPARADOS',f"Movimiento interno confirmado · ${body['amount']/10000:.4f} para el mercado BTC")
 
@@ -1400,7 +1414,7 @@ class ConnectedBot(Bot):
             finally:
                 self.account.invalidate_balance()
             self.event('PREPARANDO FONDOS',f"Movimiento interno solicitado · ${amount/10000:.4f} · sin compra hasta confirmar saldo")
-            raise ValueError('Preparando automáticamente los fondos para BTC; esperando confirmación de Kalshi.')
+            raise EntryFundingPending('Preparando automáticamente los fondos para BTC; esperando confirmación de Kalshi.')
         raise ValueError(f'Saldo total ${total:.4f}; disponible para este mercado ${market_cash:.4f}. No hay fondos internos libres verificables para completar la entrada.')
 
     def _prepare_entry(self,market):
@@ -1425,11 +1439,13 @@ class ConnectedBot(Bot):
         if type(exchange_index) is not int or exchange_index<0:
             raise ValueError('No se pudo verificar el saldo de este mercado: falta su exchange_index.')
         total_cash=self.account.balance()
-        budget=float((Decimal(str(max(0,total_cash)))*Decimal(str(self.settings['risk_pct']))/100)
+        entry_capital=self._entry_capital(total_cash)
+        budget=float((Decimal(str(entry_capital))*Decimal(str(self.settings['risk_pct']))/100)
                      .quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
         total_cash,market_cash=self._fund_entry_market(exchange_index,budget)
+        entry_capital=self._entry_capital(total_cash)
         self._entry_ready={'ticker':market['ticker'],'at':time.monotonic(),'mult':cache['mult'],
-                           'exchange_index':exchange_index,'account_cash':total_cash,'market_cash':market_cash}
+                           'exchange_index':exchange_index,'account_cash':entry_capital,'market_cash':market_cash}
 
     def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
         if self.pending_orders():return 'Esperando confirmación de Kalshi; no se repite la compra.'
@@ -2064,7 +2080,16 @@ class Controller:
         if len(active)==1:
             self.bot=active[0]
             self.connection={'message':'Cuenta REAL recuperada.','environment':'live'}
+    def recover_connection(self):
+        if isinstance(self.bot,ConnectedBot):return
+        root=getattr(self,'connection_root',self.bot)
+        active=[b for b in getattr(root,'connected_accounts',{}).values()
+                if isinstance(b,ConnectedBot) and not b.stop_event.is_set()]
+        if len(active)==1:
+            self.bot=active[0]
+            self.connection={'message':'Cuenta REAL recuperada en este servidor.','environment':'live'}
     def handle(self,event):
+        self.recover_connection()
         if not isinstance(event,dict) or event.get('action')=='ack':
             return None
         action=event.get('action');event_id=event.get('id')
@@ -2129,6 +2154,7 @@ class Controller:
         if len(self.seen)>500:self.seen.pop(next(iter(self.seen)))
         return reply
     def snapshot(self):
+        self.recover_connection()
         result=self.bot.view()
         with self.bot.lock:
             result['has_trades']=bool(self.bot.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone())
