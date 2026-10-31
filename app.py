@@ -88,6 +88,8 @@ html,body,.stApp,[data-testid="stAppViewContainer"]{background:#020711!important
 .ae .top-right{display:flex;align-items:center;gap:3cqw}.ae .market-dot{font-size:2cqw;color:#00eab7;text-shadow:0 0 1cqw currentColor}
 .ae .hero{grid-template-columns:1.04fr 1fr}.ae .hero>.panel{height:16cqw;padding:1.5cqw 1.6cqw;overflow:hidden}
 .ae .signal{height:12cqw;display:flex;align-items:center;gap:1.2cqw}
+.ae .signal:has(.arrow[style*="visibility:hidden"]) .arrow{display:none}
+.ae .signal:has(.arrow[style*="visibility:hidden"]) .down{font-size:4.8cqw;letter-spacing:0;white-space:nowrap}
 .ae .arrow{width:10cqw;flex:none;filter:drop-shadow(0 0 1cqw var(--signal-color))}.ae .arrow svg{display:block;width:100%;height:9.3cqw}
 .ae .down{font-size:6.7cqw;line-height:1;font-weight:900;letter-spacing:.03cqw;color:var(--signal-color);text-shadow:0 0 1cqw var(--signal-color)}
 .ae .pill{display:inline-block;border:1px solid var(--signal-color);border-radius:3cqw;padding:.25cqw 1.6cqw;font-size:1.6cqw;font-weight:700;white-space:nowrap;box-shadow:0 0 .7cqw var(--signal-color);margin-top:.55cqw}
