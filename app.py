@@ -767,34 +767,6 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
     letter-spacing:.1px;
 }
 
-
-/* JC ALPHA EDGE — responsive visual patch; motor unchanged */
-@media (min-width: 700px) {
-  .block-container {
-    max-width: 920px !important;
-    width: min(94vw, 920px) !important;
-    padding: 16px 22px 36px !important;
-  }
-  .rgrid { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; gap: 10px !important; }
-  .keycard { min-width: 0 !important; }
-  .rvalue { font-size: clamp(15px, 1.8vw, 21px) !important; overflow-wrap: anywhere; }
-  .techrow { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
-  .finalgrid { grid-template-columns: 1.65fr .85fr .85fr !important; }
-}
-@media (min-width: 481px) and (max-width: 699px) {
-  .block-container { max-width: 100% !important; width: 100% !important; padding: 10px 16px 26px !important; }
-  .rgrid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-}
-@media (max-width: 480px) {
-  .block-container { max-width: 100% !important; width: 100% !important; padding: 5px 8px 20px !important; }
-  .rgrid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-  .keycard { min-width: 0 !important; }
-  .rvalue { font-size: clamp(12px, 4vw, 17px) !important; overflow-wrap: anywhere; }
-  .techrow { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; }
-  .finalgrid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
-  .finalcard.motion { grid-column: 1 / -1 !important; }
-  .ohlc, .indicators { white-space: normal !important; overflow-wrap: anywhere; }
-}
 </style>
 """,
     unsafe_allow_html=True,
@@ -4083,8 +4055,8 @@ def live_dashboard():
     panel_html = f"""
 <div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
   <header class="rhead">
-    <div class="rtitle">BTC Signal</div>
-    <div class="rver">v4.6.1</div>
+    <div class="rtitle">⚡ JC ALPHA EDGE</div>
+    <div class="rver">BTC 15M  ·  SIGNAL INTELLIGENCE  ·  v4.6.1</div>
     <a class="gear" href="?page=settings" target="_self" aria-label="Ajustes">⚙</a>
     <div class="rlive"><i></i>{'Mercado en vivo' if market_live else 'Conexión parcial'}</div>
   </header>
@@ -4147,7 +4119,7 @@ def live_dashboard():
     </div>
   </section>
 
-  <footer><span>BTC SIGNAL v4.6.1 &nbsp; | &nbsp; DISEÑADO PARA TRADERS REALES</span><span>MENOS RUIDO. MÁS RESULTADOS.</span></footer>
+  <footer><span>JC ALPHA EDGE &nbsp; | &nbsp; BTC 15M</span><span>MENOS RUIDO. MÁS RESULTADOS.</span></footer>
 </div>
 <div class="ticker">{ticker} • SCORE {sig["final_score"]:+.2f}</div>
 """
@@ -4790,6 +4762,52 @@ def recent_alerts_panel():
 
 _RECENT_ALERTS_HOST = r'''
 <style>
+
+/* JC ALPHA EDGE / VISUAL REDESIGN 2026 — styling only */
+:root {color-scheme:dark;--edge-blue:#1278ff;--edge-cyan:#00dfff;--edge-ink:#030916;--edge-panel:#091a32;}
+.stApp,[data-testid="stAppViewContainer"]{background:radial-gradient(ellipse 75% 36% at 50% -5%,#073778 0%,#05142c 40%,#020712 100%)!important;}
+.block-container{max-width:1120px!important;padding:18px 22px 50px!important;}
+.refapp{max-width:100%;padding:14px 16px 20px;border:1px solid #1355a6;border-radius:24px;background:linear-gradient(160deg,#071b3b 0%,#040d1e 48%,#020714 100%);box-shadow:0 0 0 1px #1d76ff20,0 20px 60px #0009,inset 0 1px 0 #4ebcff40;}
+.refapp .rhead{height:76px!important;border-bottom:1px solid #1c5a9c!important;margin-bottom:12px!important;display:flex!important;flex-direction:column!important;align-items:flex-start!important;justify-content:center!important;text-align:left!important;padding:6px 12px!important;}
+.refapp .rtitle{font-size:25px!important;font-weight:950!important;letter-spacing:1px!important;color:#f4faff!important;text-shadow:0 0 16px #168aff99!important;}
+.refapp .rver{font-size:10px!important;letter-spacing:1.6px!important;color:#65baff!important;margin-top:4px!important;}
+.refapp .gear{right:12px!important;top:10px!important;font-size:24px!important;color:#7bdcff!important;}
+.refapp .rlive{right:12px!important;bottom:9px!important;font-size:10px!important;}
+.refapp .rhero{padding:18px 10px 20px!important;background:linear-gradient(130deg,#05265a,#071329 58%,#061b34);border:1px solid #176bd0;border-radius:19px;margin-bottom:12px!important;box-shadow:inset 0 0 40px #006aff12,0 0 22px #005cff16;}
+.refapp .rsignal{font-size:clamp(58px,9vw,96px)!important;line-height:1!important;letter-spacing:-2px!important;}
+.refapp .rhero.waiting .rsignal{font-size:clamp(26px,5vw,48px)!important;letter-spacing:0!important;}
+.refapp .rconf{font-size:11px!important;letter-spacing:.8px!important;padding:7px 18px!important;}
+.refapp .rgrid{grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:10px!important;margin:12px 0!important;}
+.refapp .rcard,.refapp .keycard,.refapp .reader,.refapp .presignal,.refapp .tech,.refapp .finalclose,.refapp .finalcard,.refapp .analysisbox,.refapp .probbox{background:linear-gradient(155deg,#0c2446,#061328)!important;border:1px solid #1667c4!important;border-radius:14px!important;box-shadow:inset 0 1px 0 #4db8ff20,0 8px 22px #0005!important;}
+.refapp .keycard{height:auto!important;min-height:102px!important;padding:14px!important;gap:12px!important;min-width:0!important;}
+.refapp .bigicon,.refapp .clock{font-size:29px!important;}
+.refapp .rlabel{font-size:10px!important;color:#88b8e7!important;letter-spacing:.8px!important;}
+.refapp .rvalue{font-size:clamp(16px,2.1vw,25px)!important;color:#fff!important;overflow-wrap:anywhere!important;}
+.refapp .rdelta{font-size:11px!important;}
+.refapp .probs{padding:15px!important;margin:12px 0!important;}
+.refapp .pbar{gap:7px!important;margin-top:10px!important;}
+.refapp .pup,.refapp .pdown{height:32px!important;font-size:12px!important;}
+.refapp .pleg{font-size:12px!important;}
+.refapp .reader{padding:16px!important;margin:12px 0!important;}
+.refapp .readerhead{font-size:12px!important;letter-spacing:1px!important;}
+.refapp .readerbody{grid-template-columns:1fr 84px!important;gap:12px!important;margin-top:12px!important;}
+.refapp .readerbody strong{font-size:clamp(16px,2.1vw,23px)!important;}
+.refapp .readerbody small{font-size:12px!important;line-height:1.45!important;}
+.refapp .rring{width:78px!important;height:78px!important;}
+.refapp .rring:after{width:62px!important;height:62px!important;background:#07172e!important;}
+.refapp .rring span{font-size:19px!important;}
+.refapp .presignal{padding:15px!important;margin:12px 0!important;}
+.refapp .pretitle{font-size:11px!important;}.refapp .predirection{font-size:25px!important;}.refapp .prepercent{font-size:24px!important;}.refapp .prenote{font-size:11px!important;}
+.refapp .finalgrid{gap:9px!important;}.refapp .finalcard{padding:12px!important;min-height:104px!important;}.refapp .finaltitle{font-size:10px!important;}.refapp .finalbig{font-size:19px!important;}.refapp .motionrow small{font-size:9px!important;}.refapp .motionrow b{font-size:15px!important;}.refapp .finalnote{font-size:10px!important;}.refapp .finalanalysis{gap:9px!important;grid-template-columns:1fr 125px!important;}.refapp .analysistext b{font-size:14px!important;}.refapp .probbox b{font-size:22px!important;}
+.refapp .tech{padding:14px!important;margin-top:12px!important;}.refapp .techhead{font-size:11px!important;}.refapp .techrow small,.refapp .techrow i{font-size:9px!important;}.refapp .techrow b{font-size:15px!important;}.refapp .techrow>div{padding:10px 3px!important;}
+.refapp footer{font-size:9px!important;opacity:.75!important;}
+#alpha-recent-alerts .ra93-panel{border-color:#1767bd!important;background:linear-gradient(155deg,#071b37,#030b1c)!important;box-shadow:0 12px 32px #0005!important;}
+#alpha-recent-alerts .ra93-card{border-color:#14519b!important;background:#091b32!important;}
+#alpha-recent-alerts h2{color:#dff5ff!important;}
+#alpha-chart-stable-host{border:1px solid #1459ad;border-radius:16px;overflow:hidden;box-shadow:0 14px 40px #0008;}
+@media(max-width:800px){.block-container{max-width:100%!important;padding:9px 10px 28px!important}.refapp{padding:9px!important}.refapp .rgrid{grid-template-columns:repeat(2,minmax(0,1fr))!important}.refapp .rvalue{font-size:19px!important}}
+@media(max-width:480px){.block-container{padding:5px 5px 20px!important}.refapp{padding:6px!important;border-radius:15px!important}.refapp .rhead{height:66px!important}.refapp .rtitle{font-size:19px!important}.refapp .rver{font-size:8px!important;letter-spacing:.4px!important}.refapp .rlive{font-size:8px!important}.refapp .rhero{padding:15px 4px!important}.refapp .rsignal{font-size:60px!important}.refapp .rhero.waiting .rsignal{font-size:30px!important}.refapp .rgrid{gap:6px!important}.refapp .keycard{min-height:77px!important;padding:8px!important;gap:6px!important}.refapp .bigicon,.refapp .clock{font-size:22px!important}.refapp .rlabel{font-size:8px!important}.refapp .rvalue{font-size:16px!important}.refapp .rdelta{font-size:9px!important}.refapp .finalgrid{grid-template-columns:1fr 1fr!important}.refapp .finalcard.motion{grid-column:1/-1!important}.refapp .finalanalysis{grid-template-columns:1fr 86px!important}.refapp .finalcard{min-height:76px!important;padding:8px!important}.refapp .reader{padding:10px!important}.refapp .readerbody{grid-template-columns:1fr 60px!important}.refapp .rring{width:56px!important;height:56px!important}.refapp .rring:after{width:44px!important;height:44px!important}.refapp .rring span{font-size:14px!important}.refapp .techrow b{font-size:10px!important}.refapp .techrow small,.refapp .techrow i{font-size:7px!important}}
+
 #alpha-recent-alerts{margin:20px 0 24px;color:#e6edf3;font-family:Inter,system-ui,sans-serif}
 #alpha-recent-alerts .ra93-panel{padding:22px;border:1px solid #263844;border-radius:22px;background:#04121a}
 #alpha-recent-alerts .ra93-heading{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:24px}
