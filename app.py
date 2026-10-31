@@ -1,5 +1,5 @@
 """JC ALPHA EDGE — maqueta visual solamente.
-Ejecutar: streamlit run JC_ALPHA_EDGE_SOLO_VISUAL.py
+Ejecutar: streamlit run JC_ALPHA_EDGE_VISUAL_DETALLADO.py
 No se conecta a exchanges, no calcula señales y no opera.
 """
 import streamlit as st
@@ -84,15 +84,56 @@ css='''
 .ae .history{padding:6px}.ae table{font-size:7px;margin-top:5px}.ae td,.ae th{padding:4px 2px;white-space:nowrap}.ae .notice{font-size:8px}
 }
 @media(max-width:390px){.ae .metric .ico{font-size:12px}.ae .metric{gap:2px}.ae .down{font-size:20px}.ae .bitcoin{font-size:30px}.ae .chartwrap{height:175px}}
+
+/* Detalles reconstruidos de la referencia: compactos, brillo y ornamentos */
+.ae .frame{position:relative;background:linear-gradient(160deg,#030b1b 0%,#010611 60%,#020918 100%)}
+.ae .panel{border-color:#087fff;box-shadow:inset 0 0 11px #035cba55,0 0 3px #0a84ff,0 0 11px #006fff83}
+.ae .top{position:relative;background:linear-gradient(126deg,transparent 0 20%,#0641844d 22%,transparent 24%,transparent 29%,#087cf04d 31%,transparent 33%);border-bottom-color:#147fe1}
+.ae .brand b{position:relative;font-weight:900;font-style:italic;letter-spacing:1.5px;color:#4eb6ff;text-shadow:0 0 3px #b0e4ff,0 0 10px #007cff,0 0 17px #0059ff}
+.ae .crown{position:absolute;left:50%;top:-13px;transform:translateX(-50%);color:#ffbb35;font-style:normal;font-size:16px;text-shadow:0 0 7px #ff9e00}
+.ae .arrow{display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 0 7px #ff233b) drop-shadow(0 0 13px #ff133e)}
+.ae .arrow svg{width:68px;height:82px;display:block}
+.ae .coin{height:96px;width:96px;flex:none;display:grid;place-items:center;border-radius:50%;border:2px solid #037aff;background:radial-gradient(circle at 37% 30%,#073c91 0%,#03132e 56%,#010713 80%);box-shadow:inset 0 0 10px #069cff,0 0 8px #008cff,0 0 22px #036bff90;position:relative}
+.ae .coin:before,.ae .coin:after{content:'';position:absolute;inset:6px;border:1px dashed #1689ff;border-radius:50%;opacity:.8}
+.ae .coin:after{inset:12px;border-style:solid;opacity:.3}
+.ae .coin span{font-size:70px;font-weight:900;color:#158bff;text-shadow:0 0 12px #027bff;z-index:1}
+.ae .metric{position:relative;overflow:hidden}.ae .spark{position:absolute;right:6px;bottom:8px;width:40%;height:22px;filter:drop-shadow(0 0 4px #f33)}
+.ae .bars{filter:drop-shadow(0 0 5px #ff415c)}.ae .clock,.ae .targeticon{filter:drop-shadow(0 0 5px #078dff)}
+.ae .down{filter:drop-shadow(0 0 5px #f13)}
+.ae .chartpanel{box-shadow:inset 0 0 12px #006eff44,0 0 13px #006fff99}
+.ae .chartwrap svg{background:linear-gradient(180deg,#031126,#030d1e)}
+.ae .pre{box-shadow:inset 0 0 15px #045ab944,0 0 11px #0379ff91}
+.ae .supportbar{gap:4px}.ae .supportbar>div{box-shadow:0 0 7px currentColor}
+.ae .history table{table-layout:auto}
+@media(max-width:700px){
+.ae .frame{padding:5px 7px}
+.ae .top{height:48px}
+.ae .brand b{font-size:clamp(14px,4vw,20px)}
+.ae .crown{font-size:11px;top:-10px}
+.ae .hero>.panel{height:88px;min-height:88px}
+.ae .arrow svg{width:36px;height:51px}
+.ae .signal{gap:5px}
+.ae .down{font-size:clamp(21px,5.6vw,34px)}
+.ae .coin{width:60px;height:60px;margin-left:3px}
+.ae .coin span{font-size:43px}
+.ae .coin:before{inset:4px}.ae .coin:after{inset:8px}
+.ae .metric{height:65px;padding:4px 5px}
+.ae .metric .ico{font-size:clamp(15px,3.9vw,25px)}
+.ae .metric strong{font-size:clamp(10px,2.7vw,17px)}
+.ae .spark{height:12px!important;bottom:4px!important}
+.ae .chartwrap{height:183px}
+.ae .readers .reader{min-height:80px}
+.ae .history td,.ae .history th{font-size:clamp(6px,1.7vw,9px)}
+}
 </style>
 '''
 
 html=f'''
 <div class="ae"><div class="frame">
-<div class="top"><span class="blue" style="font-size:26px">☰</span><div class="brand"><b>♛ JC ALPHA EDGE</b><small>BTC SIGNAL v4.6.1</small></div><div style="display:flex;align-items:center;gap:13px"><span class="green tiny">● <span class="muted">Mercado en vivo</span></span><span class="blue" style="font-size:24px">⚙</span></div></div>
-<div class="row hero"><div class="panel"><div class="muted tiny">SEÑAL OFICIAL DEL BOT</div><div class="signal"><div class="arrow">⬇</div><div><div class="down">DOWN</div><span class="pill">APOYO DEL MOTOR 64%</span></div></div></div><div class="panel state"><div><div class="muted tiny">ESTADO ACTUAL</div><strong style="display:block;font-size:15px;margin:5px 0">OPERACIÓN ACTIVA</strong><div class="muted tiny">Analizando el mercado en tiempo real para el mejor punto de entrada.</div></div><div class="bitcoin">₿</div></div></div>
+<div class="top"><span class="blue" style="font-size:26px">☰</span><div class="brand"><b><span class="crown">♛</span>JC ALPHA EDGE</b><small>BTC SIGNAL v4.6.1</small></div><div style="display:flex;align-items:center;gap:13px"><span class="green tiny">● <span class="muted">Mercado en vivo</span></span><span class="blue" style="font-size:24px">⚙</span></div></div>
+<div class="row hero"><div class="panel"><div class="muted tiny">SEÑAL OFICIAL DEL BOT</div><div class="signal"><div class="arrow"><svg viewBox="0 0 90 112" aria-hidden="true"><path d="M28 5 H62 V57 H87 L45 106 L3 57 H28 Z" fill="#ff354b"/></svg></div><div><div class="down">DOWN</div><span class="pill">APOYO DEL MOTOR 64%</span></div></div></div><div class="panel state"><div><div class="muted tiny">ESTADO ACTUAL</div><strong style="display:block;font-size:15px;margin:5px 0">OPERACIÓN ACTIVA</strong><div class="muted tiny">Analizando el mercado en tiempo real para el mejor punto de entrada.</div></div><div class="coin"><span>₿</span></div></div></div>
 <div class="panel pre row"><div class="prehead"><span class="muted tiny">PRESEÑAL · PRESIÓN ACTUAL</span><span class="tag red" style="border-color:#d82c55">COINCIDE CON LA SEÑAL</span></div><div style="display:flex;justify-content:space-between;align-items:center"><span class="red big">POSIBLE DOWN</span><strong class="red big">93%</strong></div><div class="track"><div class="fill" style="width:93%"></div></div><p>Presión bajista temprana detectada. Esperando evolución del mercado.<br>Porcentaje de apoyo, no probabilidad de acierto.</p></div>
-<div class="row metrics"><div class="panel metric"><span class="ico" style="color:#ffac22">₿</span><div><small>BTC / USD</small><strong>$76,637</strong><em class="red">-0.15%</em></div></div><div class="panel metric"><span class="ico">◎</span><div><small>TARGET</small><strong>$76,739</strong></div></div><div class="panel metric"><span class="ico red">▂▅▇</span><div><small>DISTANCIA AL TARGET</small><strong class="red">$102</strong><em class="red">0.13%</em></div></div><div class="panel metric"><span class="ico">◷</span><div style="width:100%"><small>TIEMPO RESTANTE</small><strong>10:42</strong><div class="track" style="height:7px;margin-top:7px"><div class="fill" style="width:75%"></div></div></div></div></div>
+<div class="row metrics"><div class="panel metric"><span class="ico" style="color:#ffac22">₿</span><div><small>BTC / USD</small><strong>$76,637</strong><em class="red">-0.15%</em><svg class="spark" viewBox="0 0 90 25"><polyline points="0,20 7,16 13,20 20,11 26,16 32,9 39,13 45,5 52,11 58,7 65,14 72,4 78,9 90,1" fill="none" stroke="#ff3452" stroke-width="2"/></svg></div></div><div class="panel metric"><span class="ico targeticon">◎</span><div><small>TARGET</small><strong>$76,739</strong></div></div><div class="panel metric"><span class="ico red bars">▂▅▇</span><div><small>DISTANCIA AL TARGET</small><strong class="red">$102</strong><em class="red">0.13%</em></div></div><div class="panel metric"><span class="ico clock">◷</span><div style="width:100%"><small>TIEMPO RESTANTE</small><strong>10:42</strong><div class="track" style="height:7px;margin-top:7px"><div class="fill" style="width:75%"></div></div></div></div></div>
 <div class="panel support row"><div class="muted tiny">APOYO CALCULADO · UP / DOWN</div><div class="supportbar"><div class="upbar">36%</div><div class="downbar">64%</div></div><div class="split"><span class="green">● UP 36%</span><span class="red">● DOWN 64%</span></div></div>
 <div class="row readers"><div class="panel reader"><div style="display:flex;justify-content:space-between"><span class="muted tiny">⌁ &nbsp; LECTOR DE CIERRE</span><span class="tag green" style="border-color:#00d9b1">ACTIVO</span></div><div class="readbody"><div class="donut"><span>73%</span></div><div><strong>VENTAJA MODERADA<br>PARA DOWN</strong><div class="muted tiny" style="margin-top:7px">La dirección sigue activa, pero la presión inmediata aún puede cambiar.</div></div></div></div><div class="panel reader"><div class="muted tiny">▥ &nbsp; MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motion"><div><span class="muted tiny">30s</span><strong class="green">−</strong></div><div><span class="muted tiny">10s</span><strong class="red">-3</strong></div><div><span class="muted tiny">5s</span><strong class="red">-2</strong></div></div><div class="muted tiny" style="text-align:center;margin-top:6px">Cambio de precio en los últimos segundos.</div></div></div>
 <div class="panel chartpanel row"><div class="charthead"><strong class="muted">₿ &nbsp; BTC / USD · 1M · KRAKEN</strong><div class="tabs"><span class="selected">1m</span><span>3m</span><span>5m</span><span>15m</span><span>1h</span><span>4h</span><span>1D</span></div><span class="blue">⛶</span></div><div class="chartwrap">{chart}<div class="levels"><span>76,850</span><span>76,800</span><span class="res">RESISTANCE<br>76,786</span><span>76,750</span><span class="target">TARGET<br>76,739</span><span class="btc">BTC<br>76,637</span><span>76,600</span><span class="green">SUPPORT<br>76,545</span><span>76,500</span></div></div><div class="times"><span>5:50 PM</span><span>5:55 PM</span><span>6:00 PM</span><span>6:05 PM</span><span>6:10 PM</span><span>6:15 PM</span><span>6:20 PM</span></div></div>
