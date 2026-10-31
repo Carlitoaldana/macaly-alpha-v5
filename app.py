@@ -58,8 +58,32 @@ css='''
 .ae .indicators{grid-template-columns:1.25fr 1fr}.ae .indicator{padding:11px 15px}.ae .chips{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:10px}.ae .chip{border:1px solid #174c9c;border-radius:16px;padding:6px 8px;white-space:nowrap;font-size:11px;text-align:center}.ae .rsi{width:100%;height:46px;margin-top:7px}
 .ae .history{padding:11px 15px}.ae table{border-collapse:collapse;width:100%;font-size:11px;margin-top:9px}.ae th{color:#93bce8;background:#082047;text-align:left;font-weight:normal}.ae td,.ae th{padding:6px;border-bottom:1px solid #0d2d55}.ae tr:last-child td{border-bottom:0}
 .ae .notice{text-align:center;color:#6086ae;font-size:11px;padding:10px 0 0}
-@media(max-width:700px){.block-container{padding:4px 5px 16px!important}.ae .frame{padding:7px}.ae .top{height:51px}.ae .brand b{font-size:17px;letter-spacing:1px}.ae .brand small{font-size:9px}.ae .hero{grid-template-columns:1fr 1fr;gap:6px}.ae .hero>.panel{min-height:100px;padding:8px}.ae .arrow{font-size:42px}.ae .signal{gap:4px}.ae .down{font-size:27px}.ae .pill{font-size:9px;padding:3px 5px}.ae .bitcoin{font-size:43px}.ae .state{gap:3px}.ae .metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.ae .metric{height:74px;padding:8px}.ae .metric strong{font-size:17px}.ae .metric .ico{font-size:25px}.ae .readers{grid-template-columns:1fr;gap:6px}.ae .chartwrap{height:240px}.ae .indicators{grid-template-columns:1fr;gap:6px}.ae .chips{grid-template-columns:repeat(3,minmax(0,1fr))}.ae .tag{font-size:9px}.ae .pre{padding:9px}.ae .pre .big{font-size:19px}.ae .charthead strong{font-size:12px}.ae .tabs span{padding:3px 7px}.ae table{font-size:9px}.ae td,.ae th{padding:5px 3px}}
-@media(max-width:390px){.ae .down{font-size:23px}.ae .arrow{font-size:36px}.ae .bitcoin{font-size:33px}.ae .metric strong{font-size:15px}.ae .brand b{font-size:15px}.ae .top{gap:4px}.ae .chartwrap{height:200px}}
+/* Maqueta compacta: mantiene cuatro métricas y dos lectores en móvil */
+@media(max-width:700px){
+.block-container{max-width:100%!important;padding:0 2px 12px!important}
+.ae{font-size:10px;line-height:1.12}.ae .frame{padding:5px}
+.ae .row{gap:5px;margin-bottom:5px}.ae .panel{border-radius:7px}
+.ae .top{height:43px;gap:4px;padding:0 2px 4px;margin-bottom:5px}
+.ae .brand b{font-size:clamp(13px,3.7vw,19px);letter-spacing:.3px}.ae .brand small{font-size:8px}
+.ae .top .tiny{font-size:8px}.ae .top>span{font-size:17px!important}
+.ae .hero{grid-template-columns:1fr 1fr;gap:5px}.ae .hero>.panel{min-height:72px;padding:6px}
+.ae .tiny{font-size:8px}.ae .signal{gap:4px}.ae .arrow{font-size:36px}.ae .down{font-size:clamp(20px,5.2vw,32px);letter-spacing:0}.ae .pill{font-size:8px;padding:2px 4px}
+.ae .bitcoin{font-size:38px}.ae .state strong{font-size:11px!important;margin:3px 0!important}
+.ae .pre{padding:7px 8px}.ae .pre .big{font-size:19px;margin:3px 0}.ae .pre p{font-size:9px;margin-top:3px}.ae .tag{font-size:7px;padding:3px 5px}
+.ae .track{height:7px}
+.ae .metrics{grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
+.ae .metric{height:64px;padding:5px 3px;gap:3px;align-items:center}.ae .metric .ico{font-size:clamp(13px,3.6vw,23px)}
+.ae .metric small{font-size:clamp(6px,1.6vw,9px);line-height:1.05}.ae .metric strong{font-size:clamp(10px,2.65vw,17px);white-space:normal;overflow-wrap:anywhere}.ae .metric em{font-size:8px}
+.ae .support{padding:6px 8px}.ae .supportbar{margin-top:5px}.ae .supportbar>div{height:15px;line-height:15px}.ae .split{margin-top:4px}
+.ae .readers{grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.ae .reader{min-height:83px;padding:6px}
+.ae .readbody{gap:5px;margin-top:5px}.ae .donut{width:49px;height:49px}.ae .donut span{width:37px;height:37px;font-size:12px}
+.ae .readbody strong{font-size:9px}.ae .readbody .tiny{font-size:8px!important}.ae .motion{margin-top:9px}.ae .motion strong{font-size:16px}
+.ae .chartpanel{padding:6px}.ae .charthead{gap:4px}.ae .charthead strong{font-size:10px}.ae .tabs{gap:2px}.ae .tabs span{padding:3px 4px;font-size:8px}.ae .chartwrap{height:190px;margin-top:5px;padding-right:45px}
+.ae .levels{width:44px;font-size:7px}.ae .levels span{padding:2px 0}.ae .times{font-size:7px;margin-right:46px}
+.ae .indicators{grid-template-columns:1.25fr 1fr;gap:5px}.ae .indicator{padding:6px}.ae .chips{grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;margin-top:5px}.ae .chip{font-size:7px;padding:3px 1px}.ae .rsi{height:44px}
+.ae .history{padding:6px}.ae table{font-size:7px;margin-top:5px}.ae td,.ae th{padding:4px 2px;white-space:nowrap}.ae .notice{font-size:8px}
+}
+@media(max-width:390px){.ae .metric .ico{font-size:12px}.ae .metric{gap:2px}.ae .down{font-size:20px}.ae .bitcoin{font-size:30px}.ae .chartwrap{height:175px}}
 </style>
 '''
 
