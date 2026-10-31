@@ -118,6 +118,75 @@ html,body,.stApp,[data-testid="stAppViewContainer"]{background:#020711!important
 .ae .history{padding:1.1cqw 1.6cqw}.ae .history-head{display:flex;align-items:center;justify-content:space-between}.ae table{width:100%;border-collapse:collapse;font-size:1.55cqw;line-height:1.3;margin-top:1.1cqw}.ae th{color:#8eb7df;font-weight:500;font-size:1.2cqw;text-align:left;background:#071d38}.ae td,.ae th{padding:.8cqw .6cqw;border-bottom:1px solid #113153;white-space:nowrap}.ae tr:last-child td{border:0}.ae .notice{font-size:1.2cqw;color:#7598bb;text-align:center;padding:1cqw 0 .3cqw}
 .ae button:focus-visible,.ae a:focus-visible{outline:2px solid #bcf2ff;outline-offset:2px}
 @media(max-width:700px){.block-container{padding:20px 3px 10px!important}.ae .frame{border:0}.ae .prehead{flex-wrap:nowrap}}
+
+/* Lectura cómoda: el panel crece hacia abajo, sin reducirlo al viewport. */
+.ae .panel{border-color:#285b90;box-shadow:inset 0 0 8px #0059cf12,0 0 3px #0077ff18}
+.ae .frame{box-shadow:none}
+.ae .brand b{ text-shadow:0 0 3px #006fff55 }
+.ae .nav-icon{ text-shadow:none }
+@media(max-width:700px){
+ .ae{font-size:15px;line-height:1.5}
+ .ae .frame{padding:7px}
+ .ae .panel{border-radius:14px}
+ .ae .row{gap:12px;margin-bottom:14px}
+ .ae .tiny{font-size:12px;line-height:1.5}
+ .ae .top{min-height:104px;grid-template-columns:1fr;padding:20px 8px 12px;gap:12px;margin-bottom:14px}
+ .ae .brand b{font-size:clamp(25px,7cqw,38px)}
+ .ae .brand small{font-size:12px;letter-spacing:1px}
+ .ae .crown{font-size:14px;top:-17px}
+ .ae .top-right{justify-content:flex-end;gap:20px}
+ .ae .nav-icon{font-size:28px;min-width:44px;min-height:44px;display:grid;place-items:center}
+ .ae .market-dot{font-size:15px}
+ .ae .hero,.ae .readers,.ae .indicators{grid-template-columns:minmax(0,1fr)}
+ .ae .hero>.panel{height:auto;min-height:150px;padding:18px;overflow:visible}
+ .ae .signal{height:auto;min-height:106px;gap:12px;justify-content:center}
+ .ae .signal>div:last-child{min-width:0}
+ .ae .down{font-size:clamp(42px,13cqw,76px)}
+ .ae .signal:has(.arrow[style*="visibility:hidden"]) .down{font-size:clamp(28px,8cqw,46px)}
+ .ae .arrow{width:62px}.ae .arrow svg{height:76px}
+ .ae .pill{font-size:11px;padding:5px 10px;border-radius:20px;margin-top:10px;white-space:normal}
+ .ae .state strong{font-size:18px;margin:8px 0}
+ .ae .state-note{font-size:14px;max-width:none}
+ .ae .coin-engraved{width:100px;height:100px;margin:0}
+ .ae .pre{padding:18px;min-height:190px;margin-bottom:14px}
+ .ae .prehead{flex-wrap:wrap;gap:8px}
+ .ae .tag{font-size:10px;padding:5px 9px;border-radius:18px;white-space:normal}
+ .ae .pre-main{margin:16px 0;gap:8px}.ae .big{font-size:clamp(21px,5.7cqw,30px)}
+ .ae .track{height:10px;border-radius:10px}
+ .ae .pre p{font-size:14px;line-height:1.6;margin-top:12px}
+ .ae .metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+ .ae .metric{height:auto;min-height:120px;padding:16px 10px;gap:8px;overflow:visible}
+ .ae .metric .ico{font-size:32px;filter:none}
+ .ae .metric small{font-size:11px;line-height:1.4}
+ .ae .metric strong{font-size:clamp(20px,5.5cqw,30px);margin-top:5px}
+ .ae .metric em{font-size:11px;line-height:1.5;margin-top:5px;overflow-wrap:anywhere}
+ .ae .spark{width:58px;height:18px;bottom:6px;right:8px;opacity:.5}
+ .ae .support{padding:18px;min-height:122px;margin-bottom:14px}
+ .ae .supportbar{gap:6px;margin-top:14px}
+ .ae .supportbar>div{height:30px;line-height:30px;font-size:14px;border-radius:6px;box-shadow:none}
+ .ae .split{font-size:12px;margin-top:10px}
+ .ae .reader{min-height:190px;padding:18px}
+ .ae .readbody{gap:15px;margin-top:20px}
+ .ae .readbody strong{font-size:16px;line-height:1.5}
+ .ae .readbody .tiny{font-size:14px;margin-top:9px}
+ .ae .donut{width:80px;height:80px}.ae .donut span{width:61px;height:61px;font-size:22px}
+ .ae .motion{margin-top:28px}.ae .motion strong{font-size:24px;margin-top:12px}
+ .ae .motion-note{font-size:13px;margin-top:20px}
+ .ae .chartpanel{padding:14px 8px;margin-bottom:14px}
+ .ae .charthead{flex-direction:column;align-items:stretch;gap:14px;padding:0 5px 14px}
+ .ae .charthead strong{font-size:14px;white-space:normal}.ae .charthead .btc-icon{font-size:23px}
+ .ae .jc-tf-buttons{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}
+ .ae .jc-tf-buttons button{font-size:14px;padding:10px 4px;min-height:44px;border-radius:8px}
+ .ae .indicator{padding:18px;min-height:160px}
+ .ae .chips{grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:18px}
+ .ae .chip{font-size:13px;padding:12px 5px;min-height:44px;border-radius:22px}
+ .ae .rsi{height:auto;min-height:100px;margin-top:18px}
+ .ae .history{padding:18px 12px}.ae .history>div:first-child{gap:10px;flex-wrap:wrap}
+ .ae table{font-size:14px;line-height:1.5;margin-top:16px;min-width:480px}
+ .ae th{font-size:11px}.ae td,.ae th{padding:14px 9px}
+ .ae .notice{font-size:11px;line-height:1.5;padding:16px 6px}
+}
+
 </style>
 """,
     unsafe_allow_html=True,
@@ -2920,7 +2989,7 @@ body{background:#030d1d!important}
 section.panel{margin:0!important;padding:0!important;border:0!important;background:transparent!important;box-shadow:none!important}
 section.panel>.header,section.panel>.cards,section.panel>details,section.panel>.tools,section.panel>.floatcounts,section.panel>.tooltip{display:none!important}
 .canvas{margin:0!important;border:0!important}
-.chartnav{display:none!important}
+.chartnav{display:flex!important;flex-wrap:wrap;gap:8px;padding:14px 8px;background:#030d1d}.chartnav button{min-height:44px;min-width:44px;font-size:16px}.chartnav span{font-size:12px!important}
 </style>
 <section class="panel">
 <header class="header"><div><h2>BTC / USD</h2><div class="sub" id="subtitle"></div></div><div><div class="price" id="price"></div><div class="live" id="live"></div></div></header>
@@ -2958,22 +3027,23 @@ document.querySelectorAll('.toggle').forEach(x=>x.removeAttribute('data-unused')
 for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
 const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(0,Math.min(offset,Math.max(0,n-visible)));const end=n-Math.round(offset),start=Math.max(0,end-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$('canvas').innerHTML='<div class="empty">Esperando velas actuales…</div>';return}
 const last=all[n-1];$('legend').innerHTML=['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join('');
-const W=720,H=330,L=10,R=82,T=12,B=300,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
+const W=Math.max(280,Math.min(720,$("canvas").clientWidth||720)),H=W<=700?560:440,L=10,R=90,T=18,B=H-36,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
 let vals=rows.flatMap(r=>[r.low,r.high]);for(const k of ['ema9','ema21','vwap'])if(toggles[k])vals.push(...rows.map(r=>r[k]).filter(v=>v!=null));for(const v of [D.target,D.support,D.resistance,D.price])if(v!=null)vals.push(v);let lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,5);lo-=pad;hi+=pad;lo+=pricePan;hi+=pricePan;const y=v=>T+(hi-v)/(hi-lo)*(B-T),x=i=>L+(i+.5)*step;
 let s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Gráfica BTC con velas, indicadores y RSI"><defs><clipPath id="plot"><rect x="0" y="0" width="'+(W-R)+'" height="'+B+'"/></clipPath></defs>';
-for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="10">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
+for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="12">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
 for(let k=0;k<=4;k++){const xx=L+plot*k/4;s+='<line x1="'+xx+'" y1="'+T+'" x2="'+xx+'" y2="'+(B)+'" stroke="#191c34"/>'}
 s+='<g clip-path="url(#plot)">';if(toggles.volume){const max=Math.max(...rows.map(r=>r.volume),1);rows.forEach((r,i)=>{let h=r.volume/max*60;s+='<rect x="'+(x(i)-body/2)+'" y="'+(B-h)+'" width="'+body+'" height="'+h+'" fill="'+(r.close>=r.open?'#00dfb5':'#e64b4b')+'" opacity=".9"/>'})}
 rows.forEach((r,i)=>{const c=r.close>=r.open?'#00dfb5':'#e64b4b';s+='<line x1="'+x(i)+'" x2="'+x(i)+'" y1="'+y(r.high)+'" y2="'+y(r.low)+'" stroke="'+c+'" stroke-width="2.1"/><rect x="'+(x(i)-body/2)+'" y="'+Math.min(y(r.open),y(r.close))+'" width="'+body+'" height="'+Math.max(1.8,Math.abs(y(r.open)-y(r.close)))+'" fill="'+c+'"/>'});
 for(const k of ['ema9','ema21','vwap'])if(toggles[k]){let points=rows.map((r,i)=>r[k]==null?'':x(i)+','+y(r[k])).filter(Boolean).join(' ');s+='<polyline points="'+points+'" fill="none" stroke="'+colors[k]+'" stroke-width="3" '+(k==='vwap'?'stroke-dasharray="8 6"':'')+'/>'}
 s+='</g>';let levels=[[D.resistance,'RESISTANCE','#e64b4b'],[D.target,'TARGET','#00dfb5'],[D.price,'BTC','#169cff'],[D.support,'SUPPORT','#00dfb5']].filter(r=>r[0]!=null).map(r=>({v:r[0],label:r[1],c:r[2],yy:y(r[0]),labelY:y(r[0])})).filter(l=>l.yy>=T&&l.yy<=B).sort((a,b)=>a.yy-b.yy);
 let previous=-100;for(const l of levels){l.labelY=Math.max(T+12,previous+27,l.yy);previous=l.labelY}let excess=previous-(B-10);if(excess>0)for(const l of levels)l.labelY-=excess;
-for(const l of levels){s+='<line x1="0" y1="'+l.yy+'" x2="'+(W-R)+'" y2="'+l.yy+'" stroke="'+l.c+'" stroke-dasharray="4 5" opacity=".8"/><path d="M '+(W-R-6)+' '+l.yy+' L '+(W-R+5)+' '+l.labelY+'" stroke="'+l.c+'" fill="none"/><rect x="'+(W-R+4)+'" y="'+(l.labelY-12)+'" width="77" height="25" rx="4" fill="'+l.c+'"/><text x="'+(W-R+11)+'" y="'+(l.labelY-2)+'" fill="#06101b" font-size="8" font-weight="850">'+l.label+'</text><text x="'+(W-R+11)+'" y="'+(l.labelY+9)+'" fill="#06101b" font-size="10" font-weight="750">'+fmt(l.v)+'</text>'}
+for(const l of levels){s+='<line x1="0" y1="'+l.yy+'" x2="'+(W-R)+'" y2="'+l.yy+'" stroke="'+l.c+'" stroke-dasharray="4 5" opacity=".8"/><path d="M '+(W-R-6)+' '+l.yy+' L '+(W-R+5)+' '+l.labelY+'" stroke="'+l.c+'" fill="none"/><rect x="'+(W-R+4)+'" y="'+(l.labelY-12)+'" width="77" height="25" rx="4" fill="'+l.c+'"/><text x="'+(W-R+11)+'" y="'+(l.labelY-2)+'" fill="#06101b" font-size="10" font-weight="850">'+l.label+'</text><text x="'+(W-R+11)+'" y="'+(l.labelY+9)+'" fill="#06101b" font-size="12" font-weight="750">'+fmt(l.v)+'</text>'}
 if(false){const rt=620,rh=120,ry=v=>rt+(100-v)/100*rh;s+='<text x="14" y="610" fill="#aa8dc5" font-size="12">RSI 14</text>';for(const v of [30,70])s+='<line x1="0" y1="'+ry(v)+'" x2="'+(W-R)+'" y2="'+ry(v)+'" stroke="#3c284c" stroke-dasharray="5 5"/>';s+='<polyline points="'+rows.map((r,i)=>r.rsi==null?'':x(i)+','+ry(r.rsi)).filter(Boolean).join(' ')+'" fill="none" stroke="#f000ff" stroke-width="3"/>';if(last.rsi!=null)s+='<rect x="'+(W-R+4)+'" y="'+(ry(last.rsi)-12)+'" width="65" height="25" rx="3" fill="#f000ff"/><text x="'+(W-R+11)+'" y="'+(ry(last.rsi)+6)+'" fill="white" font-size="15">'+fmt(last.rsi)+'</text>'}
 for(let k=0;k<4;k++){const i=Math.round((rows.length-1)*k/3),tm=new Date(rows[i].t*1000).toLocaleString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',...(D.timeframe==='1D'?{month:'short',day:'numeric'}:{})});s+='<text x="'+x(i)+'" y="'+(H-7)+'" fill="#95a1bc" font-size="11" text-anchor="middle">'+tm+'</text>'}
 s+='<g id="crosshair"></g></svg>';$('canvas').innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end};
 }
 $('zoomin').onclick=()=>{visible=Math.max(12,Math.round(visible*.75));persist();draw()};$('zoomout').onclick=()=>{visible=Math.round(visible*1.3);persist();draw()};$('older').onclick=()=>{offset+=Math.max(5,Math.floor(visible/4));persist();draw()};$('newer').onclick=()=>{offset-=Math.max(5,Math.floor(visible/4));persist();draw()};$('reset').onclick=()=>{offset=0;visible=32;pricePan=0;draw();persist()};
+window.addEventListener('resize',()=>requestAnimationFrame(draw));
 const touchPoints=new Map();let gesture=null;
 function chartPoint(e){const r=$('canvas').getBoundingClientRect();return {x:(e.clientX-r.left)/r.width*geometry.W,y:(e.clientY-r.top)/r.height*geometry.H}}
 function beginGesture(){
