@@ -118,19 +118,6 @@ html,body,.stApp,[data-testid="stAppViewContainer"]{background:#020711!important
 .ae .history{padding:1.1cqw 1.6cqw}.ae .history-head{display:flex;align-items:center;justify-content:space-between}.ae table{width:100%;border-collapse:collapse;font-size:1.55cqw;line-height:1.3;margin-top:1.1cqw}.ae th{color:#8eb7df;font-weight:500;font-size:1.2cqw;text-align:left;background:#071d38}.ae td,.ae th{padding:.8cqw .6cqw;border-bottom:1px solid #113153;white-space:nowrap}.ae tr:last-child td{border:0}.ae .notice{font-size:1.2cqw;color:#7598bb;text-align:center;padding:1cqw 0 .3cqw}
 .ae button:focus-visible,.ae a:focus-visible{outline:2px solid #bcf2ff;outline-offset:2px}
 @media(max-width:700px){.block-container{padding:20px 3px 10px!important}.ae .frame{border:0}.ae .prehead{flex-wrap:nowrap}}
-/* Mismo orden y distribución; solo un poco más de altura. */
-.ae .panel{border-color:#285b90;box-shadow:inset 0 0 8px #0059cf12,0 0 3px #0077ff18}
-.ae .frame{box-shadow:none}
-.ae .hero>.panel{height:20cqw}
-.ae .signal{height:16cqw}
-.ae .pre{min-height:20cqw;padding-top:2.2cqw;padding-bottom:2.2cqw}
-.ae .metric{height:16cqw}
-.ae .support{min-height:13.5cqw;padding-top:2cqw;padding-bottom:2cqw}
-.ae .reader{min-height:23cqw;padding-top:2cqw;padding-bottom:2cqw}
-.ae .indicator{min-height:17.5cqw;padding-top:2cqw;padding-bottom:2cqw}
-.ae .history td,.ae .history th{padding-top:1.1cqw;padding-bottom:1.1cqw}
-.ae .row{margin-bottom:1.7cqw}
-
 </style>
 """,
     unsafe_allow_html=True,
@@ -2971,7 +2958,7 @@ document.querySelectorAll('.toggle').forEach(x=>x.removeAttribute('data-unused')
 for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
 const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(0,Math.min(offset,Math.max(0,n-visible)));const end=n-Math.round(offset),start=Math.max(0,end-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$('canvas').innerHTML='<div class="empty">Esperando velas actuales…</div>';return}
 const last=all[n-1];$('legend').innerHTML=['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join('');
-const W=720,H=420,L=10,R=82,T=12,B=390,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
+const W=720,H=330,L=10,R=82,T=12,B=300,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
 let vals=rows.flatMap(r=>[r.low,r.high]);for(const k of ['ema9','ema21','vwap'])if(toggles[k])vals.push(...rows.map(r=>r[k]).filter(v=>v!=null));for(const v of [D.target,D.support,D.resistance,D.price])if(v!=null)vals.push(v);let lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,5);lo-=pad;hi+=pad;lo+=pricePan;hi+=pricePan;const y=v=>T+(hi-v)/(hi-lo)*(B-T),x=i=>L+(i+.5)*step;
 let s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Gráfica BTC con velas, indicadores y RSI"><defs><clipPath id="plot"><rect x="0" y="0" width="'+(W-R)+'" height="'+B+'"/></clipPath></defs>';
 for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="10">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
