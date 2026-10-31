@@ -3452,21 +3452,15 @@ def live_dashboard():
         return "—" if value is None else f"{float(value):+.0f}"
     motion30, motion10, motion5 = (_motion_label(n) for n in (30, 10, 5))
     history_rows = ""
-    history_df = load_history(limit=5)
-    if not history_df.empty:
-        for _, hrow in history_df.iterrows():
-            raw_time = hrow.get("Hora 1ª señal") or hrow.get("Cierre")
-            try:
-                dt = pd.to_datetime(raw_time, utc=True)
-                time_label = dt.tz_convert("America/New_York").strftime("%-I:%M %p")
-            except Exception:
-                time_label = "—"
-            direction = str(hrow.get("Señal bot") or "—")
-            status = str(hrow.get("Estado") or "PENDIENTE")
-            try:
-                target_label = f"${float(hrow.get('Target')):,.2f}"
-            except (TypeError, ValueError):
-                target_label = "—"
+    recent_rows = _recent_alert_rows(current_state=state, sig=sig, market=market, limit=5)
+    if recent_rows:
+        for item in recent_rows:
+            at = _recent_alert_time(item.get("first_at"))
+            time_label = at.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p") if at else "—"
+            direction = str(item.get("side") or "—")
+            status = str(item.get("status") or "POR RESOLVER")
+            target_value = _plan_number(item.get("target"))
+            target_label = f"${target_value:,.2f}" if target_value is not None else "—"
             direction_color = "green" if direction == "UP" else "red" if direction == "DOWN" else "muted"
             status_color = "green" if status == "GANADA" else "red" if status == "PERDIDA" else "muted"
             history_rows += (f"<tr><td>{html.escape(time_label)}</td><td>BTC 15M</td><td class='{direction_color}'>{html.escape(direction)}</td><td>{html.escape(target_label)}</td><td class='{status_color}'>{html.escape(status)}</td></tr>")
