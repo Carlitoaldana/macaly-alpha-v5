@@ -146,6 +146,41 @@ css='''
 .ae .coin-engraved::before,.ae .coin-engraved::after{display:none!important}
 .ae .coin-engraved svg{display:block;width:100%;height:100%;overflow:visible;filter:drop-shadow(0 0 9px #007fff) drop-shadow(0 0 3px #55cfff)}
 @media(max-width:700px){.ae .coin-engraved{width:65px!important;height:65px!important;min-width:65px!important}}
+
+/* Más aire visual — sin cambiar paneles, gráficos, emblema ni datos */
+@media(max-width:700px){
+.block-container{padding:5px 5px 24px!important}
+.ae{line-height:1.22}
+.ae .frame{padding:9px 10px 14px}
+.ae .row{gap:9px;margin-bottom:10px}
+.ae .top{height:53px;margin-bottom:11px;padding-bottom:8px}
+.ae .hero{gap:9px}
+.ae .hero>.panel{height:96px;min-height:96px;padding:10px}
+.ae .signal{gap:8px}
+.ae .pre{padding:12px 12px}
+.ae .pre .big{margin:7px 0}
+.ae .pre p{margin-top:7px;line-height:1.35}
+.ae .metrics{gap:8px}
+.ae .metric{height:75px;padding:7px 5px;gap:5px}
+.ae .support{padding:10px 12px}
+.ae .supportbar{margin-top:9px}
+.ae .split{margin-top:7px}
+.ae .readers{gap:9px}
+.ae .reader{min-height:94px;padding:9px}
+.ae .readbody{gap:8px;margin-top:8px}
+.ae .motion{margin-top:13px}
+.ae .chartpanel{padding:10px}
+.ae .charthead{gap:7px}
+.ae .chartwrap{margin-top:9px;height:193px}
+.ae .indicators{gap:9px}
+.ae .indicator{padding:10px}
+.ae .chips{gap:5px;margin-top:9px}
+.ae .chip{padding:4px 2px}
+.ae .history{padding:10px}
+.ae table{margin-top:9px}
+.ae td,.ae th{padding:6px 3px}
+.ae .notice{padding-top:14px}
+}
 </style>
 '''
 
