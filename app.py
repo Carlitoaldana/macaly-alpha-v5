@@ -5002,4 +5002,55 @@ else:
             unsafe_allow_javascript=True,
         )
 
+    # Controles reales de temporalidad dentro del encabezado del gráfico.
+    # Los botones activan el radio original de Streamlit; no cambian cálculos.
+    st.html(r"""
+    <style>
+    .ae .charthead{display:flex!important;align-items:center;justify-content:space-between!important;gap:8px!important;flex-wrap:wrap!important}
+    .ae .jc-tf-buttons{display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+    .ae .jc-tf-buttons button{appearance:none;background:#06152c;color:#a8c8ee;border:1px solid #23548c;border-radius:6px;padding:5px 8px;font-size:11px;line-height:1.1;cursor:pointer}
+    .ae .jc-tf-buttons button.active{background:#087cff;border-color:#39aaff;color:white;box-shadow:0 0 10px #078cff}
+    .ae .metric{min-width:0!important;overflow:hidden}
+    .ae .metric>div{min-width:0!important}
+    .ae .metric small{overflow-wrap:anywhere!important;word-break:normal!important}
+    .ae .metric strong{font-size:clamp(11px,2.7vw,18px)!important;line-height:1.15!important}
+    .ae .chartpanel{border-color:#087cff!important}
+    @media(max-width:520px){.ae .charthead strong{font-size:11px!important}.ae .jc-tf-buttons button{padding:4px 6px;font-size:10px}}
+    </style>
+    <script>(function(){
+      if(window.__jcTfControlsInstalled)return;
+      window.__jcTfControlsInstalled=true;
+      const choices=['1m','3m','5m','15m','1h','4h','1D'];
+      function findRadio(){
+        return [...document.querySelectorAll('[data-testid="stRadio"]')].find(el=>
+          choices.every(t=>[...el.querySelectorAll('label')].some(l=>l.textContent.trim()===t)));
+      }
+      function update(){
+        const head=document.querySelector('#alpha-stable-panel .ae .charthead');
+        const radio=findRadio();
+        if(!head||!radio)return;
+        let bar=head.querySelector('.jc-tf-buttons');
+        if(!bar){bar=document.createElement('div');bar.className='jc-tf-buttons';head.appendChild(bar);}
+        if(bar.children.length!==choices.length){
+          bar.replaceChildren();
+          choices.forEach(t=>{
+            const b=document.createElement('button');b.type='button';b.textContent=t;
+            b.addEventListener('click',()=>{
+              const label=[...radio.querySelectorAll('label')].find(l=>l.textContent.trim()===t);
+              if(label)label.click();
+            });bar.appendChild(b);
+          });
+        }
+        const selected=radio.querySelector('input:checked');
+        const selectedText=selected?.closest('label')?.textContent.trim()||'1m';
+        [...bar.children].forEach(b=>b.classList.toggle('active',b.textContent===selectedText));
+        radio.style.position='absolute';radio.style.left='-10000px';radio.style.width='1px';radio.style.height='1px';radio.style.overflow='hidden';
+      }
+      let queued=false;
+      const observer=new MutationObserver(()=>{if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;update();});});
+      observer.observe(document.body,{childList:true,subtree:true});
+      update();
+    })();</script>
+    """, unsafe_allow_javascript=True)
+
     # Las alertas ya están resumidas en el historial de la interfaz aprobada.
