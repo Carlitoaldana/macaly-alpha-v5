@@ -33,6 +33,7 @@ SIGNAL_CONFIRM_INTERVAL = 2.0
 SIGNAL_CONFIRM_MAX_GAP = 10.0
 LIVE_PRICE_MAX_AGE = 30.0
 _PRICE_OBSERVATIONS = threading.local()
+SIGNAL_ENGINE_REVISION = "btc_signal_v461_shared_routes_v1"
 
 def _valid_live_observation(price, observed_at, source):
     value = float(price)
@@ -83,6 +84,11 @@ def new_round_state(ticker, seconds_left):
     }
 
 def _fetch_current_btc_candles():
+    """Solicita una ventana explícita y verifica la fecha de las velas recibidas.
+
+    Una respuesta HTTP correcta puede contener velas antiguas. No se sustituye
+    una vela antigua por un precio live para calcular los indicadores.
+    """
     last_error = None
     for attempt in range(2):
         requested_at = datetime.now(timezone.utc)
@@ -125,6 +131,8 @@ def _fetch_current_btc_candles():
         received_at = datetime.now(timezone.utc)
         latest_start = frame.iloc[-1]["time"]
         age = (received_at - latest_start.to_pydatetime()).total_seconds()
+        # Una vela de 1m puede estar abierta o ser la última cerrada. Se permite
+        # hasta un minuto adicional de publicación, sin aceptar varios minutos.
         if -5 <= age <= 120:
             frame.attrs["received_at"] = received_at.isoformat()
             frame.attrs["latest_candle_at"] = latest_start.isoformat()
@@ -155,6 +163,7 @@ def extract_kalshi_btc_price(data):
 
     live_data = data.get("live_data", data)
     details = live_data.get("details", {}) if isinstance(live_data, dict) else {}
+    # Prefiere la observación fechada más reciente a un cierre anterior.
     timed_points = []
     points = details.get("timeseries", []) if isinstance(details, dict) else []
     for index, point in enumerate(points if isinstance(points, list) else []):
@@ -165,6 +174,7 @@ def extract_kalshi_btc_price(data):
         except (KeyError, TypeError, ValueError):
             continue
         if np.isfinite(stamp) and stamp > 0 and np.isfinite(value) and 10000 < value < 1000000:
+            # La serie puede devolver epoch en segundos o milisegundos.
             stamp = stamp / 1000 if stamp > 100_000_000_000 else stamp
             timed_points.append((stamp, index, value))
     if timed_points:
@@ -173,6 +183,7 @@ def extract_kalshi_btc_price(data):
             return _valid_live_observation(value, pd.to_datetime(stamp, unit="s", utc=True), "KALSHI LIVE")
         except (ValueError, TypeError, OverflowError):
             return None
+    # Un precio sin fecha verificable no se anuncia como live.
     return None
 
 def _indicator_frame(df):
@@ -276,137 +287,379 @@ def get_no_ask(market):
         return max(0.0, min(1.0, 1.0 - yes_bid))
     return None
 
-STRUCTURE_ENGINE_REVISION = "impulso_estructura_atr_v5"
+def _coinbase_whale_flow(flow_state):
+    """Lee presión agresiva de Coinbase en ventanas 10s/30s/60s y conserva alertas breves."""
+    response = requests.get(
+        "https://api.exchange.coinbase.com/products/BTC-USD/trades",
+        params={"limit": 100},
+        headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
+        timeout=6,
+    )
+    response.raise_for_status()
+    rows = response.json()
+    if not isinstance(rows, list) or not rows:
+        raise ValueError("Coinbase no devolvió operaciones recientes.")
+
+    now = pd.Timestamp.now(tz="UTC").timestamp()
+    tape = flow_state.setdefault("whale_flow_tape", [])
+    seen = flow_state.setdefault("whale_seen_ids", {})
+
+    for row in reversed(rows):
+        try:
+            trade_id = str(row.get("trade_id", ""))
+            if not trade_id or trade_id in seen:
+                continue
+            price = float(row.get("price", 0))
+            size = float(row.get("size", 0))
+            notional = price * size
+            maker_side = str(row.get("side", "")).lower()
+            aggressor = "COMPRA" if maker_side == "sell" else "VENTA" if maker_side == "buy" else ""
+            ts = pd.to_datetime(row.get("time"), utc=True, errors="coerce")
+            if pd.isna(ts):
+                continue
+            t = ts.timestamp()
+            if (not np.isfinite(price) or not np.isfinite(size) or not np.isfinite(notional)
+                    or price <= 0 or size <= 0 or not 0 <= now - t <= 75):
+                continue
+            if notional > 0 and aggressor:
+                tape.append({"id": trade_id, "t": t, "notional": notional, "side": aggressor})
+                seen[trade_id] = t
+        except Exception:
+            continue
+
+    tape[:] = [x for x in tape if 0 <= now - x["t"] <= 75]
+    for k in [k for k, t in seen.items() if now - t > 90]:
+        seen.pop(k, None)
+
+    def window(seconds):
+        w = [x for x in tape if 0 <= now - x["t"] <= seconds]
+        buy = sum(x["notional"] for x in w if x["side"] == "COMPRA")
+        sell = sum(x["notional"] for x in w if x["side"] == "VENTA")
+        total = buy + sell
+        imbalance = abs(buy - sell) / total if total else 0.0
+        direction = "UP" if buy > sell else "DOWN" if sell > buy else None
+        return buy, sell, total, imbalance, direction
+
+    b10,s10,t10,i10,d10 = window(10)
+    b30,s30,t30,i30,d30 = window(30)
+    b60,s60,t60,i60,d60 = window(60)
+
+    # Alert only when flow is materially one-sided AND supported beyond a tiny 4s snapshot.
+    burst = t10 >= 750_000 and i10 >= 0.28
+    sustained = t30 >= 1_750_000 and i30 >= 0.18
+    same_side = d10 is not None and d10 == d30
+    qualifies = bool(same_side and (burst or sustained))
+
+    alert = flow_state.get("whale_flow_alert")
+    if qualifies:
+        alert = {
+            "direction": d10, "time": now,
+            "buy": b30, "sell": s30, "total": t30,
+            "imbalance": i30, "buy10": b10, "sell10": s10,
+        }
+        flow_state["whale_flow_alert"] = alert
+    elif alert and now - float(alert.get("time", 0)) > 12:
+        alert = None
+        flow_state["whale_flow_alert"] = None
+
+    return {
+        "detected": alert is not None, "alert": alert,
+        "live_buy": b10, "live_sell": s10, "live_total": t10,
+        "imbalance": i10, "buy30": b30, "sell30": s30,
+        "buy60": b60, "sell60": s60,
+        "flow_direction": d10 if same_side else None,
+        "flow_strength": max(i10, i30 if same_side else 0.0),
+    }
+
+def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
+    """Directional persistence / exhaustion in comparable ATR units.
+
+    Informational internally; never imposes a permanent UP/DOWN lock.
+    Percent momentum is converted to dollars before ATR normalization.
+    Uses completed/current candle history, not fabricated price targets.
+    """
+    if not np.isfinite(price) or price <= 0 or not np.isfinite(atr) or atr <= 0:
+        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
+                "exhaust_down": False, "reliable": False}
+    close = one["close"].astype(float).tail(9).to_numpy()
+    if len(close) < 7 or not np.all(np.isfinite(close)):
+        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
+                "exhaust_down": False, "reliable": False}
+    changes = np.diff(close)
+    # Directional efficiency: net movement divided by total absolute movement.
+    travel = float(np.sum(np.abs(changes[-5:])))
+    efficiency = abs(float(close[-1] - close[-6])) / max(travel, 1e-8)
+    recent = float(np.sum(changes[-2:])) / atr
+    previous = float(np.sum(changes[-5:-2])) / atr
+    m3 = float(np.clip(price * mom3 / 100.0 / atr, -3, 3))
+    m5 = float(np.clip(price * mom5 / 100.0 / atr, -3, 3))
+    m15 = float(np.clip(price * mom15 / 100.0 / atr, -3, 3))
+    volume = float(np.clip(rvol, 0, 3)) if np.isfinite(rvol) else 1.0
+    # No invented dollar target: these are dimensionless internal strengths.
+    trend = .48 * m3 + .32 * m5 + .20 * m15
+    strength = float(np.clip(trend * (.75 + .25 * efficiency) *
+                             (.90 + .10 * min(volume, 1.5)), -3, 3))
+    exhaust_up = (previous > .35 and recent < -.10) or (m5 > .35 and m3 < -.12)
+    exhaust_down = (previous < -.35 and recent > .10) or (m5 < -.35 and m3 > .12)
+    return {"up": max(0., strength), "down": max(0., -strength),
+            "exhaust_up": bool(exhaust_up), "exhaust_down": bool(exhaust_down),
+            "reliable": True, "efficiency": round(float(efficiency), 3),
+            "recent_atr": round(recent, 3)}
 
 def _entry_route_checks(sig, seconds_left):
-    ok = sig.get("data_valid") is not False
-    candidate = sig.get("candidate")
+    """Evaluate both sides from the same evidence; shared by engine and UI."""
+    required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
+                "vol_ratio", "mom3", "mom5", "target_atr", "price_ema9_atr")
+    if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
+        return {"valid":False, "sides":{}, "noise_ok":False}
+    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion,live_ema = (float(sig[k]) for k in required)
+    d3,d5 = sig.get("trend3"), sig.get("trend5")
+    impulse = sig.get("impulse_internal") or {}
+    noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
     sides = {}
-    for side in ("UP", "DOWN"):
-        complete = bool(ok and candidate == side and (seconds_left is None or seconds_left > 0))
-        sides[side] = [{"name":"IMPULSO + ESTRUCTURA + ATR", "checks":[
-            ("Datos actuales", ok), ("Dirección respaldada", candidate == side),
-            ("Ronda abierta", seconds_left is None or seconds_left > 0)],
-            "met":int(ok)+int(candidate == side)+int(seconds_left is None or seconds_left > 0),
-            "total":3,"complete":complete}]
-    return {"valid":bool(ok), "sides":sides,"noise_ok":bool(ok)}
+    for side,sign,other in (("UP",1,"DOWN"),("DOWN",-1,"UP")):
+        up = sign == 1
+        exhausted = bool(impulse.get("exhaust_up" if up else "exhaust_down"))
+        strength = float(impulse.get("up" if up else "down", 0))
+        reliable = bool(impulse.get("reliable"))
+        current = [
+            ("EMA de 1 minuto y precio actual a favor", sig.get("ema") == ("BULL" if up else "BEAR") and live_ema*sign>0),
+            ("RSI y momentum actuales a favor", (r1>=53 if up else r1<=47) and mom*sign>=.025),
+            ("MACD de 1 minuto y VWAP a favor", m1*sign>0 and vw*sign>=.03),
+            ("Impulso actual sin agotamiento detectado", not exhausted),
+        ]
+        early_five = d5 != other or (reliable and strength>=.75 and mom*sign>.04 and vol>=.9)
+        rsi_vwap = (r1>=52 and vw>=.05) if up else (r1<=48 and vw<=-.05)
+        routes = [
+            ("IMPULSO ACTUAL", current),
+            ("TENDENCIA ALINEADA", [
+                ("Tendencias de 3 y 5 minutos a favor", d3==side and d5==side),
+                ("Fuerza de tendencia o RSI suficientes", adx>=20 or ((r3>=52 and r5>=50) if up else (r3<=48 and r5<=50))),
+                ("VWAP y momentum actual respaldan la tendencia", (vw>-.15 if up else vw<.15) and mom*sign>=.012),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("TEMPRANA", [
+                ("MACD de 3 minutos a favor", m3*sign>0),
+                ("RSI de 1 minuto y VWAP a favor", rsi_vwap),
+                ("Momentum de 3 minutos a favor", mom*sign>.015),
+                ("Contexto de 5 minutos respaldado o superado por fuerza actual", early_five),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("TEMPRANA ACELERADA", [
+                ("MACD y momentum a favor", m3*sign>0 and mom*sign>.015),
+                ("Contexto de 5 minutos no contrario", d5!=other),
+                ("Impulso fuerte con volumen y ADX", reliable and strength>=.65 and adx>=20 and vol>=.8),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("GIRO TEMPRANO", [
+                ("MACD y momentum respaldan el giro", m3*sign>0 and mom*sign>.04),
+                ("RSI de 1 y 3 minutos respaldan el giro", (r1>=54 and r3>=50) if up else (r1<=46 and r3<=50)),
+                ("VWAP y distancia suficientes", vw*sign>=.08 and abs(cushion)>=.30),
+                ("Impulso y volumen suficientes", reliable and strength>=.70 and vol>=.9),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+        ]
+        flow = sig.get("flow_context_internal") or {}
+        flow_ok = flow.get("direction")==side and flow.get("valid",False)
+        routes.append(("FLUJO + IMPULSO", [
+            ("Flujo agresor significativo a favor", flow_ok),
+            ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and live_ema*sign>0),
+            ("Momentum y VWAP a favor", mom*sign>=.012 and vw*sign>=-.04),
+            ("Contexto contrario corroborado por momentum", d5!=other or (mom5*sign>=.025 and abs(mom)>=.025)),
+            ("Impulso fiable sin agotamiento", reliable and not exhausted),
+        ]))
+        target_ok = True
+        if sig.get("distance") is not None and seconds_left is not None:
+            remaining = float(np.clip(seconds_left,0,900))
+            weight = .12+.88*(1-remaining/900)**1.6
+            tolerance = 1.8-1.4*weight
+            if -sign*cushion>tolerance:
+                target_ok = (reliable and strength>=.75 and mom*sign>.04 and not exhausted
+                             and (all(ok for _,ok in current) or d3==side or d5==side))
+        sides[side] = []
+        for name,checks in routes:
+            checks = checks+[("Fuera de la zona de ruido",noise_ok),
+                            ("Distancia al target y tiempo respaldan la dirección",target_ok)]
+            sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
+                                "total":len(checks),"complete":all(bool(ok) for _,ok in checks)})
+    return {"valid":True,"sides":sides,"noise_ok":noise_ok}
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
-    now = pd.Timestamp.now(tz="UTC")
-    x = df.copy()
-    x["time"] = pd.to_datetime(x["time"], utc=True)
-    x = x[x["time"] + pd.Timedelta(minutes=1) <= now]
-    x = x.sort_values("time").drop_duplicates("time", keep="last")
-    if len(x) < 30:
-        raise ValueError("Esperando 30 velas cerradas.")
-    x = x.tail(40)
-    if x["time"].diff().dropna().dt.total_seconds().ne(60).any():
-        raise ValueError("Historial de velas incompleto.")
-    if (now - x.iloc[-1]["time"]).total_seconds() > 150:
-        raise ValueError("Velas atrasadas.")
-    vals = x[["open", "high", "low", "close"]].to_numpy(dtype=float)
-    if (not np.isfinite(vals).all() or (vals <= 0).any() or
-        (x["high"] < x[["open", "close", "low"]].max(axis=1)).any() or
-        (x["low"] > x[["open", "close", "high"]].min(axis=1)).any()):
-        raise ValueError("Velas inválidas.")
-    price = _plan_number(live_price)
-    if price is None or price <= 0:
-        raise ValueError("Esperando precio live verificado.")
-    prev = x["close"].shift(1)
-    tr = pd.concat([x["high"]-x["low"],(x["high"]-prev).abs(),
-                    (x["low"]-prev).abs()],axis=1).max(axis=1)
-    atr = float(tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean().iloc[-1])
-    if not np.isfinite(atr) or atr <= 0:
-        raise ValueError("Volatilidad no disponible.")
-    closes = x["close"].to_numpy(dtype=float)
-    long_move = (price-closes[-13])/atr
-    medium_move = (price-closes[-6])/atr
-    short_move = (price-closes[-3])/atr
-    path = np.abs(np.diff(closes[-13:])).sum() + abs(price-closes[-1])
-    efficiency = abs(price-closes[-13])/max(path,1e-9)
-    impulse = .55*medium_move + .35*long_move + .10*short_move
-    old_high=float(x["high"].iloc[-13:-7].max())
-    old_low=float(x["low"].iloc[-13:-7].min())
-    new_high=float(x["high"].iloc[-6:].max())
-    new_low=float(x["low"].iloc[-6:].min())
-    structure = (int(new_high>old_high)+int(new_low>old_low)
-                 -int(new_high<old_high)-int(new_low<old_low)) / 2.0
-    score = impulse + .25*structure
-    direction = "UP" if score >= .42 and medium_move > -.35 else (
-                "DOWN" if score <= -.42 and medium_move < .35 else None)
-    gap = price-float(target) if target is not None and float(target)>0 else None
-    gap_atr = gap/atr if gap is not None else None
-    if direction and gap_atr is not None and seconds_left is not None:
-        if seconds_left <= 0:
-            direction = None
-        else:
-            remaining_capacity = 3.0*math.sqrt(max(seconds_left,0)/60.0)
-            if direction=="UP" and gap_atr < -remaining_capacity:
-                direction=None
-            elif direction=="DOWN" and gap_atr > remaining_capacity:
-                direction=None
-    quality = ("IMPULSO Y ESTRUCTURA ALCISTA" if direction=="UP" else
-               "IMPULSO Y ESTRUCTURA BAJISTA" if direction=="DOWN" else
-               "ESPERANDO FUERZA SUFICIENTE")
-    one=add_indicators(x); last=one.iloc[-1]
-    def display_number(key,default=0.0):
-        v=_plan_number(last.get(key))
-        return default if v is None else v
-    evidence = float(np.clip(score/2,-1,1))
-    return {"engine_revision":STRUCTURE_ENGINE_REVISION,
-            "structure_internal":{"valid":True,"method":"adaptive_impulse_structure_atr",
-                                  "impulse":float(impulse),"structure":float(structure),
-                                  "efficiency":float(efficiency),"score":float(score)},
-            "price":price,"candle_price":float(last["close"]),
-            "candidate":direction,"quality":quality,"entry_route_internal":quality,
-            "technical_score":evidence,"final_score":evidence,
-            "distance":gap,"distance_pct":gap/target*100 if gap is not None and target else None,
-            "target_atr":gap_atr,"target_score":0.0,"atr":atr,
-            "ema":"BULL" if last["ema9"]>last["ema21"] else "BEAR",
-            "rsi":display_number("rsi",50),"mom3":display_number("mom3"),
-            "mom5":display_number("mom5"),"mom15":display_number("mom15"),
-            "vol_ratio":display_number("vol_ratio"),"vwap":display_number("vwap"),
-            "momentum":"ALCISTA" if direction=="UP" else "BAJISTA" if direction=="DOWN" else "NEUTRAL",
-            "up_probability":50,"down_probability":50}
+    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
+    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
+    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
+    def direction(row):
+        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
+        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
+    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
+    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
+    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
+    target_atr=(distance/atr) if distance is not None else 0.0
+    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
+    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
+    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
+    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
+    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
+    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
+    # Evaluate all routes for both directions before choosing any candidate.
+    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
+    flow_context = {"direction":flow_side, "valid":False}
+    if isinstance(whale,dict):
+        flow_context["valid"] = (flow_side in ("UP","DOWN") and
+            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
+            float(whale.get("flow_strength") or 0)>=.20)
+    route_input = {"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
+        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
+        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
+        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
+        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
+        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
+    route_view = _entry_route_checks(route_input, seconds_left)
+    eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
+                for side in ("UP","DOWN")}
+    choices = [side for side in ("UP","DOWN") if eligible[side]]
+    candidate = choices[0] if len(choices)==1 else None
+    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
+    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
+                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
+    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
+    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
+    # Closing support adapts continuously; it is NOT a calibrated win probability.
+    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
+        weight = .35 + .35 * (180 - seconds_left) / 180
+        evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
+    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
+    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 def _retention_assessment(state, signal):
-    side=state.get('active_direction')
-    if side not in ('UP','DOWN') or not signal or signal.get('data_valid') is not True:
-        return 0,0
-    routes=_entry_route_checks(signal,None)
-    allowed=lambda direction:any(r['complete'] for r in routes['sides'].get(direction,[]))
-    return int(allowed(side)),int(allowed('DOWN' if side=='UP' else 'UP'))
+    """Separate affirmative, opposite and unknown evidence for an active side."""
+    side = state.get("active_direction")
+    if side not in ("UP", "DOWN") or not signal or signal.get("data_valid") is False:
+        return 0, 0
+    sign = 1 if side == "UP" else -1
+    support = contrary = 0
+    ema = signal.get("ema")
+    if ema in ("BULL", "BEAR"):
+        if ema == ("BULL" if sign == 1 else "BEAR"):
+            support += 1
+        else:
+            contrary += 1
+    for name in ("mom5", "distance"):
+        value = _plan_number(signal.get(name))
+        if value is None:
+            continue
+        if value * sign > 0:
+            support += 1
+        elif value * sign < 0:
+            contrary += 1
+    return support, contrary
 
 def _retention_supported(state, signal, seconds_left):
-    return (seconds_left is not None and seconds_left>0
-            and _retention_assessment(state,signal)[0]>0)
+    """Partial weakening is not sufficient to withdraw an existing signal."""
+    if seconds_left is None or seconds_left <= 0:
+        return False
+    support, _ = _retention_assessment(state, signal)
+    return support >= 2
 
 def _reset_withdrawal(state):
     state.update(withdraw_direction=None, withdraw_source=None, withdraw_count=0,
                  withdraw_since=None, withdraw_last_at=None, retention_warning=None)
 
 def _review_active_retention(state, signal, seconds_left, now):
-    if not _retention_supported(state,signal,seconds_left):
-        state['active_direction']=None
-        state['active_since']=None
-    _reset_withdrawal(state)
+    """Withdraw only after two opposite conditions persist in spaced readings.
+
+    Neutral/missing evidence never counts as an opposite vote. This helper is
+    only for candidate=None; entry and reversal confirmation are unchanged.
+    """
+    side = state.get("active_direction")
+    if side not in ("UP", "DOWN"):
+        _reset_withdrawal(state)
+        return
+    support, contrary = _retention_assessment(state, signal)
+    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if support < 3 else None
+    if contrary < 2:
+        _reset_withdrawal(state)
+        state["retention_warning"] = warning
+        return
+    source = (signal or {}).get("price_source")
+    stamp = now.timestamp()
+    last = state.get("withdraw_last_at")
+    same = (state.get("withdraw_direction") == side and state.get("withdraw_source") == source
+            and last is not None and 0 <= stamp-last <= SIGNAL_CONFIRM_MAX_GAP)
+    if not same:
+        state.update(withdraw_direction=side, withdraw_source=source, withdraw_count=1,
+                     withdraw_since=stamp, withdraw_last_at=stamp)
+    elif stamp-last >= SIGNAL_CONFIRM_INTERVAL:
+        state["withdraw_count"] += 1
+        state["withdraw_last_at"] = stamp
+    state["retention_warning"] = warning
+    if (state["withdraw_count"] >= SIGNAL_CONFIRM_READINGS and
+            stamp-state["withdraw_since"] >= SIGNAL_CONFIRM_INTERVAL*(SIGNAL_CONFIRM_READINGS-1)):
+        state["active_direction"] = None
+        state["active_since"] = None
+        _reset_withdrawal(state)
 
 def _round_opening_crosscheck(state, candidate, signal, now):
-    if not signal or signal.get("data_valid") is not True:
-        state["opening_conflict"]="Esperando datos actuales"
+    """Require fresh directional evidence before the first entry of this ticker.
+
+    Old candles remain context, never sufficient evidence for an opening entry.
+    Each live feed has a separate short tape. Later reversals are unrestricted.
+    """
+    if state.get("first_direction") in ("UP", "DOWN"):
+        state["opening_conflict"] = None
+        return candidate
+    def wait(reason):
+        state["opening_conflict"] = reason
         return None
-    routes=_entry_route_checks(signal,None)
-    allowed=candidate in ("UP","DOWN") and any(r["complete"] for r in routes["sides"].get(candidate,[]))
-    state["opening_conflict"]=None if allowed else "Esperando fuerza suficiente"
-    return candidate if allowed else None
+    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
+        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
+    if not signal or signal.get("data_valid") is False:
+        return wait("Esperando datos actuales para la primera señal")
+    price = _plan_number(signal.get("price"))
+    atr = _plan_number(signal.get("atr"))
+    source = signal.get("price_source")
+    if (price is None or price <= 0 or atr is None or atr <= 0
+            or source not in ("COINBASE", "KALSHI LIVE")):
+        return wait("Esperando precio en vivo para la primera señal")
+    stamp = now.timestamp()
+    tapes = state.setdefault("opening_live_tapes", {})
+    tape = tapes.get(source, [])
+    if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
+        tape = []
+    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
+    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
+        tape.append([stamp, price])
+    tapes[source] = tape
+    if candidate not in ("UP", "DOWN"):
+        return wait("Analizando fuerza actual antes de la primera señal")
+    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
+        return wait("Observando movimiento actual antes de la primera señal")
+    prices = [float(x[1]) for x in tape]
+    sign = 1 if candidate == "UP" else -1
+    split = len(prices)//2
+    net = sign*(prices[-1]-prices[0])
+    recent = sign*(prices[-1]-prices[split])
+    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
+    efficiency = net/max(travel, 1e-8)
+    minimum = max(2.0, .10*atr)
+    latest = sign*(prices[-1]-prices[-2])
+    if (net < minimum or recent < .5*minimum or efficiency < .60
+            or latest < -.25*minimum):
+        return wait("Sin fuerza actual suficiente para " + candidate)
+    state["opening_conflict"] = None
+    return candidate
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    if state.get('engine_revision') != STRUCTURE_ENGINE_REVISION:
-        state.update(engine_revision=STRUCTURE_ENGINE_REVISION,active_direction=None,
-                     active_since=None,pending_direction=None,pending_count=0,
-                     pending_since=None,pending_last_at=None,pending_price_source=None)
-        _reset_withdrawal(state)
+    """Confirmación compartida por la pantalla y el registrador de fondo.
+
+    La primera señal queda inmutable. Un cambio UP/DOWN posterior también
+    necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
+    la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
+    """
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
     if close_time:
@@ -426,8 +679,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
-        state['active_direction'] = None
-        state['active_since'] = None
+        # Una interrupción no demuestra neutralidad ni permite confirmar.
         state["pending_direction"] = None
         state["pending_count"] = 0
         state["pending_since"] = None
@@ -439,6 +691,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     source = signal.get("price_source") if signal else None
     if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
         if state.get("pending_count", 0) and state.get("pending_price_source") != source:
+            # Tres lecturas deben pertenecer a una misma referencia de precio.
             state["pending_direction"] = None
             state["pending_count"] = 0
             state["pending_since"] = None
@@ -449,9 +702,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_count"] = 0
         state["pending_since"] = None
         state["pending_last_at"] = None
-        state["active_direction"] = None
-        state["active_since"] = None
-        _reset_withdrawal(state)
+        _review_active_retention(state, signal, seconds_left, now)
         return
 
     _reset_withdrawal(state)
@@ -462,8 +713,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         return
 
-    state['active_direction'] = None
-    state['active_since'] = None
     last = state.get("pending_last_at")
     if isinstance(last, str):
         try:
@@ -628,6 +877,14 @@ class MarketData:
         return m
 
     def signal(self, market):
+        # Same aggressor flow calculation as the source signal bot. Each feed
+        # owns its tape; optional flow failures do not fabricate evidence.
+        if not hasattr(self, 'flow_state'):
+            self.flow_state = {}
+        try:
+            whale = _coinbase_whale_flow(self.flow_state)
+        except Exception:
+            whale = None
         source = 'KALSHI LIVE'
         try:
             event = engine.get_event_ticker_from_market(market)
@@ -647,8 +904,8 @@ class MarketData:
         if not -5 <= age <= 120:
             raise ValueError('Velas atrasadas: esperando actualización.')
         remaining = engine.get_seconds_remaining(market)
-        sig = engine._signal_engine_without_trace(self.candles,engine.get_target_from_market(market),remaining,price)
-        sig.update(price_source=source, data_valid=True)
+        sig = engine._signal_engine_without_trace(self.candles,engine.get_target_from_market(market),remaining,price,whale=whale)
+        sig.update(price_source=source, data_valid=True, engine_revision=SIGNAL_ENGINE_REVISION)
         return sig
 
     def book(self, ticker):
@@ -951,6 +1208,11 @@ class Bot:
         with self.lock:
             row=self.db.execute('SELECT state FROM rounds WHERE ticker=?',(market['ticker'],)).fetchone()
             state=json.loads(row[0]) if row else engine.new_round_state(market['ticker'],remaining)
+            if state.get('engine_revision') != SIGNAL_ENGINE_REVISION:
+                # Old strategy confirmations cannot authorize a new-strategy
+                # purchase. Trade counts, open positions and their exits stay intact.
+                state = engine.new_round_state(market['ticker'], remaining)
+                state['engine_revision'] = SIGNAL_ENGINE_REVISION
             engine._confirmation_without_trace(state,sig.get('candidate'),market,remaining,utcnow(),sig)
             self.db.execute('INSERT OR REPLACE INTO rounds VALUES (?,?)',(market['ticker'],dumps(state)))
             self.db.commit()
@@ -1985,6 +2247,7 @@ def streamlit_main():
     # The worker loop is unchanged and dynamically invokes self.step().
     with bot.lock:
         bot.__class__=Bot
+        bot.feed.__class__=MarketData
         for linked in getattr(bot,'connected_accounts',{}).values():
             with linked.lock:
                 linked.__class__=ConnectedBot
