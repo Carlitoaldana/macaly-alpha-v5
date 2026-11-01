@@ -1154,8 +1154,8 @@ class Bot:
         s=self.settings
         if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
             return 'Entradas pausadas o posición en gestión.'
-        if not signal or signal.get('data_valid') is not True or signal.get('candidate') != side:
-            return 'Esperando respaldo actual para una compra nueva.'
+        if not signal or signal.get('data_valid') is not True:
+            return 'Esperando datos actuales válidos para una compra nueva.'
         routes=engine._entry_route_checks(signal,engine.get_seconds_remaining(market))
         if not routes.get('valid') or not any(r['complete'] for r in routes.get('sides',{}).get(side,[])):
             return 'La señal ya no cumple los requisitos actuales de entrada.'
