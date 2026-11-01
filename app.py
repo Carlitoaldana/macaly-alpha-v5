@@ -1314,7 +1314,11 @@ class KalshiAccount:
             with urlopen(Request(url,headers=headers,data=data,method=method),timeout=8) as response:
                 result=json.load(response)
         except HTTPError as exc:
+            # Safe diagnostic: method, fixed API path and status only.
+            # Never expose API credentials, signatures, query values or request bodies.
             error=KalshiAPIError(exc.code)
+            error.args=(f'Kalshi HTTP {exc.code} en {method} {path}. '
+                        'La solicitud fue rechazada; no se confirmó ninguna operación.',)
             try:error.retry_after=float(exc.headers.get('Retry-After',30))
             except (ValueError,TypeError,AttributeError):error.retry_after=30
             raise error from None
