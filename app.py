@@ -1154,8 +1154,8 @@ class Bot:
         s=self.settings
         if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
             return 'Entradas pausadas o posición en gestión.'
-        if not signal or signal.get('data_valid') is not True:
-            return 'Esperando datos actuales válidos para una compra nueva.'
+        if not signal or signal.get('data_valid') is not True or signal.get('candidate') != side:
+            return 'Esperando respaldo actual para una compra nueva.'
         routes=engine._entry_route_checks(signal,engine.get_seconds_remaining(market))
         if not routes.get('valid') or not any(r['complete'] for r in routes.get('sides',{}).get(side,[])):
             return 'La señal ya no cumple los requisitos actuales de entrada.'
@@ -1314,11 +1314,7 @@ class KalshiAccount:
             with urlopen(Request(url,headers=headers,data=data,method=method),timeout=8) as response:
                 result=json.load(response)
         except HTTPError as exc:
-            # Safe diagnostic: method, fixed API path and status only.
-            # Never expose API credentials, signatures, query values or request bodies.
             error=KalshiAPIError(exc.code)
-            error.args=(f'Kalshi HTTP {exc.code} en {method} {path}. '
-                        'La solicitud fue rechazada; no se confirmó ninguna operación.',)
             try:error.retry_after=float(exc.headers.get('Retry-After',30))
             except (ValueError,TypeError,AttributeError):error.retry_after=30
             raise error from None
@@ -2068,7 +2064,7 @@ function updateProfitRing(s,net,marked,fresh){
  $('#profitOrbitValue').style.strokeDashoffset=String(100-(progress||0));
 }
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'REAL')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent='▶ INICIAR REAL';$('#start').disabled=!linked;$('#executionModeLabel').textContent='● '+(s.mode||'REAL');$('#executionFooter').textContent=s.mode||'ENTORNO REAL';$('#accountTypeLabel').textContent=linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar';$('#positionNote').dataset.connected=String(linked);
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'REAL')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent='▶ INICIAR REAL';$('#start').disabled=!linked;$('#executionModeLabel').textContent='● '+(s.mode||'REAL');$('#executionFooter').textContent=s.mode||'ENTORNO REAL';$('#accountTypeLabel').textContent=linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar';$('#positionNote').dataset.connected=String(linked);
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
@@ -2166,9 +2162,7 @@ class Controller:
         result['connection']=self.connection.copy()
         result['mode']='REAL'
         if not isinstance(self.bot,ConnectedBot):
-            # Analysis is public; only authenticated trading needs a linked account.
-            result.update(running=False,positions=[],execution_mode=None)
-            result['mode']='ANÁLISIS · SIN CUENTA'
+            result.update(status='SIN CONEXIÓN',running=False,positions=[],trades=[],events=[],rounds=[],signal=None,execution_mode=None,message='Conecta tu cuenta REAL de Kalshi.')
             result['totals']={k:0 for k in result['totals']}
             result['has_trades']=False
         return result
@@ -2249,45 +2243,6 @@ def streamlit_main():
         bot=Bot(db);bot._process_lock=lock
         return bot
     bot=shared_bot()
-    # Public, read-only market analysis works without Kalshi account credentials.
-    # Never submits orders and stops updating while an authenticated bot is active.
-    if not getattr(bot, '_public_analysis_started', False):
-        bot._public_analysis_started=True
-        def public_analysis_loop():
-            while not bot.stop_event.is_set():
-                try:
-                    linked=getattr(bot,'connected_accounts',{})
-                    if any(not b.stop_event.is_set() for b in linked.values()):
-                        bot.stop_event.wait(2)
-                        continue
-                    market=bot.feed.current()
-                    sig=bot.feed.signal(market)
-                    remaining=engine.get_seconds_remaining(market)
-                    if remaining is None or remaining<=0:
-                        raise ValueError('Esperando ronda BTC 15m vigente.')
-                    with bot.lock:
-                        row=bot.db.execute('SELECT state FROM rounds WHERE ticker=?',(market['ticker'],)).fetchone()
-                        state=json.loads(row[0]) if row else engine.new_round_state(market['ticker'],remaining)
-                        if state.get('engine_revision') != SIGNAL_ENGINE_REVISION:
-                            state=engine.new_round_state(market['ticker'],remaining)
-                            state['engine_revision']=SIGNAL_ENGINE_REVISION
-                        engine._confirmation_without_trace(state,sig.get('candidate'),market,remaining,utcnow(),sig)
-                        bot.db.execute('INSERT OR REPLACE INTO rounds VALUES (?,?)',(market['ticker'],dumps(state)))
-                        bot.db.commit()
-                        bot.snapshot={'status':'ACTIVO','message':'Análisis público; operaciones reales deshabilitadas.',
-                            'mode':'ANÁLISIS','signal':state.get('active_direction'),
-                            'candidate':sig.get('candidate'),'first_signal':state.get('first_direction'),
-                            'market':market,'seconds_left':remaining,'price':sig['price'],
-                            'source':sig['price_source'],'quality':sig['quality'],'rsi':sig['rsi'],
-                            'ema':sig['ema'],'metrics':clean_json(sig),'updated':stamp(),
-                            'book':{},'target':engine.get_target_from_market(market),
-                            'retention':state.get('retention_warning')}
-                except Exception as exc:
-                    with bot.lock:
-                        bot.snapshot.update(status='SIN DATOS',signal=None,
-                            message=f'{type(exc).__name__}: {exc}',updated=stamp())
-                bot.stop_event.wait(2)
-        threading.Thread(target=public_analysis_loop,name='alpha-public-analysis',daemon=True).start()
     # Rebind updated accounting methods on the same cached object and database.
     # The worker loop is unchanged and dynamically invokes self.step().
     with bot.lock:
