@@ -2197,7 +2197,43 @@ def _ut_compare(rows, as_of, sensitivity=1.0, period=10):
     return dict(experimental=True, orders=False, heikin_ashi=False, sensitivity=sensitivity, atr_period=period, last_1m=one[-1], last_3m=three[-1], latest=timeline[-1] if timeline else None, note='Coincidencia no significa probabilidad de acierto ni resultado Kalshi.', recent=timeline[-20:])
 
 
-UT_ENGINE_REVISION = "ut_closed_1m_primary_3m_context_v2"
+UT_ENGINE_REVISION = "ut_confirmed_round_adx_di_v3"
+
+
+def _round_confirmation(sig, direction, closed, seconds_left, live_price):
+    """Confirmación independiente de UT: tendencia, presión DI e impulso de esta ronda.
+    Sin esperas fijas; si faltan datos, no hay señal.
+    """
+    if direction not in ("UP", "DOWN") or seconds_left is None:
+        return False
+    try:
+        remaining = float(seconds_left)
+        if not 0 <= remaining <= 900:
+            return False
+        sign = 1 if direction == "UP" else -1
+        adx = float(sig.get("adx", 0))
+        plus = float(sig.get("plus_di", 0))
+        minus = float(sig.get("minus_di", 0))
+        mom = float(sig.get("mom3", 0))
+        impulse = sig.get("impulse_internal") or {}
+        if not all(np.isfinite(x) for x in (adx, plus, minus, mom)):
+            return False
+        if adx < 20 or sign * (plus-minus) < 3 or sign*mom <= .015:
+            return False
+        if impulse.get("exhaust_up" if sign == 1 else "exhaust_down", False):
+            return False
+        # El inicio de la ronda se determina por su tiempo restante.
+        round_start = datetime.now(timezone.utc).timestamp() - (900-remaining)
+        frame = closed[closed["time"].astype("int64") / 1e9 >= round_start].sort_values("time")
+        if frame.empty:
+            return False  # Ninguna vela cerrada perteneciente a esta ronda.
+        start_price = float(frame.iloc[0]["open"])
+        current = float(live_price) if live_price is not None else float(frame.iloc[-1]["close"])
+        atr = max(float(sig.get("atr", 0)), 1e-9)
+        return np.isfinite(current) and sign*(current-start_price)/atr >= .12
+    except (ValueError, TypeError, KeyError, IndexError, OverflowError):
+        return False
+
 
 def _entry_route_checks(sig, seconds_left):
     valid = sig.get("data_valid", False) and sig.get("ut_valid", False)
@@ -2243,6 +2279,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         sig.update(_legacy_context_metrics(closed, target, seconds_left, live_price, whale))
         same = fast["direction"] == slow["direction"]
         direction = fast["direction"]
+        confirmed = _round_confirmation(sig, direction, closed, seconds_left, live_price)
+        final_direction = direction if confirmed else None
         sig.update(data_valid=True, ut_valid=True, ut_1m=fast["direction"], ut_3m=slow["direction"],
                    ut_alert_1m=fast["alert"], ut_alert_3m=slow["alert"],
                    ut_closed_1m=fast["available_at"], ut_closed_3m=slow["available_at"],
@@ -2250,14 +2288,15 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
                    ut_source=df.attrs.get("candle_source","DESCONOCIDA"),
                    ut_status="1m " + direction + (" · 3m A FAVOR" if same else " · 3m EN CONTRA: " + slow["direction"]),
                    ut_candidate_aligned=direction if same else None, ut_rule="1m decide; 3m informa",
-                   candidate=direction, candidate_raw=direction, quality="UT 1m · 3m A FAVOR" if same else "UT 1m · 3m EN CONTRA",
+                   candidate=final_direction, candidate_raw=final_direction,
+                   quality=("CONFIRMADA" if confirmed else "ESPERANDO"),
                    trend3=slow["direction"], momentum="ALCISTA" if direction=="UP" else "BAJISTA" if direction=="DOWN" else "NEUTRAL",
                    technical_score=2 if direction=="UP" else -2 if direction=="DOWN" else 0,
                    final_score=2 if direction=="UP" else -2 if direction=="DOWN" else 0,
                    up_probability=(100 if direction=="UP" else 0) if same else 50,
                    down_probability=(100 if direction=="DOWN" else 0) if same else 50,
                    atr=fast["atr"], engine_revision=UT_ENGINE_REVISION,
-                   ai_gate_active=False, ai_gate_status="UT 1m decide; 3m e IA solo informativos")
+                   ai_gate_active=True, ai_gate_status="Confirmación ADX/DI, impulso y ronda actual")
     except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
         sig.update(data_valid=False, ut_valid=False, candidate=None, candidate_raw=None,
                    data_error=str(exc), ut_status="SIN DATOS UT: " + str(exc), engine_revision=UT_ENGINE_REVISION)
