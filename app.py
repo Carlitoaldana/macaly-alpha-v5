@@ -1487,10 +1487,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
                     "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
     # JC UT BOT MODE: original-style UT 1/10 replaces multi-timeframe route voting.
     ut=ut_bot_1_10(df)
-    candidate=ut['direction']
-    quality='UT BOT 1/10 · '+candidate if candidate else 'UT BOT · SIN DATOS'
-    if ut.get('event'):
-        quality += ' · NUEVO CRUCE'
+    candidate=ut['event']
+    quality='UT BOT 1/10 · '+candidate if candidate else 'UT BOT · SIN NUEVO CRUCE'
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
     evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
     # Closing support adapts continuously; it is NOT a calibrated win probability.
@@ -1784,23 +1782,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state["pending_since"] = None
             state["pending_last_at"] = None
         state["pending_price_source"] = source
-    # UT 1/10: mostrar la dirección de la última vela cerrada sin
-    # exigir tres lecturas ni validaciones EMA/RSI/MACD del motor anterior.
-    if (signal or {}).get("ut_mode") and candidate in ("UP", "DOWN"):
-        if state.get("active_direction") != candidate:
-            state["active_direction"] = candidate
-            state["active_since"] = now
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        return
     if candidate not in ("UP", "DOWN"):
         state["pending_direction"] = None
         state["pending_count"] = 0
@@ -3805,9 +3786,6 @@ def _apply_ai_signal_gate(sig):
     sig["candidate_raw"] = candidate
     sig["ai_gate_active"] = False
     sig["ai_win_probability"] = None
-    if sig.get("ut_mode"):
-        sig["ai_gate_status"] = "UT 1/10 · sin filtro IA"
-        return sig
     model, status = _ai_gate_model()
     sig["ai_gate_status"] = status
     if candidate not in ("UP", "DOWN") or model is None:
