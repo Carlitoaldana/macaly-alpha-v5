@@ -2422,13 +2422,14 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         return
 
     # Una revisión de la estrategia obliga a volver a validar la ronda.
-    revision = "round_fresh_stable_v2"
+    revision = "round_fresh_stable_v3"
     if state.get("confirmation_revision") != revision:
         state.update(confirmation_revision=revision, active_direction=None,
                      active_since=None, first_direction=None, first_signal_time=None,
                      first_signal_seconds=None, first_signal_price=None,
                      opening_live_tapes={}, pending_direction=None, pending_count=0,
-                     pending_since=None, pending_last_at=None, pending_price_source=None)
+                     pending_since=None, pending_last_at=None, pending_price_source=None,
+                     reversal_live_tape=[])
 
     active = state.get("active_direction")
     if not signal.get("ut_valid") or signal.get("data_valid") is False:
@@ -2440,6 +2441,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     valid = (candidate in ("UP", "DOWN") and candidate == fast and
              fast == slow and source in ("COINBASE", "KALSHI LIVE"))
     if not valid:
+        state["reversal_live_tape"] = []
         state.update(pending_direction=None, pending_count=0, pending_since=None,
                      pending_last_at=None, pending_price_source=None)
         state["retention_warning"] = (active + " PERDIENDO FUERZA • REEVALUANDO") if active else None
@@ -2451,6 +2453,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if fresh != candidate:
         return
     if active == candidate:
+        state["reversal_live_tape"] = []
         state["retention_warning"] = None
         state.update(pending_direction=None, pending_count=0, pending_since=None,
                      pending_last_at=None, pending_price_source=None)
@@ -2464,9 +2467,25 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         distance = _plan_number(signal.get("distance"))
         momentum = _plan_number(signal.get("mom5"))
         sign = 1 if candidate == "UP" else -1
+        # Un giro debe mantenerse en el precio EN VIVO, no solo en las velas UT.
+        # La cinta se reinicia al cambiar el candidato o al perder continuidad.
+        tape = state.get("reversal_live_tape", [])
+        if (not tape or tape[-1][2] != candidate or
+                tape[-1][3] != source or stamp - tape[-1][0] > SIGNAL_CONFIRM_MAX_GAP):
+            tape = []
+        tape = [row for row in tape if 0 <= stamp - row[0] <= 45]
+        if price is not None and (not tape or stamp - tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL):
+            tape.append([stamp, price, candidate, source])
+        state["reversal_live_tape"] = tape
+        live_move = sign * (tape[-1][1] - tape[0][1]) if len(tape) >= 2 else 0.0
+        live_travel = sum(abs(b[1]-a[1]) for a,b in zip(tape, tape[1:]))
+        live_efficiency = live_move / max(live_travel, 1e-8)
+        sustained = (len(tape) >= 5 and tape[-1][0] - tape[0][0] >= 18 and
+                     live_move >= max(4.0, 0.18 * atr) and live_efficiency >= 0.55)
         if (price is None or atr is None or atr <= 0 or
                 momentum is None or sign * momentum <= 0 or
-                distance is None or sign * distance < max(2.0, 0.10 * atr)):
+                distance is None or sign * distance < max(2.0, 0.10 * atr) or
+                not sustained):
             state["retention_warning"] = active + " PERDIENDO FUERZA • GIRO SIN CONFIRMAR"
             state.update(pending_direction=None, pending_count=0, pending_since=None,
                          pending_last_at=None, pending_price_source=None)
@@ -2492,6 +2511,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
 
     state["active_direction"] = candidate
     state["active_since"] = now
+    state["reversal_live_tape"] = []
     state["last_ut_direction"] = candidate
     state["last_ut_signal_time"] = now.isoformat()
     state["retention_warning"] = None
