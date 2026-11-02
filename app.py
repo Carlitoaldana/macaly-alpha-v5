@@ -4004,12 +4004,6 @@ def live_dashboard():
     pre_note = sig.get("ut_status", "Esperando velas cerradas de UT Bot.") + " · Sensibilidad 1 / ATR 10. La dirección la decide 1m; 3m solo informa. El porcentaje indica coincidencia de marcos, no acierto."
     pre_badge = ("3m A FAVOR" if sig.get("ut_1m") == sig.get("ut_3m") else "3m EN CONTRA") if sig.get("ut_valid") else "SIN DATOS"
 
-    pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">UT BOT · 1m PRINCIPAL</span><span class="prebadge">{pre_badge}</span></div>
-      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
-      <div class="prebar"><b style="width:{pre_percent}%"></b></div>
-      <div class="prenote">{pre_note}</div>
-    </section>'''
 
     if active == "UP":
         hero_arrow, hero_word = "", "UP"
@@ -4115,12 +4109,10 @@ def live_dashboard():
 
   <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}">
     <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
-    <div class="rconf">{'COINCIDENCIA UT ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
   </section>
 
   {weakness_html}
 
-  {pre_html}
 
   <div class="rgrid">
     <div class="rcard keycard">
