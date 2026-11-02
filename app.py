@@ -2241,6 +2241,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
             raise ValueError("UT todavía sin dirección confirmada.")
         # Existing RSI/EMA/volume panels are context only; no legacy route can choose a signal.
         sig.update(_legacy_context_metrics(closed, target, seconds_left, live_price, whale))
+        sig["pressure_up"] = sig["up_probability"]
+        sig["pressure_down"] = sig["down_probability"]
         same = fast["direction"] == slow["direction"]
         direction = fast["direction"]
         sig.update(data_valid=True, ut_valid=True, ut_1m=fast["direction"], ut_3m=slow["direction"],
@@ -2265,10 +2267,15 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
 
 
 def build_presignal(sig, seconds_left):
-    direction = sig.get("candidate") if sig.get("ut_valid") else None
-    aligned = direction and sig.get("ut_1m") == sig.get("ut_3m")
-    return {"direction":direction or "NEUTRAL", "percent":100 if aligned else 50,
-            "bull":1 if direction=="UP" else 0, "bear":1 if direction=="DOWN" else 0}
+    """Independent early pressure display, not UT 1m and not the confirmed trade."""
+    if not sig.get("data_valid") or sig.get("pressure_up") is None:
+        return {"direction":"NEUTRAL", "percent":0, "bull":0, "bear":0}
+    up = int(sig["pressure_up"])
+    down = 100-up
+    # Small differences are noise, not a directional pre-signal.
+    direction = "UP" if up >= 55 else "DOWN" if down >= 55 else "NEUTRAL"
+    return {"direction":direction, "percent":max(up,down) if direction != "NEUTRAL" else 50,
+            "bull":up, "bear":down}
 
 
 def entry_quality(price, seconds_left):
@@ -4026,24 +4033,22 @@ def live_dashboard():
     if pre_direction == "UP":
         pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
         pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
-        pre_label = "UP · 1m"
+        pre_label = "POSIBLE UP"
     elif pre_direction == "DOWN":
         pre_color, pre_bg, pre_glow = "#e64b4b", "rgba(104,25,37,.28)", "rgba(230,75,75,.20)"
         pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
-        pre_label = "DOWN · 1m"
+        pre_label = "POSIBLE DOWN"
     else:
         pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
         pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
         pre_label = "NEUTRAL"
 
-    pre_note = sig.get("ut_status", "Esperando velas cerradas de UT Bot.") + " · Sensibilidad 1 / ATR 10. La dirección la decide 1m; 3m solo informa. El porcentaje indica coincidencia de marcos, no acierto."
-    pre_badge = ("3m A FAVOR" if sig.get("ut_1m") == sig.get("ut_3m") else "3m EN CONTRA") if sig.get("ut_valid") else "SIN DATOS"
-
+    pre_badge = "COINCIDE CON LA SEÑAL" if active == pre_direction and active in ("UP", "DOWN") else "PRESIÓN ACTUAL"
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">UT BOT · 1m PRINCIPAL</span><span class="prebadge">{pre_badge}</span></div>
+      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
       <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
-      <div class="prenote">{pre_note}</div>
+      <div class="prenote">{pre_note} Porcentaje de apoyo, no probabilidad de acierto.</div>
     </section>'''
 
     if active == "UP":
