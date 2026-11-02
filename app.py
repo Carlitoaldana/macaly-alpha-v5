@@ -68,68 +68,704 @@ FLIP_CONFIRMATIONS = 2
 st.markdown(
     """
 <style>
-:root{color-scheme:dark}
-html,body,.stApp,[data-testid="stAppViewContainer"]{background:#020711!important;color:#e8f4ff!important}
-#MainMenu,footer,header,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important}
-.block-container{max-width:1140px!important;padding:8px 10px 12px!important}
-[data-testid="stVerticalBlock"]:has(> [data-testid="stElementContainer"] #alpha-stable-panel){gap:0!important}
-.ae{container-type:inline-size;font-family:Arial,Helvetica,sans-serif;color:#e6f2ff;font-size:1.7cqw;line-height:1.32}
-.ae *{box-sizing:border-box}
-.ae .frame{padding:1cqw;background:linear-gradient(135deg,#041227,#010714 65%);border:1px solid #0a3880;box-shadow:0 0 2cqw #005aff24}
-.ae .panel{min-width:0;border:1px solid #1688ff;border-radius:1.2cqw;background:linear-gradient(130deg,#061b38,#020b1d 75%);box-shadow:inset 0 0 1.4cqw #0059cf38,0 0 1cqw #0077ff73}
-.ae .row{display:grid;gap:1.3cqw;margin:0 0 1.25cqw;padding:0;text-align:left}
-.ae .tiny{font-size:1.55cqw}.ae .muted{color:#96b6dc}.ae .blue{color:#27b3ff}.ae .green{color:#00e6b1}.ae .red{color:#ff4258}
-.ae .top{min-height:10cqw;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:1cqw;padding:2cqw .4cqw 1.2cqw;border-bottom:1px solid #1268c0;margin-bottom:.9cqw;background:linear-gradient(128deg,transparent 15%,#0757b344 18%,transparent 19%,transparent 22%,#0b7cff4d 25%,transparent 26%)}
-.ae .top .brand{margin:0;text-align:center;position:relative;line-height:1.1}
-.ae .brand b{display:block;color:#3db5ff;font-size:4.2cqw;font-style:italic;font-weight:900;letter-spacing:.12cqw;text-shadow:0 0 .12cqw #a2e8ff,0 0 .5cqw #006fff}
-.ae .brand small{font-size:1.6cqw;color:#b6daf9;letter-spacing:.12cqw}
-.ae .crown{position:absolute;left:50%;top:-1.6cqw;transform:translateX(-50%);font-style:normal;color:#ffc447;font-size:1.8cqw;text-shadow:0 0 .6cqw #ffb000}
-.ae .nav-icon{font-size:3.8cqw;color:#25b4ff;text-decoration:none;text-shadow:0 0 .6cqw #008fff;line-height:1}
-.ae .top-right{display:flex;align-items:center;gap:3cqw}.ae .market-dot{font-size:2cqw;color:#00eab7;text-shadow:0 0 1cqw currentColor}
-.ae .hero{grid-template-columns:1.04fr 1fr}.ae .hero>.panel{height:16cqw;padding:1.5cqw 1.6cqw;overflow:hidden}
-.ae .signal{height:12cqw;display:flex;align-items:center;gap:1.2cqw}
-.ae .signal:has(.arrow[style*="visibility:hidden"]) .arrow{display:none}
-.ae .signal:has(.arrow[style*="visibility:hidden"]) .down{font-size:4.8cqw;letter-spacing:0;white-space:nowrap}
-.ae .arrow{width:10cqw;flex:none;filter:drop-shadow(0 0 1cqw var(--signal-color))}.ae .arrow svg{display:block;width:100%;height:9.3cqw}
-.ae .down{font-size:6.7cqw;line-height:1;font-weight:900;letter-spacing:.03cqw;color:var(--signal-color);text-shadow:0 0 1cqw var(--signal-color)}
-.ae .pill{display:inline-block;border:1px solid var(--signal-color);border-radius:3cqw;padding:.25cqw 1.6cqw;font-size:1.6cqw;font-weight:700;white-space:nowrap;box-shadow:0 0 .7cqw var(--signal-color);margin-top:.55cqw}
-.ae .state{position:relative;display:flex;align-items:center;justify-content:space-between;gap:.3cqw}
-.ae .state-copy{flex:1;min-width:0}.ae .state strong{display:block;font-size:1.9cqw;margin:.6cqw 0}.ae .state-note{font-size:1.5cqw;line-height:1.4;max-width:29cqw;color:#a6c5e4}
-.ae .coin-engraved{width:16cqw;height:16cqw;flex:none;margin-right:-3cqw;transform:rotate(-9deg)}.ae .coin svg{width:100%;height:100%;filter:drop-shadow(0 0 1cqw #008fff)}
-.ae .pre{display:block;padding:1.4cqw 2cqw;min-height:16cqw;margin-bottom:1cqw}
-.ae .prehead{display:flex;align-items:center;justify-content:space-between;gap:1cqw}
-.ae .tag{display:inline-block;font-size:1.25cqw;border:1px solid currentColor;border-radius:2cqw;padding:.35cqw 1.5cqw;white-space:nowrap;text-decoration:none;color:#65bfff}
-.ae .pre-main{display:flex;justify-content:space-between;align-items:center;margin:.8cqw 0}.ae .big{font-size:3.3cqw;font-weight:850}
-.ae .track{height:1.5cqw;background:#102c4e;border-radius:2cqw;overflow:hidden}.ae .fill{height:100%;background:var(--pre-color,#ff4258);border-radius:inherit;box-shadow:0 0 1cqw var(--pre-color,#ff4258)}
-.ae .pre p{margin:.75cqw 0 0;color:#a5c4e4;font-size:1.6cqw;line-height:1.4}
-.ae .metrics{grid-template-columns:repeat(4,minmax(0,1fr))}.ae .metric{height:13cqw;padding:1.7cqw 1cqw;display:flex;align-items:center;gap:1cqw;position:relative;overflow:hidden}
-.ae .metric .ico{font-size:4.4cqw;line-height:1;flex:none;filter:drop-shadow(0 0 .6cqw currentColor)}.ae .metric>div{min-width:0;flex:1}
-.ae .metric small{display:block;font-size:1.45cqw;line-height:1.25;color:#a4c9eb}.ae .metric strong{display:block;font-size:2.7cqw;line-height:1.2;white-space:nowrap}.ae .metric em{font-size:1.45cqw;line-height:1.35;font-style:normal;display:block;margin-top:.4cqw}
-.ae .bars svg{width:4cqw;height:5cqw;display:block}.ae .spark{width:12cqw;height:2.5cqw;position:absolute;right:1cqw;bottom:.65cqw;opacity:.9}
-.ae .support{display:block;padding:1.3cqw 1.5cqw;min-height:11cqw;margin-bottom:1cqw}.ae .supportbar{display:flex;gap:.65cqw;margin-top:.8cqw}.ae .supportbar>div{height:2.9cqw;line-height:2.9cqw;border-radius:.65cqw;text-align:center;font-size:1.6cqw;font-weight:800;min-width:0}
-.ae .upbar{background:#00eab1;color:#00332b;box-shadow:0 0 1cqw #00eab177}.ae .downbar{background:#ff4054;color:#34000c;box-shadow:0 0 1cqw #ff405477}.ae .split{display:flex;justify-content:space-between;margin-top:.65cqw;font-size:1.5cqw;font-weight:700}
-.ae .readers{grid-template-columns:1fr 1fr}.ae .reader{min-height:18cqw;padding:1.5cqw 1.5cqw}.ae .readbody{display:flex;align-items:center;gap:1.6cqw;margin-top:1.4cqw}.ae .donut{width:9.1cqw;height:9.1cqw;flex:none;border-radius:50%;display:grid;place-items:center}.ae .donut span{width:6.9cqw;height:6.9cqw;border-radius:50%;background:#07152a;display:grid;place-items:center;font-size:2.5cqw;font-weight:800}
-.ae .readbody strong{font-size:1.8cqw}.ae .readbody .tiny{margin-top:.7cqw;color:#a5c1df}
-.ae .motion{display:flex;justify-content:space-around;text-align:center;margin-top:1.8cqw}.ae .motion>div{flex:1;border-right:1px solid #234565}.ae .motion>div:last-child{border:0}.ae .motion strong{font-size:2.5cqw;display:block;margin-top:.6cqw}.ae .motion-note{text-align:center;font-size:1.4cqw;color:#9bbada;margin-top:.8cqw}
-.ae .chartpanel{display:block;padding:.9cqw 1.3cqw;margin-bottom:1cqw}.ae .charthead{display:flex;align-items:center;justify-content:space-between;gap:1cqw;min-height:3.7cqw}.ae .charthead strong{font-size:1.8cqw;white-space:nowrap}.ae .charthead .btc-icon{font-size:3cqw;color:#ffb727;vertical-align:middle}
-.ae .jc-tf-buttons{display:flex;align-items:center;gap:.7cqw}.ae .jc-tf-buttons button{appearance:none;background:#06152b;border:1px solid #164b83;border-radius:.7cqw;color:#98c3ec;font-size:1.35cqw;line-height:1;padding:.65cqw 1cqw;cursor:pointer}.ae .jc-tf-buttons button.active{background:#0785ff;color:#fff;border-color:#5dc4ff;box-shadow:0 0 1cqw #0097ff}
-.ae #jc-chart-mount,.ae #alpha-chart-stable-host{width:100%;min-width:0;margin:0}.ae #alpha-chart-stable-host iframe{width:100%;border:0;display:block;background:#030d1d;aspect-ratio:24/11}
-.ae .indicators{grid-template-columns:1.15fr 1fr}.ae .indicator{padding:1.3cqw 1.6cqw;min-height:14cqw}.ae .chips{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1cqw;margin-top:1.4cqw}.ae .chip{font:inherit;font-size:1.4cqw;border:1px solid #125180;border-radius:3cqw;background:#03122a;color:#c8e7fa;padding:.8cqw .3cqw;white-space:nowrap;cursor:pointer}.ae .chip[aria-pressed="false"]{opacity:.4}.ae .chip i{font-style:normal;color:var(--chip);text-shadow:0 0 .7cqw var(--chip)}.ae .rsi{display:block;width:100%;height:7cqw;margin-top:.4cqw}
-.ae .history{padding:1.1cqw 1.6cqw}.ae .history-head{display:flex;align-items:center;justify-content:space-between}.ae table{width:100%;border-collapse:collapse;font-size:1.55cqw;line-height:1.3;margin-top:1.1cqw}.ae th{color:#8eb7df;font-weight:500;font-size:1.2cqw;text-align:left;background:#071d38}.ae td,.ae th{padding:.8cqw .6cqw;border-bottom:1px solid #113153;white-space:nowrap}.ae tr:last-child td{border:0}.ae .notice{font-size:1.2cqw;color:#7598bb;text-align:center;padding:1cqw 0 .3cqw}
-.ae button:focus-visible,.ae a:focus-visible{outline:2px solid #bcf2ff;outline-offset:2px}
-@media(max-width:700px){.block-container{padding:20px 3px 10px!important}.ae .frame{border:0}.ae .prehead{flex-wrap:nowrap}}
-/* Mismo orden y distribución; solo un poco más de altura. */
-.ae .panel{border-color:#285b90;box-shadow:inset 0 0 8px #0059cf12,0 0 3px #0077ff18}
-.ae .frame{box-shadow:none}
-.ae .hero>.panel{height:20cqw}
-.ae .signal{height:16cqw}
-.ae .pre{min-height:20cqw;padding-top:2.2cqw;padding-bottom:2.2cqw}
-.ae .metric{height:16cqw}
-.ae .support{min-height:13.5cqw;padding-top:2cqw;padding-bottom:2cqw}
-.ae .reader{min-height:23cqw;padding-top:2cqw;padding-bottom:2cqw}
-.ae .indicator{min-height:17.5cqw;padding-top:2cqw;padding-bottom:2cqw}
-.ae .history td,.ae .history th{padding-top:1.1cqw;padding-bottom:1.1cqw}
-.ae .row{margin-bottom:1.7cqw}
+#MainMenu, footer, header {visibility:hidden;}
+[data-testid="stToolbar"] {display:none;}
+[data-testid="stDecoration"] {display:none;}
+[data-testid="stStatusWidget"] {display:none;}
+
+html, body, [class*="css"] {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.stApp {
+    background:
+      radial-gradient(circle at 50% -12%, rgba(31,65,104,.24), transparent 30%),
+      #070b11;
+    color:#f4f7fb;
+}
+
+.block-container {
+    max-width:410px !important;
+    padding:8px 10px 24px !important;
+}
+
+div[data-testid="stVerticalBlock"] {gap:.55rem;}
+
+.topbar {
+    position:relative;
+    min-height:45px;
+    padding:3px 2px 4px;
+    text-align:center;
+}
+.brand {
+    color:#f8fafc;
+    font-size:13px;
+    line-height:1.05;
+    font-weight:950;
+    letter-spacing:.15px;
+}
+.version {
+    color:#647184;
+    font-size:7px;
+    font-weight:800;
+    margin-top:2px;
+}
+.live {
+    position:absolute;
+    right:3px;
+    top:27px;
+    display:flex;
+    align-items:center;
+    gap:5px;
+    color:#91a0b3;
+    font-size:7.5px;
+    font-weight:800;
+}
+.live-dot {
+    width:7px;
+    height:7px;
+    border-radius:50%;
+    background:#00dfb5;
+    box-shadow:0 0 10px rgba(46,230,123,.8);
+}
+
+.hero {
+    text-align:center;
+    padding:0 4px 8px;
+}
+.hero-signal {
+    font-size:58px;
+    line-height:.96;
+    font-weight:1000;
+    letter-spacing:-3px;
+    text-shadow:0 0 28px var(--glow);
+}
+.hero-wait {
+    font-size:31px;
+    line-height:1.03;
+    font-weight:1000;
+    letter-spacing:-1.2px;
+    color:#51bff3;
+    text-shadow:0 0 22px rgba(56,189,248,.20);
+}
+.confidence {
+    display:inline-block;
+    margin-top:10px;
+    padding:5px 12px;
+    border-radius:7px;
+    font-size:10px;
+    font-weight:1000;
+    letter-spacing:.4px;
+    border:1px solid var(--accent);
+    color:var(--accent);
+    background:var(--soft);
+}
+
+.two {
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:8px;
+    margin-top:7px;
+}
+.mini {
+    min-height:61px;
+    background:linear-gradient(180deg,#101722,#0c121b);
+    border:1px solid #1b2735;
+    border-radius:10px;
+    padding:8px 9px;
+}
+.mini-label {
+    color:#69778a;
+    font-size:8px;
+    font-weight:900;
+    letter-spacing:.8px;
+    text-transform:uppercase;
+    margin-bottom:5px;
+}
+.mini-value {
+    color:#f4f7fb;
+    font-size:18px;
+    font-weight:950;
+    letter-spacing:-.4px;
+}
+.mini-sub {
+    color:#7e8b9e;
+    font-size:9px;
+    font-weight:800;
+    margin-top:3px;
+}
+.green {color:#00dfb5;}
+.red {color:#ff5363;}
+.blue {color:#54c6f5;}
+.amber {color:#f7bd4d;}
+
+.section {
+    background:linear-gradient(180deg,#0f1620,#0b1119);
+    border:1px solid #1b2735;
+    border-radius:11px;
+    padding:11px;
+    margin-top:8px;
+}
+.section-title {
+    color:#8b98aa;
+    font-size:9px;
+    font-weight:1000;
+    letter-spacing:.8px;
+    text-transform:uppercase;
+    margin-bottom:8px;
+}
+.prob-row {
+    display:flex;
+    align-items:center;
+    gap:7px;
+}
+.prob-up, .prob-down {
+    height:12px;
+    border-radius:4px;
+    min-width:2px;
+}
+.prob-up {
+    background:linear-gradient(90deg,#1bcf6a,#53ef8d);
+    box-shadow:0 0 10px rgba(46,230,123,.18);
+}
+.prob-down {
+    background:linear-gradient(90deg,#ff3d50,#ff6876);
+    box-shadow:0 0 10px rgba(255,76,91,.18);
+}
+.prob-labels {
+    display:flex;
+    justify-content:space-between;
+    margin-top:7px;
+    font-size:10px;
+    font-weight:900;
+}
+
+.close-reader {
+    border-radius:11px;
+    padding:12px;
+    margin-top:8px;
+    border:1px solid var(--reader-border);
+    background:var(--reader-bg);
+    box-shadow:inset 0 0 25px rgba(0,0,0,.10);
+}
+.reader-top {
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    color:#e9eef5;
+    font-size:9px;
+    font-weight:1000;
+    letter-spacing:.7px;
+}
+.reader-active {
+    padding:3px 7px;
+    border-radius:8px;
+    color:#57ee91;
+    border:1px solid rgba(69,231,129,.55);
+    background:rgba(28,153,78,.15);
+    font-size:8px;
+}
+.reader-main {
+    display:grid;
+    grid-template-columns:1fr 70px;
+    align-items:center;
+    gap:8px;
+    margin-top:12px;
+}
+.reader-text {
+    color:#f6f8fb;
+    font-size:15px;
+    line-height:1.15;
+    font-weight:1000;
+}
+.reader-note {
+    color:#8390a2;
+    font-size:8px;
+    line-height:1.35;
+    margin-top:6px;
+}
+.ring {
+    --p:50;
+    --ring:#00dfb5;
+    width:66px;
+    height:66px;
+    border-radius:50%;
+    display:grid;
+    place-items:center;
+    background:conic-gradient(var(--ring) calc(var(--p)*1%), #27313e 0);
+    position:relative;
+}
+.ring:after {
+    content:"";
+    position:absolute;
+    width:51px;
+    height:51px;
+    border-radius:50%;
+    background:#0b1119;
+}
+.ring span {
+    position:relative;
+    z-index:1;
+    color:#f7fafc;
+    font-size:15px;
+    font-weight:1000;
+}
+
+.tech-grid {
+    display:grid;
+    grid-template-columns:repeat(5,1fr);
+    gap:3px;
+    text-align:center;
+}
+.tech-label {
+    color:#637084;
+    font-size:6.5px;
+    font-weight:900;
+    letter-spacing:.25px;
+    text-transform:uppercase;
+}
+.tech-value {
+    color:#eef3f9;
+    font-size:10px;
+    font-weight:1000;
+    margin-top:5px;
+    overflow:hidden;
+    white-space:nowrap;
+}
+
+.ticker {
+    text-align:center;
+    color:#4f5c6f;
+    font-size:7.5px;
+    font-weight:800;
+    margin-top:8px;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+
+.footer-nav {
+    display:grid;
+    grid-template-columns:repeat(4,1fr);
+    text-align:center;
+    padding:10px 2px 1px;
+    margin-top:7px;
+    border-top:1px solid #182331;
+}
+.nav-item {
+    color:#5f6c7e;
+    font-size:8px;
+    font-weight:800;
+}
+.nav-active {color:var(--accent);}
+
+.alert {
+    border-radius:10px;
+    padding:10px;
+    margin-top:8px;
+    text-align:center;
+    color:#ffd260;
+    background:rgba(116,78,7,.18);
+    border:1px solid rgba(247,189,77,.42);
+    font-size:10px;
+    font-weight:900;
+}
+
+/* ===== REFERENCE UI OVERRIDES ===== */
+.block-container{
+    max-width:390px !important;
+    padding:5px 9px 20px !important;
+}
+.topbar{
+    min-height:39px !important;
+    padding:2px 1px 3px !important;
+}
+.brand{font-size:12px !important;}
+.version{font-size:6.5px !important;color:#536174 !important;}
+.live{top:23px !important;font-size:6.8px !important;}
+
+.hero{padding:0 2px 5px !important;}
+.hero-signal{
+    font-size:55px !important;
+    line-height:.90 !important;
+    letter-spacing:-4px !important;
+}
+.confidence{
+    margin-top:8px !important;
+    padding:4px 9px !important;
+    border-radius:6px !important;
+    font-size:8px !important;
+}
+
+.two{
+    gap:6px !important;
+    margin-top:6px !important;
+}
+.mini{
+    min-height:57px !important;
+    padding:7px 8px !important;
+    border-radius:8px !important;
+    background:#0d141d !important;
+    border-color:#172230 !important;
+}
+.mini-label{font-size:6.8px !important;margin-bottom:3px !important;}
+.mini-value{font-size:15px !important;line-height:1.05 !important;}
+.mini-sub{font-size:6.8px !important;margin-top:2px !important;}
+
+.section{
+    padding:8px !important;
+    margin-top:6px !important;
+    border-radius:8px !important;
+    background:#0c131c !important;
+    border-color:#172230 !important;
+}
+.section-title{
+    font-size:7px !important;
+    margin-bottom:6px !important;
+}
+.prob-row{gap:5px !important;}
+.prob-up,.prob-down{height:15px !important;border-radius:3px !important;}
+.prob-labels{margin-top:5px !important;font-size:7.5px !important;}
+
+.close-reader{
+    padding:9px !important;
+    margin-top:6px !important;
+    border-radius:8px !important;
+}
+.reader-top{font-size:7px !important;}
+.reader-active{font-size:6px !important;padding:2px 5px !important;}
+.reader-main{
+    grid-template-columns:1fr 58px !important;
+    margin-top:7px !important;
+}
+.reader-text{font-size:11px !important;line-height:1.08 !important;}
+.reader-note{font-size:6.5px !important;margin-top:4px !important;}
+.ring{width:54px !important;height:54px !important;}
+.ring:after{width:42px !important;height:42px !important;}
+.ring span{font-size:12px !important;}
+
+.tech-grid{gap:0 !important;}
+.tech-grid > div{
+    padding:0 4px !important;
+    border-right:1px solid #1c2734;
+}
+.tech-grid > div:last-child{border-right:none;}
+.tech-label{font-size:5.8px !important;}
+.tech-value{font-size:8.5px !important;margin-top:3px !important;}
+
+.ref-features{
+    display:grid;
+    grid-template-columns:repeat(3,1fr);
+    gap:4px;
+    padding:8px 2px 6px;
+    margin-top:6px;
+    border-top:1px solid #182331;
+}
+.ref-feature{
+    display:grid;
+    grid-template-columns:22px 1fr;
+    gap:5px;
+    align-items:center;
+    color:#66758a;
+    font-size:5.6px;
+    line-height:1.22;
+}
+.ref-feature-icon{
+    width:20px;height:20px;border-radius:50%;
+    display:grid;place-items:center;
+    border:1px solid #28dd79;
+    color:#00dfb5;
+    font-size:10px;font-weight:1000;
+}
+.ref-feature strong{
+    display:block;color:#cfd7e1;
+    font-size:5.8px;margin-bottom:1px;
+}
+.ref-footer{
+    display:flex;
+    justify-content:space-between;
+    gap:8px;
+    padding:5px 1px 1px;
+    border-top:1px solid #131d29;
+    color:#435064;
+    font-size:5.2px;
+    font-weight:800;
+}
+.footer-nav{
+    padding:7px 2px 1px !important;
+    margin-top:4px !important;
+}
+.nav-item{font-size:6.8px !important;}
+
+
+/* FINAL REFERENCE MATCH */
+.block-container{max-width:430px!important;padding:7px 10px 22px!important}
+.topbar{min-height:48px!important;padding:4px 2px 5px!important;text-align:center!important}
+.brand{font-size:15px!important}.version{font-size:8px!important}
+.live{top:29px!important;right:4px!important;font-size:8px!important}
+.hero{padding:2px 2px 7px!important}
+.hero-signal{font-size:72px!important;line-height:.86!important;letter-spacing:-5px!important;text-shadow:0 0 12px currentColor,0 0 28px currentColor!important}
+.confidence{font-size:10px!important;padding:5px 16px!important;border-radius:18px!important;margin-top:9px!important}
+.two{gap:7px!important;margin-top:7px!important}
+.mini{min-height:72px!important;padding:9px 10px!important;border-radius:9px!important}
+.mini-label{font-size:8px!important}.mini-value{font-size:19px!important}.mini-sub{font-size:8px!important}
+.section{padding:9px!important;margin-top:7px!important;border-radius:9px!important}
+.section-title{font-size:8px!important;margin-bottom:6px!important}
+.prob-up,.prob-down{height:20px!important}.prob-labels{font-size:9px!important}
+.close-reader{padding:10px 11px!important;margin-top:7px!important;border-radius:10px!important}
+.reader-top{font-size:9px!important}.reader-active{font-size:7px!important}
+.reader-main{grid-template-columns:1fr 68px!important;margin-top:8px!important}
+.reader-text{font-size:15px!important;line-height:1.08!important}.reader-note{font-size:7.5px!important}
+.ring{width:64px!important;height:64px!important}.ring:after{width:50px!important;height:50px!important}.ring span{font-size:15px!important}
+.tech-label{font-size:6.5px!important}.tech-value{font-size:10px!important}
+.footer-nav{padding:9px 2px 7px!important}.nav-item{font-size:8px!important}
+.ref-features{padding:9px 3px 7px!important}.ref-feature{font-size:6px!important}
+.ref-feature strong{font-size:6.2px!important}.ref-footer{font-size:5.6px!important}
+.ref-icon{font-size:23px;line-height:1;margin-right:8px;display:inline-block;vertical-align:middle}
+.ref-btc{color:#ff9f0a}.ref-target{color:#a9c9f3}
+.ref-bars{display:inline-flex;gap:2px;align-items:flex-end;height:19px;margin-right:8px;vertical-align:middle}
+.ref-bars i{display:block;width:5px;background:var(--accent);border-radius:1px}
+.ref-bars i:nth-child(1){height:7px}.ref-bars i:nth-child(2){height:12px}.ref-bars i:nth-child(3){height:18px}
+.ref-clock{font-size:23px;color:#b9d5f5;margin-right:8px;vertical-align:middle}
+.ref-timebar{height:5px;background:#16324a;border-radius:5px;margin-top:5px;overflow:hidden}
+.ref-timebar b{display:block;height:100%;width:58%;background:var(--accent);border-radius:5px}
+.tech-head{display:flex;justify-content:space-between;align-items:center}
+.tech-chevron{font-size:13px;color:#b6c6da}
+
+
+/* ===== REBUILT REFERENCE FRONTEND ===== */
+.block-container{max-width:430px!important;padding:4px 9px 18px!important}
+.refapp{font-family:Arial,sans-serif;color:#eaf2fb}
+.rhead{height:54px;position:relative;text-align:center;padding-top:7px}
+.rtitle{font-size:15px;font-weight:900}.rver{font-size:9px;color:#9badc3;margin-top:2px}
+.gear{position:absolute;right:9px;top:7px;font-size:19px;color:#a9c9ec;text-decoration:none!important;cursor:pointer;z-index:50}
+.rlive{position:absolute;right:8px;bottom:1px;font-size:9px;color:#b9c9db}
+.rlive i{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--accent);margin-right:5px;box-shadow:0 0 12px var(--accent)}
+.rhero{text-align:center;padding:4px 0 8px}
+.rsignal{display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:72px;font-weight:1000;line-height:.82;letter-spacing:-5px;text-shadow:0 0 12px var(--glow),0 0 25px var(--glow)}
+.rarrow{font-size:79px;margin-right:5px;line-height:.7}.rhero.waiting .rsignal{font-size:39px;letter-spacing:-2px}.rhero.waiting .rarrow{display:none}
+.rconf{display:inline-block;margin-top:11px;border:1.5px solid var(--accent);border-radius:18px;padding:5px 17px;color:#fff;font-size:10px;font-weight:900;box-shadow:0 0 10px var(--soft)}
+.rgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:2px}
+.rcard{background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px}
+.keycard{height:68px;padding:8px 9px;display:flex;align-items:center;gap:8px}
+.bigicon{font-size:31px;font-weight:900;line-height:1}.btcicon{color:#ff9d00}.targeticon{color:#8acfc3}
+.rlabel{font-size:8px;color:#b9c9dc;letter-spacing:.4px}.rvalue{font-size:19px;font-weight:900;line-height:1.05;margin-top:2px}.rdelta{font-size:9px;font-weight:900;margin-top:2px}
+.green{color:#00dfb5!important}.red{color:#e64b4b!important}
+.bars{display:flex;align-items:flex-end;gap:3px;width:31px;height:30px}.bars b{width:7px;background:var(--accent);border-radius:2px}.bars b:nth-child(1){height:11px}.bars b:nth-child(2){height:20px}.bars b:nth-child(3){height:28px}
+.clock{font-size:30px;color:#8acfc3}.timecontent{flex:1}.timebar{height:6px;background:#16324a;border-radius:5px;margin-top:5px;overflow:hidden}.timebar b{display:block;height:100%;background:var(--accent);border-radius:5px}
+.probs{margin-top:6px;padding:8px}.pbar{display:flex;gap:4px;margin-top:5px}.pup,.pdown{height:21px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;border-radius:4px}.pup{background:linear-gradient(90deg,#10d76d,#54ed91);color:#06331d}.pdown{background:linear-gradient(90deg,#ff3548,#ff6472);color:#3d0710}.pleg{display:flex;justify-content:space-between;font-size:10px;font-weight:900;margin-top:6px}
+.reader{margin-top:6px;border:1.5px solid var(--rb);background:var(--rbg);border-radius:9px;padding:9px 10px}
+.readerhead{display:flex;align-items:center;gap:7px;font-size:9px;color:var(--rr)}.readerhead .pulse{font-size:18px}.readerhead em{margin-left:auto;border:1px solid #24d873;border-radius:12px;padding:3px 8px;font-style:normal;font-size:8px;color:#00dfb5}
+.readerbody{display:grid;grid-template-columns:1fr 65px;align-items:center;margin-top:7px}.readerbody strong{display:block;font-size:15px;line-height:1.12}.readerbody small{display:block;color:#aab8c9;font-size:7px;margin-top:5px}
+.rring{width:62px;height:62px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--rr) calc(var(--p)*1%),#263342 0);position:relative}.rring:after{content:"";position:absolute;width:48px;height:48px;background:#08121b;border-radius:50%}.rring span{z-index:1;font-size:15px;font-weight:900}
+.tech{margin-top:6px;padding:7px 8px}.techhead{display:flex;justify-content:space-between;font-size:9px;color:#c2d0df;padding-bottom:6px}.techrow{display:grid;grid-template-columns:repeat(5,1fr);border-top:1px solid #172737}.techrow>div{text-align:center;padding:7px 2px 2px;border-right:1px solid #172737}.techrow>div:last-child{border:0}.techrow small,.techrow i{display:block;font-size:6px;color:#8d9db0;font-style:normal}.techrow b{display:block;font-size:10px;margin:4px 0}
+.rnav{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid #203448;border-bottom:1px solid #203448;margin-top:7px;padding:7px 0}.rnav div{text-align:center;color:#9db0c5;font-size:8px}.rnav b{display:block;font-size:17px;margin-bottom:2px}.rnav .active{color:var(--accent)}
+.features{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;padding:8px 1px}.features>div{display:flex;gap:5px;align-items:center}.features>div>b{width:25px;height:25px;border:1px solid #00dfb5;border-radius:50%;display:grid;place-items:center;color:#00dfb5;font-size:13px}.features p{margin:0}.features strong{display:block;font-size:5.7px;color:#e1e8f0}.features span{display:block;font-size:5.4px;color:#8c9db0;margin-top:2px}
+.refapp footer{border-top:1px solid #182a3a;padding:5px 1px;display:flex;justify-content:space-between;color:#708197;font-size:5.2px}
+.ticker{text-align:center;color:#53667d;font-size:6px;margin-top:5px}
+
+
+/* ===== FINAL PHONE REFERENCE PROPORTIONS ===== */
+.block-container{max-width:365px!important;padding:3px 7px 14px!important}
+.rhead{height:49px!important;padding-top:4px!important}
+.rtitle{font-size:14px!important}.rver{font-size:8px!important}
+.gear{right:7px!important;top:4px!important;font-size:18px!important}
+.rlive{right:7px!important;bottom:0!important;font-size:8px!important}
+.rhero{padding:1px 0 7px!important}
+.rsignal{font-size:61px!important;line-height:.80!important;letter-spacing:-4px!important}
+.rarrow{font-size:66px!important;margin-right:4px!important}
+.rhero.waiting .rsignal{font-size:29px!important;letter-spacing:-1px!important}
+.rconf{margin-top:9px!important;padding:4px 14px!important;font-size:9px!important}
+.rgrid{gap:5px!important}
+.keycard{height:57px!important;padding:6px 8px!important;gap:7px!important}
+.bigicon{font-size:27px!important}.bars{width:27px!important;height:26px!important}.clock{font-size:27px!important}
+.rlabel{font-size:7px!important}.rvalue{font-size:16px!important}.rdelta{font-size:8px!important}
+.timebar{height:5px!important;margin-top:4px!important}
+.probs{margin-top:5px!important;padding:7px!important}.pup,.pdown{height:18px!important;font-size:9px!important}
+.pleg{font-size:9px!important;margin-top:5px!important}
+.reader{margin-top:5px!important;padding:7px 8px!important}
+.readerhead{font-size:8px!important}.readerhead .pulse{font-size:15px!important}
+.readerbody{grid-template-columns:1fr 58px!important;margin-top:5px!important}
+.readerbody strong{font-size:13px!important}.readerbody small{font-size:6.3px!important;margin-top:3px!important}
+.rring{width:55px!important;height:55px!important}.rring:after{width:43px!important;height:43px!important}.rring span{font-size:13px!important}
+.tech{margin-top:5px!important;padding:6px 7px!important}.techhead{font-size:8px!important;padding-bottom:5px!important}
+.techrow>div{padding:5px 1px 1px!important}.techrow small,.techrow i{font-size:5.3px!important}.techrow b{font-size:9px!important;margin:3px 0!important}
+.rnav{margin-top:6px!important;padding:6px 0!important}.rnav div{font-size:7px!important}.rnav b{font-size:15px!important}
+.features{padding:7px 1px 5px!important;gap:3px!important}.features>div{gap:4px!important}
+.features>div>b{width:22px!important;height:22px!important;font-size:11px!important}
+.features strong{font-size:5px!important}.features span{font-size:4.8px!important}
+.refapp footer{padding:4px 1px!important;font-size:4.7px!important}
+.ticker{font-size:5.3px!important;margin-top:4px!important}
+
+/* Make arrows chunky like the reference rather than thin text arrows */
+.rarrow{font-family:Arial Black,Arial,sans-serif!important;font-weight:1000!important}
+
+
+/* ===== TRUE FINAL: CSS ARROW + VISIBLE HEADER ===== */
+.rhead{
+    display:block!important;
+    visibility:visible!important;
+    height:58px!important;
+    min-height:58px!important;
+    padding-top:7px!important;
+    overflow:visible!important;
+    position:relative!important;
+    z-index:20!important;
+}
+.rtitle,.rver,.gear,.rlive{display:block!important;visibility:visible!important}
+.rtitle{font-size:14px!important;line-height:17px!important}
+.rver{font-size:8px!important;line-height:11px!important}
+.gear{top:7px!important;right:8px!important}
+.rlive{bottom:3px!important;right:8px!important}
+
+.rhero{padding-top:4px!important}
+.rsignal{gap:9px!important}
+.rarrow{display:none!important}
+
+/* Solid arrow matching signal color; no iOS emoji rendering */
+.cssarrow{
+    position:relative;
+    display:inline-block;
+    width:42px;
+    height:46px;
+    background:var(--accent);
+    border-radius:3px;
+    box-shadow:0 0 12px var(--glow),0 0 24px var(--glow);
+    flex:0 0 auto;
+}
+.cssarrow:before{
+    content:"";
+    position:absolute;
+    left:-17px;
+    top:-27px;
+    width:0;height:0;
+    border-left:38px solid transparent;
+    border-right:38px solid transparent;
+    border-bottom:34px solid var(--accent);
+    filter:drop-shadow(0 0 7px var(--glow));
+}
+/* DOWN: arrow head below shaft */
+.refapp.dir-down .cssarrow{transform:rotate(180deg);}
+/* Waiting state: no arrow */
+.rhero.waiting .cssarrow{display:none!important}
+
+/* Keep final phone proportions compact */
+.block-container{max-width:365px!important;padding-top:3px!important}
+.rgrid{margin-top:1px!important}
+.reader{min-height:0!important}
+
+
+/* ===== PRESEÑAL — CAPA VISUAL, NO TOCA EL MOTOR ===== */
+.presignal{margin:0 0 6px;padding:9px 10px;border:1px solid var(--precolor);border-radius:10px;background:linear-gradient(135deg,var(--prebg),rgba(8,18,27,.88));box-shadow:0 0 18px var(--preglow)}
+.prehead{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.pretitle{font-size:8px;font-weight:950;letter-spacing:.55px;color:#b9c9db}
+.prebadge{font-size:6.5px;font-weight:900;color:var(--precolor);border:1px solid var(--precolor);border-radius:10px;padding:3px 7px}
+.premain{display:flex;justify-content:space-between;align-items:flex-end;margin-top:7px;gap:8px}
+.predirection{font-size:17px;font-weight:1000;color:var(--precolor);letter-spacing:-.3px}
+.prepercent{font-size:18px;font-weight:1000;color:var(--precolor)}
+.prebar{height:5px;background:#1b2938;border-radius:6px;overflow:hidden;margin-top:7px}
+.prebar b{display:block;height:100%;background:var(--precolor);border-radius:6px;box-shadow:0 0 9px var(--preglow)}
+.prenote{font-size:6.7px;color:#91a2b5;margin-top:5px;line-height:1.25}
+
+/* ===== PANEL FINAL DE CIERRE — EXACTO A LA REFERENCIA ===== */
+.finalclose{margin-top:7px;border:1px solid var(--rr);border-radius:9px;padding:7px;background:rgba(5,15,22,.45)}
+.finalgrid{display:grid;grid-template-columns:1.65fr .85fr .85fr;gap:4px}
+.finalcard{min-height:67px;border:1px solid #29445a;border-radius:8px;background:linear-gradient(180deg,#0b1822,#08121a);padding:6px;text-align:center}
+.finalcard.motion{border-color:#25bff2}.finalcard.distance{border-color:#8c4cff}.finalcard.speed{border-color:#ff3f86}
+.finaltitle{font-size:6.5px;font-weight:950;color:#e6edf6}.motionrow{display:grid;grid-template-columns:repeat(3,1fr);margin-top:5px}.motionrow>div{border-right:1px solid #203344}.motionrow>div:last-child{border:0}.motionrow small{display:block;font-size:6px;color:#b7c6d7}.motionrow b{display:block;font-size:11px;margin-top:2px}.finalbig{font-size:14px;font-weight:1000;margin-top:8px}.finalsub{font-size:8px;font-weight:900;margin-top:2px}.finalnote{font-size:5.8px;color:#91a3b6;margin-top:4px}
+.finalanalysis{display:grid;grid-template-columns:1fr 80px;gap:5px;margin-top:4px}.analysisbox,.probbox{border:1px solid #1fae7a;border-radius:8px;background:#07151a;padding:7px}.analysisbox{display:flex;align-items:center;gap:7px}.analysisicon{font-size:23px;color:#00dfb5}.analysistext small{display:block;font-size:6.3px;color:#d4deea}.analysistext b{display:block;font-size:10px;color:var(--rr);margin-top:2px}.analysistext span{display:block;font-size:6.3px;color:#a3b2c3;margin-top:3px}.probbox{border-color:#ff3f86;text-align:center}.probbox small{display:block;font-size:6.5px;color:#e4ebf3}.probbox b{display:block;font-size:15px;color:var(--rr);margin-top:8px}
+.chartbox{margin-top:10px;background:linear-gradient(180deg,#08121d,#060c14);border:1px solid #203a51;border-radius:12px;padding:10px 8px 8px;box-shadow:inset 0 0 28px rgba(20,80,110,.08)}
+.charttop{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#eef6ff}.charttop b{font-size:13px}.chartlive{font-size:7px;color:#00dfb5;margin-left:8px}.charttf{border:1px solid #26384b;border-radius:7px;padding:5px 8px;color:#dce8f5;font-size:9px}.ohlc{font-size:7px;color:#8ea0b5;margin-top:5px;white-space:nowrap}.indicators{font-size:7px;color:#aab8ca;margin:7px 0 1px;white-space:nowrap}.ema9dot{color:#df42e7}.ema21dot{color:#32d7ef}.targetdot{color:#23e7c1}.candlesvg{display:block;width:100%;height:265px}.chartfoot{display:flex;align-items:center;gap:10px;border-top:1px solid #18283a;padding:7px 2px 1px;color:#71839a;font-size:6px}.chartfoot .selected{border:1px solid #2a7189;border-radius:7px;padding:4px 8px;color:#e7f5ff;background:#0d2632}.chartempty{height:160px;display:grid;place-items:center;color:#708197;font-size:10px}
+
+/* UNIFIED NEON THEME — visual layer only */
+:root{--neon-up:#00dfb5;--neon-down:#e64b4b;--neon-purple:#00dfb5;--neon-cyan:#00eaff}
+.stApp,[data-testid="stAppViewContainer"]{background:radial-gradient(ellipse at 50% 0,rgba(0,100,85,.12),transparent 42%),#06121a!important}
+.block-container{max-width:720px!important;padding:8px 12px 26px!important}
+.refapp{color:#e9eafa;font-family:Inter,Arial,sans-serif}
+.rcard,.mini,.section,.close-reader{background:linear-gradient(135deg,#111221,#080d17)!important;border-color:#23685e!important;border-radius:14px!important;box-shadow:inset 0 0 20px #8e48f208,0 0 11px #00dfb50c}
+.refapp>section[style]{border-color:#23685e!important;border-radius:15px!important;box-shadow:0 0 13px #00dfb510}
+.rtitle{color:#ecedff;text-shadow:0 0 18px #00dfb555}
+.gear{color:#00dfb5!important;text-shadow:0 0 12px #00dfb566}
+.rlive{color:#00dfb5!important}.rlive i{background:#00dfb5!important;box-shadow:0 0 11px #00dfb555!important}
+.green{color:#00dfb5!important;text-shadow:0 0 7px #00dfb5aa,0 0 18px #00dfb555}
+.red{color:#e64b4b!important;text-shadow:0 0 7px #e64b4baa,0 0 18px #e64b4b55}
+.rconf{box-shadow:0 0 14px var(--soft),inset 0 0 12px var(--soft)!important}
+.pup,.prob-up{background:linear-gradient(90deg,#00dfb5,#00dfb5)!important;color:#03281f!important;box-shadow:0 0 18px #00dfb580}
+.pdown,.prob-down{background:linear-gradient(90deg,#e64b4b,#e64b4b)!important;color:#320515!important;box-shadow:0 0 18px #e64b4b80}
+.timebar b,.ref-timebar b{box-shadow:0 0 11px var(--accent)}
+.reader{box-shadow:0 0 14px var(--soft),inset 0 0 20px #9c63ed07!important;border-radius:15px!important}
+.readerhead em{border-color:#00dfb5!important;color:#00dfb5!important;box-shadow:0 0 9px #00dfb51a}
+.rring{filter:drop-shadow(0 0 6px var(--soft))}.rring:after{background:#080d17!important}
+.techrow{border-color:#244047!important}.techrow>div{border-color:#244047!important}
+.rnav{border-color:#244047!important}.rnav .active{color:var(--accent);text-shadow:0 0 12px var(--glow)}
+.features>div>b{border-color:#00dfb5!important;color:#00dfb5!important;box-shadow:0 0 9px #00dfb521}
+.targeticon,.clock{color:#8acfc3!important}.btcicon{filter:drop-shadow(0 0 7px #ff9d0044)}
+.stRadio [role="radiogroup"]{gap:8px!important;flex-wrap:wrap;padding:8px 0}
+.stRadio label{border:1px solid #23685e;border-radius:18px;padding:6px 10px!important;background:#110e20;color:#ded9f4!important}
+[data-testid="stButton"] button{border-color:#23685e;color:#ece3ff;background:#141022;border-radius:12px}
+[data-testid="stButton"] button:hover{border-color:#00dfb5;box-shadow:0 0 13px #00dfb533}
+[data-testid="stMetricValue"]{color:#00eaff;text-shadow:0 0 10px #00eaff28}
+@media(max-width:460px){.block-container{max-width:100%!important;padding:5px 8px 20px!important}}
+
+
+/* Strong neon and readable labels across both visual surfaces. */
+.green{color:#00dfb5!important;text-shadow:0 0 5px #00dfb588,0 0 14px #00dfb555!important}
+.red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
+.pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
+.pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
+.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
+.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
+.rhero{filter:drop-shadow(0 0 9px var(--accent))}
+.note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
+.floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
+.canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
+@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
+
+
+/* Purple neon outlines, consistent across dashboard and chart cards. */
+.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
+.finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
+.panel,.card,.metric,details,.floatcounts div{
+ border-color:#23685e!important;
+ box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
+}
+.panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
+.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
+.techrow,.rnav,.chartnav{border-color:#23685e!important}
+
+
+/* Uniform turquoise presentation. Signal values and timing are unchanged. */
+.stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
+.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
+.panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
+ background:linear-gradient(125deg,#0c2026,#0a151e)!important;
+ border-color:#23685e!important;box-shadow:none!important;
+}
+.refapp .techrow,.refapp .techrow>div,.refapp .rnav,.panel .chartnav{border-color:#244047!important}
+.refapp .gear,.panel summary:after{color:#00dfb5!important;text-shadow:none!important}
+.refapp .finalcard,.refapp .finalclose,.refapp .analysisbox,.refapp .probbox{border-color:#244047!important}
+.stRadio label,[data-testid="stButton"] button,.panel .toggle,.panel .chartnav button{
+ background:#0a151e!important;border-color:#23685e!important;color:#e3f0ee!important;
+}
+.panel{background:#06121a!important}
+
+/* Visible only when the already-existing reversal flag is active. */
+.weakness-inline{
+    margin:2px auto 6px;
+    padding:6px 9px;
+    width:fit-content;
+    max-width:98%;
+    border:1px solid #d99a31;
+    border-radius:8px;
+    background:#3b2b12;
+    color:#ffdb8b!important;
+    text-align:center;
+    font-size:10px;
+    font-weight:900;
+    line-height:1.35;
+    letter-spacing:.1px;
+}
 
 </style>
 """,
@@ -294,7 +930,7 @@ def new_round_state(ticker, seconds_left):
 # =========================================================
 
 LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
-ROUND_STATE_DB = 'btc_signal_round_state_v2.db'
+ROUND_STATE_DB = 'btc_signal_ut_1m_primary_state_v2.db'
 _ROUND_TRANSACTION = threading.local()
 
 
@@ -321,6 +957,8 @@ def _load_state_from_connection(conn, ticker):
     row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
     if row:
         return _decode_round_payload(row[0])
+    if ROUND_STATE_DB != 'btc_signal_round_state_v2.db':
+        return None  # La estrategia UT comienza con su propio estado.
     # La primera lectura conserva la ronda anterior, sin permitir que un trabajador
     # antiguo escriba en la nueva base coordinada.
     try:
@@ -423,7 +1061,7 @@ def _background_update_state(state, sig, market, seconds_left):
 # =========================================================
 
 LEGACY_HISTORY_DB = "btc_signal_history.db"
-HISTORY_DB = "btc_signal_history_v2.db"
+HISTORY_DB = "btc_signal_ut_1m_primary_history_v2.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
@@ -454,7 +1092,7 @@ def _history_db():
         migrated_legacy = conn.execute("SELECT 1 FROM history_migrations WHERE name='legacy_import_v1'").fetchone()
         if not migrated_legacy:
             from pathlib import Path
-            if Path(LEGACY_HISTORY_DB).exists():
+            if HISTORY_DB == "btc_signal_history_v2.db" and Path(LEGACY_HISTORY_DB).exists():
                 legacy = sqlite3.connect('file:' + LEGACY_HISTORY_DB + '?mode=ro', uri=True, timeout=1)
                 try:
                     legacy.row_factory = sqlite3.Row
@@ -1330,7 +1968,7 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 
-def _entry_route_checks(sig, seconds_left):
+def _legacy_entry_route_checks(sig, seconds_left):
     """Evaluate both sides from the same evidence; shared by engine and UI."""
     required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
                 "vol_ratio", "mom3", "mom5", "target_atr", "price_ema9_atr")
@@ -1409,44 +2047,7 @@ def _entry_route_checks(sig, seconds_left):
     return {"valid":True,"sides":sides,"noise_ok":noise_ok}
 
 
-
-
-def ut_bot_1_10(df):
-    """UT Bot Alerts standard ATR trailing-stop logic (key=1, ATR=10).
-
-    Uses ordinary candles (Heikin Ashi disabled). The latest candle may be
-    unfinished; alerts use the previous completed 1m candle only.
-    """
-    x=df.sort_values('time').reset_index(drop=True)
-    if len(x)<25:
-        return {'direction':None,'event':None,'event_time':None}
-    close=x['close'].astype(float).to_numpy()
-    high=x['high'].astype(float).to_numpy()
-    low=x['low'].astype(float).to_numpy()
-    tr=np.maximum(high-low,np.maximum(np.abs(high-np.roll(close,1)),np.abs(low-np.roll(close,1))))
-    tr[0]=high[0]-low[0]
-    atr=pd.Series(tr).ewm(alpha=0.1,adjust=False).mean().to_numpy()
-    stop=np.zeros(len(close),dtype=float)
-    for i in range(1,len(close)):
-        prev=stop[i-1]; nloss=atr[i]
-        if close[i]>prev and close[i-1]>prev:
-            stop[i]=max(prev,close[i]-nloss)
-        elif close[i]<prev and close[i-1]<prev:
-            stop[i]=min(prev,close[i]+nloss)
-        elif close[i]>prev:
-            stop[i]=close[i]-nloss
-        else:
-            stop[i]=close[i]+nloss
-    # A crossing on a finished candle produces UT Long / UT Short.
-    last=len(close)-2
-    event=None
-    if close[last]>stop[last] and close[last-1]<=stop[last-1]:event='UP'
-    elif close[last]<stop[last] and close[last-1]>=stop[last-1]:event='DOWN'
-    direction='UP' if close[last]>stop[last] else 'DOWN'
-    return {'direction':direction,'event':event,'event_time':str(x.iloc[last]['time']),
-            'stop':float(stop[last]),'closed_price':float(close[last])}
-
-def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
+def _legacy_context_metrics(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
@@ -1477,7 +2078,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         "price_ema9_atr":(price-float(l1["ema9"]))/atr,
         "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
         "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    route_view = _entry_route_checks(route_input, seconds_left)
+    route_view = _legacy_entry_route_checks(route_input, seconds_left)
     eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
                 for side in ("UP","DOWN")}
     choices = [side for side in ("UP","DOWN") if eligible[side]]
@@ -1485,10 +2086,6 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
                     "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
-    # JC UT BOT MODE: original-style UT 1/10 replaces multi-timeframe route voting.
-    ut=ut_bot_1_10(df)
-    candidate=ut['event']
-    quality='UT BOT 1/10 · '+candidate if candidate else 'UT BOT · SIN NUEVO CRUCE'
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
     evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
     # Closing support adapts continuously; it is NOT a calibrated win probability.
@@ -1497,106 +2094,182 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr,"ut_bot":ut,"ut_mode":True}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+
+
+import bisect
+
+# UT Bot Alerts: QuantNomad, Pine v4, sensibilidad 1 / ATR 10.
+# https://www.tradingview.com/script/n8ss8BID-UT-Bot-Alerts/
+# Velas normales, cerradas. Combinación 1m/3m propia, experimental.
+def _ut_timestamp(value):
+    try:
+        return int(float(value))
+    except ValueError:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            raise ValueError('Las fechas deben incluir zona horaria.')
+        return int(dt.timestamp())
+
+def _ut_validate(rows):
+    rows = sorted(rows, key=lambda r: r['time'])
+    for i, r in enumerate(rows):
+        if r['time'] % 60:
+            raise ValueError('La apertura debe estar alineada al minuto UTC.')
+        if not all((math.isfinite(r[k]) for k in ('open', 'high', 'low', 'close', 'volume'))):
+            raise ValueError('Hay datos no finitos.')
+        if min((r[k] for k in ('open', 'high', 'low', 'close'))) <= 0 or r['volume'] < 0:
+            raise ValueError('Precio o volumen inválido.')
+        if r['high'] < max(r['open'], r['close'], r['low']) or r['low'] > min(r['open'], r['close'], r['high']):
+            raise ValueError('OHLC inconsistente.')
+        if i and r['time'] - rows[i - 1]['time'] != 60:
+            raise ValueError('Minutos faltantes o duplicados; no se interpolan.')
+    return rows
+
+def _ut_aggregate(rows, minutes, as_of):
+    groups = {}
+    width = minutes * 60
+    for r in rows:
+        if r['time'] + 60 <= as_of:
+            groups.setdefault(r['time'] // width * width, []).append(r)
+    out = []
+    for start, group in sorted(groups.items()):
+        if len(group) != minutes or start + width > as_of:
+            continue
+        if [r['time'] for r in group] != list(range(start, start + width, 60)):
+            continue
+        out.append(dict(time=start, available_at=start + width, open=group[0]['open'], close=group[-1]['close'], high=max((r['high'] for r in group)), low=min((r['low'] for r in group)), volume=sum((r['volume'] for r in group))))
+    return out
+
+def _ut_ut(rows, sensitivity=1.0, period=10):
+    if sensitivity <= 0 or period < 1:
+        raise ValueError('Sensibilidad y período deben ser positivos.')
+    out, trs = ([], [])
+    atr, previous_close, previous_stop = (None, None, None)
+    for r in rows:
+        close = r['close']
+        tr = r['high'] - r['low']
+        if previous_close is not None:
+            tr = max(tr, abs(r['high'] - previous_close), abs(r['low'] - previous_close))
+        trs.append(tr)
+        if atr is None and len(trs) >= period:
+            atr = sum(trs[-period:]) / period
+        elif atr is not None:
+            atr = (atr * (period - 1) + tr) / period
+        stop, alert, direction = (None, None, 'SIN_DATOS')
+        if atr is not None:
+            old = previous_stop if previous_stop is not None else 0.0
+            distance = sensitivity * atr
+            if close > old and previous_close is not None and (previous_close > old):
+                stop = max(old, close - distance)
+            elif close < old and previous_close is not None and (previous_close < old):
+                stop = min(old, close + distance)
+            else:
+                stop = close - distance if close > old else close + distance
+            direction = 'UP' if close > stop else 'DOWN' if close < stop else 'NEUTRAL'
+            if previous_stop is not None:
+                if close > stop and previous_close <= previous_stop:
+                    alert = 'BUY'
+                elif close < stop and previous_close >= previous_stop:
+                    alert = 'SELL'
+        out.append({**r, 'atr': atr, 'stop': stop, 'direction': direction, 'alert': alert})
+        previous_close, previous_stop = (close, stop)
+    return out
+
+def _ut_compare(rows, as_of, sensitivity=1.0, period=10):
+    rows = _ut_validate(rows)
+    one = _ut_ut(_ut_aggregate(rows, 1, as_of), sensitivity, period)
+    three = _ut_ut(_ut_aggregate(rows, 3, as_of), sensitivity, period)
+    if not one or not three:
+        raise ValueError('No hay suficientes velas cerradas.')
+    keys = [r['available_at'] for r in three]
+    timeline = []
+    for fast in one:
+        i = bisect.bisect_right(keys, fast['available_at']) - 1
+        if i < 0:
+            continue
+        slow = three[i]
+        a, b = (fast['direction'], slow['direction'])
+        status = 'SIN_CONFIRMAR'
+        if a in ('UP', 'DOWN') and b in ('UP', 'DOWN'):
+            status = 'COINCIDEN_' + a if a == b else 'POSIBLE_RETROCESO_CONTRA_' + b
+        timeline.append(dict(available_at=fast['available_at'], one=a, three=b, alert_1m=fast['alert'], status=status))
+    return dict(experimental=True, orders=False, heikin_ashi=False, sensitivity=sensitivity, atr_period=period, last_1m=one[-1], last_3m=three[-1], latest=timeline[-1] if timeline else None, note='Coincidencia no significa probabilidad de acierto ni resultado Kalshi.', recent=timeline[-20:])
+
+
+UT_ENGINE_REVISION = "ut_closed_1m_primary_3m_context_v2"
+
+def _entry_route_checks(sig, seconds_left):
+    valid = sig.get("data_valid", False) and sig.get("ut_valid", False)
+    sides = {}
+    for side in ("UP", "DOWN"):
+        checks = [("Velas cerradas y datos completos", bool(valid)),
+                  ("UT Bot 1 minuto: " + str(sig.get("ut_1m", "SIN DATOS")), valid and sig.get("ut_1m")==side)]
+        sides[side] = [{"name":"UT 1m PRINCIPAL", "checks":checks,
+                        "met":sum(bool(v) for _,v in checks), "total":len(checks),
+                        "complete":all(v for _,v in checks)}]
+    return {"valid":bool(valid), "sides":sides, "noise_ok":bool(valid)}
+
+
+def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
+    now = datetime.now(timezone.utc)
+    stamp = pd.Timestamp(now)
+    frame = df.copy()
+    frame["time"] = pd.to_datetime(frame["time"], utc=True, errors="coerce")
+    # No live tick is inserted into the indicator candles.
+    closed = frame[frame["time"] + pd.Timedelta(minutes=1) <= stamp].copy()
+    fallback_price = float(live_price) if live_price is not None else float(frame.iloc[-1]["close"]) if len(frame) else 0.0
+    sig = {"price":fallback_price,"candle_price":fallback_price,"rsi":50,"rsi3":50,"rsi5":50,
+           "mom3":0,"mom5":0,"mom15":0,"vol_ratio":0,"ema":"N/A", "technical_score":0,
+           "target_score":0,"final_score":0,"distance":None,"distance_pct":None,
+           "momentum":"NEUTRAL","up_probability":50,"down_probability":50,"candidate":None,
+           "quality":"SIN DATOS UT","trend3":"NEUTRAL","trend5":"NEUTRAL","adx":0,
+           "plus_di":0,"minus_di":0,"macd1":0,"macd3":0,"macd5":0,"atr":1,
+           "vwap":fallback_price,"vwap_atr":0,"target_atr":0,"price_ema9_atr":0,
+           "impulse_internal":{},"flow_context_internal":{},"flow_support_internal":{}}
+    try:
+        if len(closed) < 60:
+            raise ValueError("UT necesita al menos 60 velas cerradas de 1 minuto.")
+        rows = [{"time":int(r.time.timestamp()), "open":float(r.open), "high":float(r.high),
+                 "low":float(r.low), "close":float(r.close), "volume":float(r.volume)}
+                for r in closed.itertuples()]
+        result = _ut_compare(rows, int(now.timestamp()), 1.0, 10)
+        if (now.timestamp()-result["last_1m"]["available_at"]) > 125:
+            raise ValueError("Velas UT atrasadas; esperando datos actuales.")
+        fast, slow = result["last_1m"], result["last_3m"]
+        if fast["direction"] not in ("UP","DOWN") or slow["direction"] not in ("UP","DOWN"):
+            raise ValueError("UT todavía sin dirección confirmada.")
+        # Existing RSI/EMA/volume panels are context only; no legacy route can choose a signal.
+        sig.update(_legacy_context_metrics(closed, target, seconds_left, live_price, whale))
+        same = fast["direction"] == slow["direction"]
+        direction = fast["direction"]
+        sig.update(data_valid=True, ut_valid=True, ut_1m=fast["direction"], ut_3m=slow["direction"],
+                   ut_alert_1m=fast["alert"], ut_alert_3m=slow["alert"],
+                   ut_closed_1m=fast["available_at"], ut_closed_3m=slow["available_at"],
+                   ut_stop_1m=fast["stop"], ut_stop_3m=slow["stop"],
+                   ut_source=df.attrs.get("candle_source","DESCONOCIDA"),
+                   ut_status="1m " + direction + (" · 3m A FAVOR" if same else " · 3m EN CONTRA: " + slow["direction"]),
+                   ut_candidate_aligned=direction if same else None, ut_rule="1m decide; 3m informa",
+                   candidate=direction, candidate_raw=direction, quality="UT 1m · 3m A FAVOR" if same else "UT 1m · 3m EN CONTRA",
+                   trend3=slow["direction"], momentum="ALCISTA" if direction=="UP" else "BAJISTA" if direction=="DOWN" else "NEUTRAL",
+                   technical_score=2 if direction=="UP" else -2 if direction=="DOWN" else 0,
+                   final_score=2 if direction=="UP" else -2 if direction=="DOWN" else 0,
+                   up_probability=(100 if direction=="UP" else 0) if same else 50,
+                   down_probability=(100 if direction=="DOWN" else 0) if same else 50,
+                   atr=fast["atr"], engine_revision=UT_ENGINE_REVISION,
+                   ai_gate_active=False, ai_gate_status="UT 1m decide; 3m e IA solo informativos")
+    except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
+        sig.update(data_valid=False, ut_valid=False, candidate=None, candidate_raw=None,
+                   data_error=str(exc), ut_status="SIN DATOS UT: " + str(exc), engine_revision=UT_ENGINE_REVISION)
+    return sig
 
 
 def build_presignal(sig, seconds_left):
-    """PRESEÑAL INDEPENDIENTE Y REACTIVA.
+    direction = sig.get("candidate") if sig.get("ut_valid") else None
+    aligned = direction and sig.get("ut_1m") == sig.get("ut_3m")
+    return {"direction":direction or "NEUTRAL", "percent":100 if aligned else 50,
+            "bull":1 if direction=="UP" else 0, "bear":1 if direction=="DOWN" else 0}
 
-    No cambia la señal oficial. Usa la lectura ACTUAL y, a medida que se acerca
-    el cierre, reduce el peso de señales lentas (3M/5M) y aumenta el peso de la
-    posición actual frente al target. Así puede girar UP/DOWN sin quedarse
-    pegada a una tendencia vieja.
-    """
-    bull = 0.0
-    bear = 0.0
-
-    ema = sig.get("ema")
-    rsi1 = float(sig.get("rsi", 50) or 50)
-    rsi3 = float(sig.get("rsi3", 50) or 50)
-    rsi5 = float(sig.get("rsi5", 50) or 50)
-    mom3 = float(sig.get("mom3", 0) or 0)
-    mom5 = float(sig.get("mom5", 0) or 0)
-    trend3 = sig.get("trend3", "NEUTRAL")
-    trend5 = sig.get("trend5", "NEUTRAL")
-    macd3 = float(sig.get("macd3", 0) or 0)
-    macd5 = float(sig.get("macd5", 0) or 0)
-    plus_di = float(sig.get("plus_di", 0) or 0)
-    minus_di = float(sig.get("minus_di", 0) or 0)
-    vwap_atr = float(sig.get("vwap_atr", 0) or 0)
-    target_atr = float(sig.get("target_atr", 0) or 0)
-
-    secs = 900 if seconds_left is None else max(0, int(seconds_left))
-    # Los marcos lentos importan al principio; cerca del cierre mandan menos.
-    slow = 1.0 if secs > 300 else 0.70 if secs > 180 else 0.45 if secs > 90 else 0.25
-
-    if ema == "BULL": bull += 0.85
-    elif ema == "BEAR": bear += 0.85
-
-    if trend3 == "UP": bull += 1.10 * slow
-    elif trend3 == "DOWN": bear += 1.10 * slow
-    if trend5 == "UP": bull += 0.90 * slow
-    elif trend5 == "DOWN": bear += 0.90 * slow
-
-    if rsi1 >= 52: bull += 0.90
-    elif rsi1 <= 48: bear += 0.90
-    if rsi3 >= 51: bull += 0.55 * slow
-    elif rsi3 <= 49: bear += 0.55 * slow
-    if rsi5 >= 52: bull += 0.30 * slow
-    elif rsi5 <= 48: bear += 0.30 * slow
-
-    if mom3 > 0.015: bull += 1.15
-    elif mom3 < -0.015: bear += 1.15
-    elif mom3 > 0: bull += 0.30
-    elif mom3 < 0: bear += 0.30
-    if mom5 > 0.025: bull += 0.55 * slow
-    elif mom5 < -0.025: bear += 0.55 * slow
-
-    if macd3 > 0: bull += 0.70 * slow
-    elif macd3 < 0: bear += 0.70 * slow
-    if macd5 > 0: bull += 0.35 * slow
-    elif macd5 < 0: bear += 0.35 * slow
-    if plus_di > minus_di: bull += 0.50 * slow
-    elif minus_di > plus_di: bear += 0.50 * slow
-
-    if vwap_atr >= 0.03: bull += 0.70
-    elif vwap_atr <= -0.03: bear += 0.70
-
-    # El target gana importancia progresivamente. No inventa dirección:
-    # usa únicamente dónde está BTC respecto al target en este instante.
-    if secs > 300:
-        tw = 0.65
-    elif secs > 180:
-        tw = 1.40
-    elif secs > 90:
-        tw = 2.40
-    elif secs > 30:
-        tw = 3.60
-    else:
-        tw = 5.00
-
-    # Magnitud: una separación mayor en ATR da más convicción, sin bloquear
-    # cambios cuando BTC cruza el target.
-    target_strength = min(1.75, 0.55 + abs(target_atr) * 2.25)
-    if target_atr > 0:
-        bull += tw * target_strength
-    elif target_atr < 0:
-        bear += tw * target_strength
-
-    total = bull + bear
-    edge = bull - bear
-    if total < 1.5 or abs(edge) < 0.35:
-        return {"direction":"NEUTRAL", "percent":50, "bull":bull, "bear":bear}
-
-    direction = "UP" if edge > 0 else "DOWN"
-    dominant = max(bull, bear)
-    share = dominant / total if total else 0.5
-
-    # Porcentaje propio de la preseñal. Puede llegar a 100 solo cuando la
-    # lectura actual es realmente dominante; no copia la probabilidad oficial.
-    percent = int(round(np.clip(50 + (share - 0.5) * 92 + min(abs(edge), 6.0) * 1.8, 52, 100)))
-
-    return {"direction":direction, "percent":percent, "bull":bull, "bear":bear}
 
 def entry_quality(price, seconds_left):
     if price is None:
@@ -1736,114 +2409,45 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """Confirmación compartida por la pantalla y el registrador de fondo.
-
-    La primera señal queda inmutable. Un cambio UP/DOWN posterior también
-    necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
-    la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
-    """
-    if not (signal or {}).get("ut_mode"):
-        candidate = _round_opening_crosscheck(state, candidate, signal, now)
-    # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
-    closed = seconds_left is not None and seconds_left <= 0
-    close_time = (market or {}).get("close_time")
-    if close_time:
-        end = pd.to_datetime(close_time, utc=True, errors="coerce")
-        if pd.isna(end):
-            candidate = None
-        else:
-            actual_left = (end - pd.Timestamp(now)).total_seconds()
-            seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
-            closed = seconds_left <= 0
-    if closed:
-        _reset_withdrawal(state)
-        for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
-                    "active_direction", "active_since"):
-            state[key] = None
-        state["pending_count"] = 0
-        return
-    if signal is not None and signal.get("data_valid") is False:
-        _reset_withdrawal(state)
-        # Una interrupción no demuestra neutralidad ni permite confirmar.
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        if seconds_left is not None and seconds_left <= 0:
-            state["active_direction"] = None
-            state["active_since"] = None
-        return
-    source = signal.get("price_source") if signal else None
-    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
-        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
-            # Tres lecturas deben pertenecer a una misma referencia de precio.
-            state["pending_direction"] = None
-            state["pending_count"] = 0
-            state["pending_since"] = None
-            state["pending_last_at"] = None
-        state["pending_price_source"] = source
-    if candidate not in ("UP", "DOWN"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        _review_active_retention(state, signal, seconds_left, now)
-        return
-
+    # Closed 1m UT decides; no EMA/RSI/5m/target or 3m veto is used.
+    signal = signal or {}
+    if state.get("ut_engine_revision") != UT_ENGINE_REVISION:
+        state["active_direction"] = None
+        state["active_since"] = None
+        state["ut_engine_revision"] = UT_ENGINE_REVISION
     _reset_withdrawal(state)
-    if candidate == state.get("active_direction"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    state["opening_conflict"] = None
+    for key in ("pending_direction","pending_since","pending_last_at","pending_price_source"):
+        state[key] = None
+    state["pending_count"] = 0
+    end = pd.to_datetime((market or {}).get("close_time"), utc=True, errors="coerce")
+    closed = seconds_left is not None and seconds_left <= 0
+    if not pd.isna(end):
+        closed = closed or end <= pd.Timestamp(now)
+    if closed or not signal.get("ut_valid") or signal.get("data_valid") is False:
+        state["active_direction"] = None
+        state["active_since"] = None
         return
-
-    last = state.get("pending_last_at")
-    if isinstance(last, str):
-        try:
-            last = datetime.fromisoformat(last)
-        except ValueError:
-            last = None
-    since = state.get("pending_since")
-    if isinstance(since, str):
-        try:
-            since = datetime.fromisoformat(since)
-        except ValueError:
-            since = None
-
-    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
-                              or (now - last).total_seconds() < 0)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        last = since = None
-    if state.get("pending_direction") != candidate:
-        state["pending_direction"] = candidate
-        state["pending_count"] = 1
-        state["pending_since"] = now.isoformat()
-        state["pending_last_at"] = now.isoformat()
+    fast, slow = signal.get("ut_1m"), signal.get("ut_3m")
+    if fast not in ("UP", "DOWN") or candidate != fast:
+        state["active_direction"] = None
+        state["active_since"] = None
+        state["opening_conflict"] = "ESPERANDO UT DE 1 MINUTO"
         return
-
-    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] = int(state.get("pending_count", 0)) + 1
-        state["pending_last_at"] = now.isoformat()
-
-    elapsed = (now - since).total_seconds() if since else 0
-    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+    # The latest CLOSED 1m direction always decides, including when 3m opposes it.
+    if fast != slow:
+        state["retention_warning"] = signal.get("ut_status")
+    if state.get("active_direction") != candidate:
         state["active_direction"] = candidate
         state["active_since"] = now
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+        state["last_ut_direction"] = candidate
+        state["last_ut_signal_time"] = now.isoformat()
+    if state.get("first_direction") is None:
+        state["first_direction"] = candidate
+        state["first_signal_time"] = now
+        state["first_signal_seconds"] = seconds_left
+        state["first_signal_price"] = get_yes_ask(market) if candidate=="UP" else get_no_ask(market)
+
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -1941,6 +2545,9 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
             reversal = True
             reversal_text = "DOWN PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
 
+    reversal = bool(active and sig.get("ut_valid") and sig.get("ut_1m") != sig.get("ut_3m"))
+    reversal_text = sig.get("ut_status", "") if reversal else ""
+
     if active and state.get("retention_warning"):
         reversal = True
         reversal_text = state["retention_warning"]
@@ -1979,7 +2586,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2"
+BACKGROUND_DATA_REVISION = "ut_closed_1m_primary_3m_context_v2"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2969,13 +3576,6 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 }
 .panel{background:#06121a!important}
 
-
-/* Modo gráfico integrado: solo velas, volumen, RSI y controles. */
-body{background:#030d1d!important}
-section.panel{margin:0!important;padding:0!important;border:0!important;background:transparent!important;box-shadow:none!important}
-section.panel>.header,section.panel>.cards,section.panel>details,section.panel>.tools,section.panel>.floatcounts,section.panel>.tooltip{display:none!important}
-.canvas{margin:0!important;border:0!important}
-.chartnav{display:none!important}
 </style>
 <section class="panel">
 <header class="header"><div><h2>BTC / USD</h2><div class="sub" id="subtitle"></div></div><div><div class="price" id="price"></div><div class="live" id="live"></div></div></header>
@@ -3013,18 +3613,18 @@ document.querySelectorAll('.toggle').forEach(x=>x.removeAttribute('data-unused')
 for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
 const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(0,Math.min(offset,Math.max(0,n-visible)));const end=n-Math.round(offset),start=Math.max(0,end-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$('canvas').innerHTML='<div class="empty">Esperando velas actuales…</div>';return}
 const last=all[n-1];$('legend').innerHTML=['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join('');
-const W=720,H=420,L=10,R=82,T=12,B=390,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
+const W=720,H=toggles.rsi?780:615,L=10,R=126,T=28,B=580,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
 let vals=rows.flatMap(r=>[r.low,r.high]);for(const k of ['ema9','ema21','vwap'])if(toggles[k])vals.push(...rows.map(r=>r[k]).filter(v=>v!=null));for(const v of [D.target,D.support,D.resistance,D.price])if(v!=null)vals.push(v);let lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,5);lo-=pad;hi+=pad;lo+=pricePan;hi+=pricePan;const y=v=>T+(hi-v)/(hi-lo)*(B-T),x=i=>L+(i+.5)*step;
 let s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Gráfica BTC con velas, indicadores y RSI"><defs><clipPath id="plot"><rect x="0" y="0" width="'+(W-R)+'" height="'+B+'"/></clipPath></defs>';
-for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="10">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
-for(let k=0;k<=4;k++){const xx=L+plot*k/4;s+='<line x1="'+xx+'" y1="'+T+'" x2="'+xx+'" y2="'+(B)+'" stroke="#191c34"/>'}
-s+='<g clip-path="url(#plot)">';if(toggles.volume){const max=Math.max(...rows.map(r=>r.volume),1);rows.forEach((r,i)=>{let h=r.volume/max*60;s+='<rect x="'+(x(i)-body/2)+'" y="'+(B-h)+'" width="'+body+'" height="'+h+'" fill="'+(r.close>=r.open?'#00dfb5':'#e64b4b')+'" opacity=".9"/>'})}
+for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="14">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
+for(let k=0;k<=4;k++){const xx=L+plot*k/4;s+='<line x1="'+xx+'" y1="'+T+'" x2="'+xx+'" y2="'+(toggles.rsi?H-30:B)+'" stroke="#191c34"/>'}
+s+='<g clip-path="url(#plot)">';if(toggles.volume){const max=Math.max(...rows.map(r=>r.volume),1);rows.forEach((r,i)=>{let h=r.volume/max*105;s+='<rect x="'+(x(i)-body/2)+'" y="'+(B-h)+'" width="'+body+'" height="'+h+'" fill="'+(r.close>=r.open?'#00dfb5':'#e64b4b')+'" opacity=".9"/>'})}
 rows.forEach((r,i)=>{const c=r.close>=r.open?'#00dfb5':'#e64b4b';s+='<line x1="'+x(i)+'" x2="'+x(i)+'" y1="'+y(r.high)+'" y2="'+y(r.low)+'" stroke="'+c+'" stroke-width="2.1"/><rect x="'+(x(i)-body/2)+'" y="'+Math.min(y(r.open),y(r.close))+'" width="'+body+'" height="'+Math.max(1.8,Math.abs(y(r.open)-y(r.close)))+'" fill="'+c+'"/>'});
 for(const k of ['ema9','ema21','vwap'])if(toggles[k]){let points=rows.map((r,i)=>r[k]==null?'':x(i)+','+y(r[k])).filter(Boolean).join(' ');s+='<polyline points="'+points+'" fill="none" stroke="'+colors[k]+'" stroke-width="3" '+(k==='vwap'?'stroke-dasharray="8 6"':'')+'/>'}
-s+='</g>';let levels=[[D.resistance,'RESISTANCE','#e64b4b'],[D.target,'TARGET','#00dfb5'],[D.price,'BTC','#169cff'],[D.support,'SUPPORT','#00dfb5']].filter(r=>r[0]!=null).map(r=>({v:r[0],label:r[1],c:r[2],yy:y(r[0]),labelY:y(r[0])})).filter(l=>l.yy>=T&&l.yy<=B).sort((a,b)=>a.yy-b.yy);
-let previous=-100;for(const l of levels){l.labelY=Math.max(T+12,previous+27,l.yy);previous=l.labelY}let excess=previous-(B-10);if(excess>0)for(const l of levels)l.labelY-=excess;
-for(const l of levels){s+='<line x1="0" y1="'+l.yy+'" x2="'+(W-R)+'" y2="'+l.yy+'" stroke="'+l.c+'" stroke-dasharray="4 5" opacity=".8"/><path d="M '+(W-R-6)+' '+l.yy+' L '+(W-R+5)+' '+l.labelY+'" stroke="'+l.c+'" fill="none"/><rect x="'+(W-R+4)+'" y="'+(l.labelY-12)+'" width="77" height="25" rx="4" fill="'+l.c+'"/><text x="'+(W-R+11)+'" y="'+(l.labelY-2)+'" fill="#06101b" font-size="8" font-weight="850">'+l.label+'</text><text x="'+(W-R+11)+'" y="'+(l.labelY+9)+'" fill="#06101b" font-size="10" font-weight="750">'+fmt(l.v)+'</text>'}
-if(false){const rt=620,rh=120,ry=v=>rt+(100-v)/100*rh;s+='<text x="14" y="610" fill="#aa8dc5" font-size="12">RSI 14</text>';for(const v of [30,70])s+='<line x1="0" y1="'+ry(v)+'" x2="'+(W-R)+'" y2="'+ry(v)+'" stroke="#3c284c" stroke-dasharray="5 5"/>';s+='<polyline points="'+rows.map((r,i)=>r.rsi==null?'':x(i)+','+ry(r.rsi)).filter(Boolean).join(' ')+'" fill="none" stroke="#f000ff" stroke-width="3"/>';if(last.rsi!=null)s+='<rect x="'+(W-R+4)+'" y="'+(ry(last.rsi)-12)+'" width="65" height="25" rx="3" fill="#f000ff"/><text x="'+(W-R+11)+'" y="'+(ry(last.rsi)+6)+'" fill="white" font-size="15">'+fmt(last.rsi)+'</text>'}
+s+='</g>';let levels=[[D.resistance,'RESISTANCE','#e64b4b'],[D.target,'TARGET','#00dfb5'],[D.price,'BTC','#00dfb5'],[D.support,'SUPPORT','#00dfb5']].filter(r=>r[0]!=null).map(r=>({v:r[0],label:r[1],c:r[2],yy:y(r[0]),labelY:y(r[0])})).filter(l=>l.yy>=T&&l.yy<=B).sort((a,b)=>a.yy-b.yy);
+let previous=-100;for(const l of levels){l.labelY=Math.max(T+12,previous+42,l.yy);previous=l.labelY}let excess=previous-(B-10);if(excess>0)for(const l of levels)l.labelY-=excess;
+for(const l of levels){s+='<line x1="0" y1="'+l.yy+'" x2="'+(W-R)+'" y2="'+l.yy+'" stroke="'+l.c+'" stroke-dasharray="4 5" opacity=".8"/><path d="M '+(W-R-6)+' '+l.yy+' L '+(W-R+5)+' '+l.labelY+'" stroke="'+l.c+'" fill="none"/><rect x="'+(W-R+4)+'" y="'+(l.labelY-17)+'" width="118" height="36" rx="4" fill="'+l.c+'"/><text x="'+(W-R+11)+'" y="'+(l.labelY-3)+'" fill="#06101b" font-size="10" font-weight="850">'+l.label+'</text><text x="'+(W-R+11)+'" y="'+(l.labelY+12)+'" fill="#06101b" font-size="14" font-weight="750">'+fmt(l.v)+'</text>'}
+if(toggles.rsi){const rt=620,rh=120,ry=v=>rt+(100-v)/100*rh;s+='<text x="14" y="610" fill="#aa8dc5" font-size="12">RSI 14</text>';for(const v of [30,70])s+='<line x1="0" y1="'+ry(v)+'" x2="'+(W-R)+'" y2="'+ry(v)+'" stroke="#3c284c" stroke-dasharray="5 5"/>';s+='<polyline points="'+rows.map((r,i)=>r.rsi==null?'':x(i)+','+ry(r.rsi)).filter(Boolean).join(' ')+'" fill="none" stroke="#f000ff" stroke-width="3"/>';if(last.rsi!=null)s+='<rect x="'+(W-R+4)+'" y="'+(ry(last.rsi)-12)+'" width="65" height="25" rx="3" fill="#f000ff"/><text x="'+(W-R+11)+'" y="'+(ry(last.rsi)+6)+'" fill="white" font-size="15">'+fmt(last.rsi)+'</text>'}
 for(let k=0;k<4;k++){const i=Math.round((rows.length-1)*k/3),tm=new Date(rows[i].t*1000).toLocaleString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',...(D.timeframe==='1D'?{month:'short',day:'numeric'}:{})});s+='<text x="'+x(i)+'" y="'+(H-7)+'" fill="#95a1bc" font-size="11" text-anchor="middle">'+tm+'</text>'}
 s+='<g id="crosshair"></g></svg>';$('canvas').innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end};
 }
@@ -3072,8 +3672,6 @@ $('canvas').addEventListener('wheel',e=>{
 function inspectCandle(px){if(!geometry)return;const g=geometry,i=Math.max(0,Math.min(g.rows.length-1,Math.floor((px-g.L)/(g.W-g.L-g.R)*g.rows.length))),r=g.rows[i],time=new Date(r.t*1000).toLocaleString('en-US',{timeZone:'America/New_York'});$('tooltip').textContent=time+' · O '+fmt(r.open)+'  H '+fmt(r.high)+'  L '+fmt(r.low)+'  C '+fmt(r.close)+' · Vol '+fmt(r.volume,3);$('crosshair').innerHTML='<line x1="'+g.x(i)+'" x2="'+g.x(i)+'" y1="'+g.T+'" y2="'+g.B+'" stroke="#b8a5e0" stroke-dasharray="4 4"/>'}
 
 window.addEventListener('message', function(event){
-  if(event.source!==parent)return;
-  if(event.data?.kind==='alpha-chart-toggle'&&Object.hasOwn(toggles,event.data.key)){toggles[event.data.key]=!!event.data.enabled;persist();draw();return;}
   if (!event.data || event.data.kind !== 'alpha-chart-update') return;
   // Only the chart data changes: preserve iframe, zoom, gesture handlers and cards.
   // La lógica y el precio recibido siguen intactos: solo interpolamos la
@@ -3159,30 +3757,6 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
     note = 'RONDA TERMINADA' if closed else 'ESPERANDO DATOS' if not ready else 'Cada barra representa un requisito.'
     number = str(met) + '<small>/' + str(total) + '</small>' if total else '—'
     return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars .sq-item{flex:1;min-width:0;text-align:center}.sq-bars i{display:block;height:7px;width:100%;background:#1d3038;border-radius:9px}.sq-bars .sq-item span{display:block;margin-top:7px;font-size:9px;line-height:1.25;color:#a5b6be;overflow-wrap:anywhere}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
-
-
-def _reference_price_spark(frame):
-    if frame is None or frame.empty:
-        return ""
-    values = [float(v) for v in frame["close"].tail(24) if pd.notna(v) and np.isfinite(float(v))]
-    if len(values)<2:
-        return ""
-    low, high = min(values), max(values)
-    span = max(high-low, 0.01)
-    points = " ".join(f"{i*100/(len(values)-1):.2f},{24-(v-low)*22/span:.2f}" for i,v in enumerate(values))
-    color = "#00e5b3" if values[-1]>=values[0] else "#ff4258"
-    return f'<svg class="spark" viewBox="0 0 100 26" aria-label="Cierres recientes de BTC"><polyline points="{points}" fill="none" stroke="{color}" stroke-width="1.7"/></svg>'
-
-
-def _reference_rsi_svg(frame):
-    if frame is None or frame.empty or "rsi" not in frame:
-        return '<svg class="rsi" viewBox="0 0 320 68"><text x="10" y="35" fill="#8ba7c9" font-size="12">Sin datos actuales</text></svg>'
-    values=[float(v) for v in frame["rsi"].tail(32) if pd.notna(v) and np.isfinite(float(v))]
-    if len(values)<2:
-        return '<svg class="rsi" viewBox="0 0 320 68"><text x="10" y="35" fill="#8ba7c9" font-size="12">Reuniendo datos</text></svg>'
-    points=" ".join(f"{8+i*264/(len(values)-1):.2f},{60-max(0,min(100,v))*.52:.2f}" for i,v in enumerate(values))
-    current=values[-1]
-    return f'<svg class="rsi" viewBox="0 0 320 68" aria-label="RSI real de las últimas velas"><path d="M0 23.6H276M0 44.4H276" stroke="#245284" stroke-dasharray="3 4"/><polyline points="{points}" stroke="#ec27ff" stroke-width="1.8" fill="none"/><text x="286" y="16" fill="#8fafcf" font-size="9">70</text><text x="286" y="62" fill="#8fafcf" font-size="9">30</text><rect x="278" y="28" width="42" height="17" rx="3" fill="#ca21ed"/><text x="281" y="40" fill="white" font-size="9">{current:.1f}</text></svg>'
 
 
 @st.fragment(run_every="2s")
@@ -3352,14 +3926,12 @@ def live_dashboard():
     countdown = format_countdown(seconds_left)
 
     if distance is None:
-        distance_text, distance_sub = "—", "SIN TARGET"
-        distance_color, distance_class = "#94a3b8", "muted"
+        distance_text, distance_sub = "--", "SIN TARGET"
+        distance_color = "#94a3b8"
     else:
         distance_text = f"${abs(distance):,.0f}"
-        distance_side = "POR ENCIMA" if distance > 0 else "POR DEBAJO" if distance < 0 else "EN EL TARGET"
-        distance_sub = distance_side + (f" · {abs(distance_pct):.2f}%" if distance_pct is not None else "")
+        distance_sub = f"{abs(distance_pct):.2f}%"
         distance_color = "#00dfb5" if distance > 0 else "#e64b4b" if distance < 0 else "#94a3b8"
-        distance_class = "green" if distance > 0 else "red" if distance < 0 else "muted"
     first_signal = (state.get("first_direction") if state else None) or "--"
     first_time = "--"
     if state and state.get("first_signal_time"):
@@ -3380,21 +3952,21 @@ def live_dashboard():
     if pre_direction == "UP":
         pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
         pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE UP"
+        pre_label = "UP · 1m"
     elif pre_direction == "DOWN":
         pre_color, pre_bg, pre_glow = "#e64b4b", "rgba(104,25,37,.28)", "rgba(230,75,75,.20)"
         pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE DOWN"
+        pre_label = "DOWN · 1m"
     else:
         pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
         pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
         pre_label = "NEUTRAL"
 
-    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
-    pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
+    pre_note = sig.get("ut_status", "Esperando velas cerradas de UT Bot.") + " · Sensibilidad 1 / ATR 10. La dirección la decide 1m; 3m solo informa. El porcentaje indica coincidencia de marcos, no acierto."
+    pre_badge = ("3m A FAVOR" if sig.get("ut_1m") == sig.get("ut_3m") else "3m EN CONTRA") if sig.get("ut_valid") else "SIN DATOS"
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
+      <div class="prehead"><span class="pretitle">UT BOT · 1m PRINCIPAL</span><span class="prebadge">{pre_badge}</span></div>
       <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
       <div class="prenote">{pre_note}</div>
@@ -3493,59 +4065,81 @@ def live_dashboard():
         if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
     )
 
-    market_label = "Mercado en vivo" if market_live and btc_ok else "DATOS NO VALIDADOS"
-    signal_label = active if btc_ok and active in ("UP", "DOWN") else "ESPERANDO" if btc_ok else "SIN DATOS"
-    price_text = f"${live_btc_price:,.0f}" if live_btc_price is not None else "—"
-    reader_headline = html.escape(str(reader.get("headline") or "SIN LECTURA"))
-    reader_note = html.escape(str(reader.get("note") or ""))
-    reader_percent = max(0, min(100, float(reader.get("percent") or 0)))
-    reader_color = "#00dfb5" if reader.get("direction") == "UP" else "#ff4258"
-    pre_note_short = html.escape(pre_note.split(" Porcentaje de apoyo")[0])
-    rsi_text = f"{sig['rsi']:.1f}" if btc_ok else "—"
-    def _motion_label(n):
-        value = micro.get(f"change_{n}s")
-        return "—" if value is None else f"{float(value):+.0f}"
-    motion30, motion10, motion5 = (_motion_label(n) for n in (30, 10, 5))
-    history_rows = ""
-    recent_rows = _recent_alert_rows(current_state=state, sig=sig, market=market, limit=5)
-    if recent_rows:
-        for item in recent_rows:
-            at = _recent_alert_time(item.get("first_at"))
-            time_label = at.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p") if at else "—"
-            direction = str(item.get("side") or "—")
-            status = str(item.get("status") or "POR RESOLVER")
-            target_value = _plan_number(item.get("target"))
-            target_label = f"${target_value:,.2f}" if target_value is not None else "—"
-            direction_color = "green" if direction == "UP" else "red" if direction == "DOWN" else "muted"
-            status_color = "green" if status == "GANADA" else "red" if status == "PERDIDA" else "muted"
-            history_rows += (f"<tr><td>{html.escape(time_label)}</td><td>BTC 15M</td><td class='{direction_color}'>{html.escape(direction)}</td><td>{html.escape(target_label)}</td><td class='{status_color}'>{html.escape(status)}</td></tr>")
-    else:
-        history_rows = "<tr><td colspan='5'>Sin rondas registradas todavía</td></tr>"
-    signal_is_up = signal_label == "UP"
-    signal_color = "#00e3b5" if signal_is_up else "#ff354b" if signal_label == "DOWN" else "#8ba7c9"
-    signal_rotation = "rotate(180deg)" if signal_is_up else "none"
-    signal_class = "green" if signal_is_up else "red" if signal_label == "DOWN" else "muted"
-    pre_is_up = "UP" in str(pre_label).upper() and "DOWN" not in str(pre_label).upper()
-    pre_color = "#00e3b5" if pre_direction == "UP" else "#ff4258" if pre_direction == "DOWN" else "#38bdf8"
-    state_label = "SIN DATOS ACTUALES" if not btc_ok else "SEÑAL ACTIVA" if active in ("UP", "DOWN") else "ANALIZANDO MERCADO"
-    state_note = "Esperando velas actuales para validar la señal." if not btc_ok else "Análisis del mercado en tiempo real para el punto de entrada."
-    source_label = html.escape(str(btc_df.attrs.get("candle_source", "BTC/USD"))) if btc_ok else "SIN VELAS"
-    chart_tf = html.escape(str(st.session_state.get("chart_timeframe", "1m")))
-    if not btc_ok:
-        pre_label, pre_percent, pre_color = "SIN DATOS", 0, "#8ba7c9"
-        pre_note_short, pre_badge = "Esperando velas actuales.", "SIN VALIDAR"
-    spark_html = _reference_price_spark(btc_df if btc_ok else None)
-    rsi_svg = _reference_rsi_svg(btc_df if btc_ok else None)
-    reader_status = "ACTIVO" if btc_ok else "SIN DATOS"
-    motion_classes = ["green" if micro.get(f"change_{n}s") is not None and float(micro[f"change_{n}s"]) >= 0 else "red" if micro.get(f"change_{n}s") is not None else "muted" for n in (30,10,5)]
-    panel_html = f'\n<div class="ae"><div class="frame">\n<div class="top"><div class="brand"><b><span class="crown">♛</span>JC ALPHA EDGE</b><small>BTC SIGNAL v4.6.1</small></div><div class="top-right"><span class="tiny"><span class="market-dot">●</span> {market_label}</span><a class="nav-icon" href="?page=settings" target="_self" aria-label="Abrir ajustes">⚙</a></div></div>\n<div class="row hero"><div class="panel"><div class="muted tiny">SEÑAL OFICIAL DEL BOT</div><div class="signal" style="--signal-color:{signal_color}"><div class="arrow" style="transform:{signal_rotation};visibility:{"visible" if signal_label in ("UP", "DOWN") else "hidden"}"><svg viewBox="0 0 90 112" aria-hidden="true"><path d="M28 5 H62 V57 H87 L45 106 L3 57 H28 Z" fill="{signal_color}"/></svg></div><div><div class="down" style="color:{signal_color};text-shadow:0 0 13px {signal_color}">{signal_label}</div><span class="pill" style="border-color:{signal_color};box-shadow:0 0 9px {signal_color}55">{f"APOYO DEL MOTOR {confidence}%" if signal_label in ("UP", "DOWN") else "SEÑAL NO VALIDADA"}</span></div></div></div><div class="panel state"><div class="state-copy"><div class="muted tiny">ESTADO ACTUAL</div><strong>{state_label}</strong><div class="state-note">{state_note}</div></div><div class="coin coin-engraved" aria-label="Emblema Bitcoin azul"><svg viewBox="0 0 120 120" role="img" aria-label="Bitcoin" xmlns="http://www.w3.org/2000/svg"><defs><radialGradient id="edgeGlow" cx="35%" cy="24%" r="78%"><stop stop-color="#49caff"/><stop offset=".3" stop-color="#1069d8"/><stop offset=".76" stop-color="#032054"/><stop offset="1" stop-color="#010918"/></radialGradient><linearGradient id="metal" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#b1efff"/><stop offset=".22" stop-color="#258dff"/><stop offset=".57" stop-color="#003eaa"/><stop offset=".85" stop-color="#0c70ec"/><stop offset="1" stop-color="#8ddfff"/></linearGradient><filter id="glow"><feGaussianBlur stdDeviation="2.5" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><g transform="translate(60 60) rotate(18) scale(.86 1) translate(-60 -60)"><circle cx="60" cy="60" r="57" fill="#001027" stroke="#117cff" stroke-width="1" stroke-dasharray="2 4"/><circle cx="60" cy="60" r="50" fill="url(#edgeGlow)" stroke="#39a9ff" stroke-width="4" filter="url(#glow)"/><circle cx="60" cy="60" r="42" fill="none" stroke="#8cdeff" stroke-opacity=".75" stroke-width="1.5" stroke-dasharray="3 4"/><circle cx="60" cy="60" r="34" fill="#001b4d" stroke="#1779e8" stroke-width="2"/><path d="M54 27v10m13-10v10M54 83v10m13-10v10" stroke="#8ddfff" stroke-width="4" stroke-linecap="round"/><text x="60" y="80" text-anchor="middle" font-family="Arial,sans-serif" font-size="66" font-weight="900" fill="#00143d" stroke="#00143d" stroke-width="2">₿</text><text x="58" y="77" text-anchor="middle" font-family="Arial,sans-serif" font-size="66" font-weight="900" fill="url(#metal)" stroke="#6bc9ff" stroke-width=".7">₿</text><path d="M30 46a35 35 0 0 1 30-21" stroke="#c2f3ff" stroke-width="2" fill="none" opacity=".8"/></g></svg></div></div></div>\n<div class="panel pre row" style="--pre-color:{pre_color}"><div class="prehead"><span class="muted tiny">PRESEÑAL · PRESIÓN ACTUAL</span><span class="tag red" style="border-color:#d82c55">{pre_badge}</span></div><div class="pre-main"><span class="big" style="color:{pre_color}">{pre_label}</span><strong class="big" style="color:{pre_color}">{pre_percent}%</strong></div><div class="track"><div class="fill" style="width:{pre_percent}%;background:{pre_color}"></div></div><p>{pre_note_short}<br>Porcentaje de apoyo, no probabilidad de acierto.</p></div>\n<div class="row metrics"><div class="panel metric"><span class="ico" style="color:#ffac22">₿</span><div><small>BTC / USD</small><strong>{price_text}</strong><em class="red">{btc_delta}</em>{spark_html}</div></div><div class="panel metric"><span class="ico targeticon">◎</span><div><small>TARGET</small><strong>{target_text}</strong></div></div><div class="panel metric"><span class="ico {distance_class} bars"><svg viewBox="0 0 40 42" aria-hidden="true" style="width:31px;height:36px;display:block"><rect x="2" y="26" width="9" height="14" rx="1" fill="currentColor"/><rect x="15" y="16" width="9" height="24" rx="1" fill="currentColor"/><rect x="28" y="4" width="9" height="36" rx="1" fill="currentColor"/></svg></span><div><small>DISTANCIA AL TARGET</small><strong class="{distance_class}">{distance_text}</strong><em class="{distance_class}">{distance_sub}</em></div></div><div class="panel metric"><span class="ico clock">◷</span><div style="width:100%"><small>TIEMPO RESTANTE</small><strong>{countdown}</strong><div class="track" style="height:7px;margin-top:7px"><div class="fill" style="width:{time_pct}%;background:{signal_color}"></div></div></div></div></div>\n<div class="panel support row"><div class="muted tiny">APOYO CALCULADO · UP / DOWN</div><div class="supportbar"><div class="upbar" style="flex:{up}">{up}%</div><div class="downbar" style="flex:{down}">{down}%</div></div><div class="split"><span class="green">● UP {up}%</span><span class="red">● DOWN {down}%</span></div></div>\n<div class="row readers"><div class="panel reader"><div style="display:flex;justify-content:space-between"><span class="muted tiny">⌁ &nbsp; LECTOR DE CIERRE</span><span class="tag green" style="border-color:#00d9b1">{reader_status}</span></div><div class="readbody"><div class="donut" style="background:conic-gradient({reader_color} 0 {reader_percent}%,#173653 {reader_percent}% 100%)"><span>{reader_percent_label}</span></div><div><strong>{reader_headline}</strong><div class="muted tiny" style="margin-top:7px">{reader_note}</div></div></div></div><div class="panel reader"><div class="muted tiny">▥ &nbsp; MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motion"><div><span class="muted tiny">30s</span><strong class="{motion_classes[0]}">{motion30}</strong></div><div><span class="muted tiny">10s</span><strong class="{motion_classes[1]}">{motion10}</strong></div><div><span class="muted tiny">5s</span><strong class="{motion_classes[2]}">{motion5}</strong></div></div><div class="motion-note">Cambio de precio en los últimos segundos.</div></div></div>\n<div class="panel chartpanel row" id="jc-chart-slot"><div class="charthead"><strong><span class="btc-icon">₿</span> &nbsp; BTC / USD · {chart_tf.upper()} · {source_label}</strong></div><div id="jc-chart-mount"></div></div>\n<div class="row indicators"><div class="panel indicator"><div class="muted tiny">INDICADORES</div><div class="chips"><button type="button" class="chip" data-indicator="ema9" aria-pressed="true" style="--chip:#e500ff"><i>●</i> EMA9 &nbsp; <span>ON</span></button><button type="button" class="chip" data-indicator="ema21" aria-pressed="true" style="--chip:#00d6ed"><i>●</i> EMA21 &nbsp; <span>ON</span></button><button type="button" class="chip" data-indicator="vwap" aria-pressed="true" style="--chip:#346aff"><i>●</i> VWAP &nbsp; <span>ON</span></button><button type="button" class="chip" data-indicator="volume" aria-pressed="true" style="--chip:#00e5b3"><i>●</i> VOLUMEN &nbsp; <span>ON</span></button><button type="button" class="chip" data-indicator="rsi" aria-pressed="true" style="--chip:#ff38d6"><i>●</i> RSI &nbsp; <span>ON</span></button></div></div><div class="panel indicator"><div class="muted tiny">RSI 14 · {rsi_text}</div>{rsi_svg}</div></div>\n<div class="panel history"><div style="display:flex;justify-content:space-between;align-items:center"><span class="muted tiny">⌁ &nbsp; SEÑALES RECIENTES (ÚLTIMAS 5)</span><a class="tag" href="?page=settings" target="_self">Ver historial →</a></div><div style="overflow-x:auto"><table><thead><tr><th>HORA</th><th>PAR</th><th>SEÑAL</th><th>OBJETIVO</th><th>RESULTADO</th></tr></thead><tbody>{history_rows}</tbody></table></div></div>\n<div class="notice">SEÑALES DEL BOT · RESULTADOS OFICIALES DE KALSHI</div>\n</div></div>\n'
+    panel_html = f"""
+<div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
+  <header class="rhead">
+    <div class="rtitle">BTC Signal</div>
+    <div class="rver">v4.6.1</div>
+    <a class="gear" href="?page=settings" target="_self" aria-label="Ajustes">⚙</a>
+    <div class="rlive"><i></i>{'Mercado en vivo' if market_live else 'Conexión parcial'}</div>
+  </header>
+
+  <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}">
+    <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
+    <div class="rconf">{'COINCIDENCIA UT ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
+  </section>
+
+  {weakness_html}
+
+  {pre_html}
+
+  <div class="rgrid">
+    <div class="rcard keycard">
+      <div class="bigicon btcicon">₿</div>
+      <div><div class="rlabel">BTC</div><div class="rvalue">${sig["price"]:,.0f}</div>
+      <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
+    </div>
+    <div class="rcard keycard">
+      <div class="bigicon targeticon">◎</div>
+      <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
+    </div>
+    <div class="rcard keycard">
+      <div class="bars" style="--accent:{distance_color}"><b></b><b></b><b></b></div>
+      <div><div class="rlabel">DISTANCIA AL TARGET</div><div class="rvalue" style="color:{distance_color}">{distance_text}</div>
+      <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
+    </div>
+    <div class="rcard keycard">
+      <div class="clock">◷</div>
+      <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
+      <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
+    </div>
+  </div>
+
+  <section class="rcard probs">
+    <div class="rlabel">COINCIDENCIA UT · UP / DOWN</div>
+    <div class="pbar"><div class="pup" style="width:{up}%">{up}%</div><div class="pdown" style="width:{down}%">{down}%</div></div>
+    <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
+  </section>
+
+  <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
+    <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
+    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{reader['note']}</small></div>
+    <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
+    {final_panel}
+  </section>
+
+
+
+
+  <section class="rcard tech">
+    <div class="techhead"><span>DETALLES TÉCNICOS</span><span>⌃</span></div>
+    <div class="techrow">
+      <div><small>1ª SEÑAL</small><b style="color:var(--accent)">{first_signal}</b><i>{first_time}</i></div>
+      <div><small>KALSHI · PRECIO</small><b>{f"{round_signal['entry_price'] * 100:.0f}¢" if round_signal['entry_price'] is not None else "—"}</b><i>{round_signal["entry_quality"]}</i></div>
+      <div><small>EMA</small><b class="{ema_class}">{ema_display}</b><i>9 / 21</i></div>
+      <div><small>RSI</small><b class="{rsi_class}">{sig["rsi"]:.0f}</b><i>14</i></div>
+      <div><small>MOMENTUM</small><b class="{mom_class}">{sig["mom3"]:+.2f}</b><i>3 MIN</i></div>
+    </div>
+  </section>
+
+  <footer><span>BTC SIGNAL v4.6.1 &nbsp; | &nbsp; DISEÑADO PARA TRADERS REALES</span><span>MENOS RUIDO. MÁS RESULTADOS.</span></footer>
+</div>
+<div class="ticker">{ticker} • SCORE {sig["final_score"]:+.2f}</div>
+"""
     # Cambia solo texto y atributos, manteniendo nodos existentes.
     # La UI vive fuera del fragmento; este fragmento sigue calculando cada 2 s.
+    st.markdown(panel_html, unsafe_allow_html=True)
     panel_data = json.dumps(panel_html, ensure_ascii=False).replace("<", "\\u003c")
-    st.html(
-        "<script>window.__alphaUpdatePanel(" + panel_data + ");</script>",
-        unsafe_allow_javascript=True,
-    )
 
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
@@ -3948,7 +4542,6 @@ _ALPHA_STABLE_PANEL = r"""
       return;
     }
     if (current.nodeType !== 1) return;
-    if (current.id === "jc-chart-mount" || current.id === "alpha-chart-stable-host") return;
     // Preservar nodos existentes evita que Safari pierda altura y posición.
     for (const attr of Array.from(current.attributes))
       if (!fresh.hasAttribute(attr.name)) current.removeAttribute(attr.name);
@@ -4215,7 +4808,7 @@ if page == "signal_trace":
 elif page == "settings":
     render_history_page()
 else:
-    st.html(_ALPHA_STABLE_PANEL, unsafe_allow_javascript=True)
+    # Main dashboard renders natively inside its fragment.
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
     # Initial srcdoc contains the complete original chart markup and controls.
@@ -4230,8 +4823,8 @@ else:
             'let frame=host.querySelector("iframe");'
             'if(!frame){frame=document.createElement("iframe");'
             'frame.setAttribute("title","Gráfica BTC interactiva");'
-            'frame.style.cssText="width:100%;aspect-ratio:24/11;border:0;display:block;background:#030d1d";'
-            'frame.setAttribute("scrolling","no");'
+            'frame.style.cssText="width:100%;height:1830px;border:0;display:block;background:#06121a";'
+            'frame.setAttribute("scrolling","yes");'
             'frame.srcdoc=' + safe_html + ';host.appendChild(frame);}'
             'window.__alphaPushChart=function(payload){'
             'window.__alphaNextChart=payload;'
@@ -4239,86 +4832,19 @@ else:
             '};'
             'function fitChartHeight(){try{'
             'const panel=frame.contentDocument&&frame.contentDocument.querySelector(".panel");'
-            'if(!panel)return;const pixels=Math.max(100,Math.ceil(panel.getBoundingClientRect().bottom));'
+            'if(!panel)return;const pixels=Math.max(360,Math.ceil(panel.getBoundingClientRect().bottom+8));'
             'if(frame.style.height!==pixels+"px")frame.style.height=pixels+"px";'
             '}catch(e){}}'
             'window.addEventListener("resize",fitChartHeight);'
             'frame.addEventListener("load",function(){'
             'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
             'fitChartHeight();try{const panel=frame.contentDocument.querySelector(".panel");'
-            'if(panel){panel.style.margin="0";new ResizeObserver(fitChartHeight).observe(panel);fitChartHeight();}}catch(e){}'
+            'if(panel)new ResizeObserver(fitChartHeight).observe(panel);}catch(e){}'
             '});'
             'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
-            'function mountChart(){const mount=document.getElementById("jc-chart-mount");'
-            'if(mount&&host&&host.parentNode!==mount)mount.appendChild(host);}'
-            'mountChart();new MutationObserver(mountChart).observe(document.body,{childList:true,subtree:true});'
             '})();</script>',
             unsafe_allow_javascript=True,
         )
 
-    # Controles reales de temporalidad dentro del encabezado del gráfico.
-    # Los botones activan el radio original de Streamlit; no cambian cálculos.
-    st.html(r"""
-    <style>
-    </style>
-    <script>(function(){
-      if(window.__jcTfControlsInstalled)return;
-      window.__jcTfControlsInstalled=true;
-      const choices=['1m','3m','5m','15m','1h','4h','1D'];
-      function findRadio(){
-        return [...document.querySelectorAll('[data-testid="stRadio"]')].find(el=>
-          choices.every(t=>[...el.querySelectorAll('label')].some(l=>l.textContent.trim()===t)));
-      }
-      if(!window.__jcIndicatorBridge){
-        window.__jcIndicatorBridge=true;
-        try{window.__jcIndicators=JSON.parse(localStorage.getItem('btc-neon-panel-v1')||'{}').toggles||{};}catch(e){window.__jcIndicators={};}
-        document.addEventListener('click',function(event){
-          const button=event.target.closest('#alpha-stable-panel button[data-indicator]');
-          if(!button)return;
-          const enabled=button.getAttribute('aria-pressed')!=='true';
-          window.__jcIndicators=window.__jcIndicators||{};
-          window.__jcIndicators[button.dataset.indicator]=enabled;
-          const frame=document.querySelector('#alpha-chart-stable-host iframe');
-          if(frame)frame.contentWindow.postMessage({kind:'alpha-chart-toggle',key:button.dataset.indicator,enabled},'*');
-          update();
-        });
-      }
-      function update(){
-        document.querySelectorAll('#alpha-stable-panel button[data-indicator]').forEach(button=>{
-          const enabled=window.__jcIndicators?.[button.dataset.indicator]!==false;
-          button.setAttribute('aria-pressed',String(enabled));
-          const label=button.querySelector('span'),word=enabled?'ON':'OFF';
-          if(label.textContent!==word)label.textContent=word;
-          if(button.dataset.indicator==='rsi'){
-            const svg=document.querySelector('#alpha-stable-panel .rsi');
-            if(svg)svg.style.visibility=enabled?'visible':'hidden';
-          }
-        });
-        const head=document.querySelector('#alpha-stable-panel .ae .charthead');
-        const radio=findRadio();
-        if(!head||!radio)return;
-        let bar=head.querySelector('.jc-tf-buttons');
-        if(!bar){bar=document.createElement('div');bar.className='jc-tf-buttons';head.appendChild(bar);}
-        if(bar.children.length!==choices.length){
-          bar.replaceChildren();
-          choices.forEach(t=>{
-            const b=document.createElement('button');b.type='button';b.textContent=t;
-            b.addEventListener('click',()=>{
-              const label=[...radio.querySelectorAll('label')].find(l=>l.textContent.trim()===t);
-              if(label)label.click();
-            });bar.appendChild(b);
-          });
-        }
-        const selected=radio.querySelector('input:checked');
-        const selectedText=selected?.closest('label')?.textContent.trim()||'1m';
-        [...bar.children].forEach(b=>b.classList.toggle('active',b.textContent===selectedText));
-        radio.style.position='absolute';radio.style.left='-10000px';radio.style.width='1px';radio.style.height='1px';radio.style.overflow='hidden';
-      }
-      let queued=false;
-      const observer=new MutationObserver(()=>{if(queued)return;queued=true;requestAnimationFrame(()=>{queued=false;update();});});
-      observer.observe(document.body,{childList:true,subtree:true});
-      update();
-    })();</script>
-    """, unsafe_allow_javascript=True)
-
-    # Las alertas ya están resumidas en el historial de la interfaz aprobada.
+    st.markdown(_RECENT_ALERTS_HOST, unsafe_allow_html=True)
+    recent_alerts_panel()
