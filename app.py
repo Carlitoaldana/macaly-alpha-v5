@@ -930,7 +930,7 @@ def new_round_state(ticker, seconds_left):
 # =========================================================
 
 LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
-ROUND_STATE_DB = 'btc_signal_ut_1m_3m_state_v1.db'
+ROUND_STATE_DB = 'btc_signal_ut_1m_primary_state_v2.db'
 _ROUND_TRANSACTION = threading.local()
 
 
@@ -1061,7 +1061,7 @@ def _background_update_state(state, sig, market, seconds_left):
 # =========================================================
 
 LEGACY_HISTORY_DB = "btc_signal_history.db"
-HISTORY_DB = "btc_signal_ut_1m_3m_history_v1.db"
+HISTORY_DB = "btc_signal_ut_1m_primary_history_v2.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
@@ -2197,16 +2197,15 @@ def _ut_compare(rows, as_of, sensitivity=1.0, period=10):
     return dict(experimental=True, orders=False, heikin_ashi=False, sensitivity=sensitivity, atr_period=period, last_1m=one[-1], last_3m=three[-1], latest=timeline[-1] if timeline else None, note='Coincidencia no significa probabilidad de acierto ni resultado Kalshi.', recent=timeline[-20:])
 
 
-UT_ENGINE_REVISION = "ut_closed_1m_3m_v1"
+UT_ENGINE_REVISION = "ut_closed_1m_primary_3m_context_v2"
 
 def _entry_route_checks(sig, seconds_left):
     valid = sig.get("data_valid", False) and sig.get("ut_valid", False)
     sides = {}
     for side in ("UP", "DOWN"):
         checks = [("Velas cerradas y datos completos", bool(valid)),
-                  ("UT Bot 1 minuto: " + str(sig.get("ut_1m", "SIN DATOS")), valid and sig.get("ut_1m")==side),
-                  ("UT Bot 3 minutos: " + str(sig.get("ut_3m", "SIN DATOS")), valid and sig.get("ut_3m")==side)]
-        sides[side] = [{"name":"UT BOT 1m + 3m", "checks":checks,
+                  ("UT Bot 1 minuto: " + str(sig.get("ut_1m", "SIN DATOS")), valid and sig.get("ut_1m")==side)]
+        sides[side] = [{"name":"UT 1m PRINCIPAL", "checks":checks,
                         "met":sum(bool(v) for _,v in checks), "total":len(checks),
                         "complete":all(v for _,v in checks)}]
     return {"valid":bool(valid), "sides":sides, "noise_ok":bool(valid)}
@@ -2243,21 +2242,22 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         # Existing RSI/EMA/volume panels are context only; no legacy route can choose a signal.
         sig.update(_legacy_context_metrics(closed, target, seconds_left, live_price, whale))
         same = fast["direction"] == slow["direction"]
-        direction = fast["direction"] if same else None
+        direction = fast["direction"]
         sig.update(data_valid=True, ut_valid=True, ut_1m=fast["direction"], ut_3m=slow["direction"],
                    ut_alert_1m=fast["alert"], ut_alert_3m=slow["alert"],
                    ut_closed_1m=fast["available_at"], ut_closed_3m=slow["available_at"],
                    ut_stop_1m=fast["stop"], ut_stop_3m=slow["stop"],
                    ut_source=df.attrs.get("candle_source","DESCONOCIDA"),
-                   ut_status="COINCIDEN " + direction if same else "POSIBLE RETROCESO · 1m " + fast["direction"] + " / 3m " + slow["direction"],
-                   candidate=direction, candidate_raw=direction, quality="UT BOT 1m + 3m" if same else "SIN CONFIRMACIÓN · POSIBLE RETROCESO",
+                   ut_status="1m " + direction + (" · 3m A FAVOR" if same else " · 3m EN CONTRA: " + slow["direction"]),
+                   ut_candidate_aligned=direction if same else None, ut_rule="1m decide; 3m informa",
+                   candidate=direction, candidate_raw=direction, quality="UT 1m · 3m A FAVOR" if same else "UT 1m · 3m EN CONTRA",
                    trend3=slow["direction"], momentum="ALCISTA" if direction=="UP" else "BAJISTA" if direction=="DOWN" else "NEUTRAL",
                    technical_score=2 if direction=="UP" else -2 if direction=="DOWN" else 0,
                    final_score=2 if direction=="UP" else -2 if direction=="DOWN" else 0,
-                   up_probability=100 if direction=="UP" else 0 if direction=="DOWN" else 50,
-                   down_probability=100 if direction=="DOWN" else 0 if direction=="UP" else 50,
+                   up_probability=(100 if direction=="UP" else 0) if same else 50,
+                   down_probability=(100 if direction=="DOWN" else 0) if same else 50,
                    atr=fast["atr"], engine_revision=UT_ENGINE_REVISION,
-                   ai_gate_active=False, ai_gate_status="UT 1m/3m decide; IA solo informativa")
+                   ai_gate_active=False, ai_gate_status="UT 1m decide; 3m e IA solo informativos")
     except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
         sig.update(data_valid=False, ut_valid=False, candidate=None, candidate_raw=None,
                    data_error=str(exc), ut_status="SIN DATOS UT: " + str(exc), engine_revision=UT_ENGINE_REVISION)
@@ -2266,8 +2266,9 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
 
 def build_presignal(sig, seconds_left):
     direction = sig.get("candidate") if sig.get("ut_valid") else None
-    return {"direction":direction or "NEUTRAL", "percent":100 if direction else 50,
-            "bull":2 if direction=="UP" else 0, "bear":2 if direction=="DOWN" else 0}
+    aligned = direction and sig.get("ut_1m") == sig.get("ut_3m")
+    return {"direction":direction or "NEUTRAL", "percent":100 if aligned else 50,
+            "bull":1 if direction=="UP" else 0, "bear":1 if direction=="DOWN" else 0}
 
 
 def entry_quality(price, seconds_left):
@@ -2408,7 +2409,7 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    # Closed UT candles provide confirmation; no EMA/RSI/5m/target gate is used.
+    # Closed 1m UT decides; no EMA/RSI/5m/target or 3m veto is used.
     signal = signal or {}
     if state.get("ut_engine_revision") != UT_ENGINE_REVISION:
         state["active_direction"] = None
@@ -2428,18 +2429,19 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["active_since"] = None
         return
     fast, slow = signal.get("ut_1m"), signal.get("ut_3m")
-    if fast != slow or candidate not in ("UP","DOWN"):
-        # Retain an established 3m direction during a contrary 1m retracement.
-        # If 3m itself changed, withdraw the old direction until both agree.
-        if state.get("active_direction") != slow:
-            state["active_direction"] = None
-            state["active_since"] = None
-        state["opening_conflict"] = "SIN CONFIRMACIÓN · 1m/3m EN DESACUERDO"
-        state["retention_warning"] = signal.get("ut_status")
+    if fast not in ("UP", "DOWN") or candidate != fast:
+        state["active_direction"] = None
+        state["active_since"] = None
+        state["opening_conflict"] = "ESPERANDO UT DE 1 MINUTO"
         return
+    # The latest CLOSED 1m direction always decides, including when 3m opposes it.
+    if fast != slow:
+        state["retention_warning"] = signal.get("ut_status")
     if state.get("active_direction") != candidate:
         state["active_direction"] = candidate
         state["active_since"] = now
+        state["last_ut_direction"] = candidate
+        state["last_ut_signal_time"] = now.isoformat()
     if state.get("first_direction") is None:
         state["first_direction"] = candidate
         state["first_signal_time"] = now
@@ -2584,7 +2586,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "ut_closed_1m_3m_v1"
+BACKGROUND_DATA_REVISION = "ut_closed_1m_primary_3m_context_v2"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3950,21 +3952,21 @@ def live_dashboard():
     if pre_direction == "UP":
         pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
         pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE UP"
+        pre_label = "UP · 1m"
     elif pre_direction == "DOWN":
         pre_color, pre_bg, pre_glow = "#e64b4b", "rgba(104,25,37,.28)", "rgba(230,75,75,.20)"
         pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE DOWN"
+        pre_label = "DOWN · 1m"
     else:
         pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
         pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
         pre_label = "NEUTRAL"
 
-    pre_note = sig.get("ut_status", "Esperando velas cerradas de UT Bot.") + " · Sensibilidad 1 / ATR 10. Coincidencia de marcos, no probabilidad de acierto."
-    pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
+    pre_note = sig.get("ut_status", "Esperando velas cerradas de UT Bot.") + " · Sensibilidad 1 / ATR 10. La dirección la decide 1m; 3m solo informa. El porcentaje indica coincidencia de marcos, no acierto."
+    pre_badge = ("3m A FAVOR" if sig.get("ut_1m") == sig.get("ut_3m") else "3m EN CONTRA") if sig.get("ut_valid") else "SIN DATOS"
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">UT BOT · 1m + 3m</span><span class="prebadge">{pre_badge}</span></div>
+      <div class="prehead"><span class="pretitle">UT BOT · 1m PRINCIPAL</span><span class="prebadge">{pre_badge}</span></div>
       <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
       <div class="prenote">{pre_note}</div>
