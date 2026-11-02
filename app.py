@@ -1409,43 +1409,6 @@ def _entry_route_checks(sig, seconds_left):
     return {"valid":True,"sides":sides,"noise_ok":noise_ok}
 
 
-
-
-def ut_bot_1_10(df):
-    """UT Bot Alerts standard ATR trailing-stop logic (key=1, ATR=10).
-
-    Uses ordinary candles (Heikin Ashi disabled). The latest candle may be
-    unfinished; alerts use the previous completed 1m candle only.
-    """
-    x=df.sort_values('time').reset_index(drop=True)
-    if len(x)<25:
-        return {'direction':None,'event':None,'event_time':None}
-    close=x['close'].astype(float).to_numpy()
-    high=x['high'].astype(float).to_numpy()
-    low=x['low'].astype(float).to_numpy()
-    tr=np.maximum(high-low,np.maximum(np.abs(high-np.roll(close,1)),np.abs(low-np.roll(close,1))))
-    tr[0]=high[0]-low[0]
-    atr=pd.Series(tr).ewm(alpha=0.1,adjust=False).mean().to_numpy()
-    stop=np.zeros(len(close),dtype=float)
-    for i in range(1,len(close)):
-        prev=stop[i-1]; nloss=atr[i]
-        if close[i]>prev and close[i-1]>prev:
-            stop[i]=max(prev,close[i]-nloss)
-        elif close[i]<prev and close[i-1]<prev:
-            stop[i]=min(prev,close[i]+nloss)
-        elif close[i]>prev:
-            stop[i]=close[i]-nloss
-        else:
-            stop[i]=close[i]+nloss
-    # A crossing on a finished candle produces UT Long / UT Short.
-    last=len(close)-2
-    event=None
-    if close[last]>stop[last] and close[last-1]<=stop[last-1]:event='UP'
-    elif close[last]<stop[last] and close[last-1]>=stop[last-1]:event='DOWN'
-    direction='UP' if close[last]>stop[last] else 'DOWN'
-    return {'direction':direction,'event':event,'event_time':str(x.iloc[last]['time']),
-            'stop':float(stop[last]),'closed_price':float(close[last])}
-
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -1485,10 +1448,6 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
                     "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
-    # JC UT BOT MODE: original-style UT 1/10 replaces multi-timeframe route voting.
-    ut=ut_bot_1_10(df)
-    candidate=ut['event']
-    quality='UT BOT 1/10 · '+candidate if candidate else 'UT BOT · SIN NUEVO CRUCE'
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
     evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
     # Closing support adapts continuously; it is NOT a calibrated win probability.
@@ -1497,7 +1456,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr,"ut_bot":ut,"ut_mode":True}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
@@ -1742,8 +1701,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
     la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
     """
-    if not (signal or {}).get("ut_mode"):
-        candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
