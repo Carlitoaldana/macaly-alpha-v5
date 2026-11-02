@@ -4673,6 +4673,29 @@ def _recent_alert_rows(current_state=None, sig=None, market=None, limit=4, now=N
         if conn is not None:
             conn.close()
 
+    # Recover first-confirmation rounds persisted in state but not yet archived.
+    # Only the official Kalshi settlement can mark a round GANADA/PERDIDA.
+    missing = [v for v in items.values() if v.get('ticker') != current_ticker]
+    if missing:
+        try:
+            with _history_db() as conn:
+                for v in missing:
+                    at = _recent_alert_time(v.get('first_at'))
+                    if at is None or at > now:
+                        continue
+                    end = _recent_alert_time(v.get('close_time'))
+                    # Ticker represents a 15-minute round; never archive before its end.
+                    if end is None or end > now:
+                        continue
+                    conn.execute("""
+                        INSERT OR IGNORE INTO round_history
+                        (ticker, first_signal, first_signal_time, target, closed_at,
+                         verification_status)
+                        VALUES (?, ?, ?, ?, ?, 'pending')
+                    """, (v['ticker'], v['side'], v['first_at'], v.get('target'), end.isoformat()))
+        except (sqlite3.Error, ValueError, TypeError):
+            pass
+
     # The existing history is the authority for a round's first signal/outcome.
     conn = None
     try:
@@ -4774,6 +4797,17 @@ def render_recent_alerts(state, sig, market):
     end = _recent_alert_time((market or {}).get('close_time'))
     live = bool(market and sig and sig.get('data_valid') is not False and end and now < end)
     try:
+        # Reconcile only after a round has closed, and no more than once per 30s.
+        # Never infer GANADA/PERDIDA from a provisional BTC quote.
+        last_check = st.session_state.get('_recent_official_check_at', 0.0)
+        if time.monotonic() - last_check >= 30:
+            st.session_state['_recent_official_check_at'] = time.monotonic()
+            # First pass archives missing closed rounds; second checks official settlement.
+            _recent_alert_rows(state, sig, market, now=now)
+            try:
+                reconcile_history_once(limit=4)
+            except Exception:
+                pass
         content = _recent_alerts_html(_recent_alert_rows(state, sig, market, now=now), live, now)
     except Exception:
         content = '<section class="ra93-panel"><h2>Alertas recientes</h2><p class="ra93-note">No se pudo leer el historial de señales en esta actualización.</p></section>'
