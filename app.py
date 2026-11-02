@@ -2254,8 +2254,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
                    trend3=slow["direction"], momentum="ALCISTA" if direction=="UP" else "BAJISTA" if direction=="DOWN" else "NEUTRAL",
                    technical_score=2 if direction=="UP" else -2 if direction=="DOWN" else 0,
                    final_score=2 if direction=="UP" else -2 if direction=="DOWN" else 0,
-                   up_probability=(100 if direction=="UP" else 0) if same else 50,
-                   down_probability=(100 if direction=="DOWN" else 0) if same else 50,
+                   up_probability=(75 if direction=="UP" else 25) if same else (58 if direction=="UP" else 42),
+                   down_probability=(75 if direction=="DOWN" else 25) if same else (58 if direction=="DOWN" else 42),
                    atr=fast["atr"], engine_revision=UT_ENGINE_REVISION,
                    ai_gate_active=False, ai_gate_status="UT 1m decide; 3m e IA solo informativos")
     except (ValueError, TypeError, KeyError, IndexError, OverflowError) as exc:
@@ -2431,34 +2431,71 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    # Closed 1m UT decides; no EMA/RSI/5m/target or 3m veto is used.
+    """Fresh opening confirmation and spaced reversal votes; never copy old round votes."""
     signal = signal or {}
     if state.get("ut_engine_revision") != UT_ENGINE_REVISION:
         state["active_direction"] = None
         state["active_since"] = None
         state["ut_engine_revision"] = UT_ENGINE_REVISION
-    _reset_withdrawal(state)
     state["opening_conflict"] = None
-    for key in ("pending_direction","pending_since","pending_last_at","pending_price_source"):
-        state[key] = None
-    state["pending_count"] = 0
     end = pd.to_datetime((market or {}).get("close_time"), utc=True, errors="coerce")
     closed = seconds_left is not None and seconds_left <= 0
     if not pd.isna(end):
         closed = closed or end <= pd.Timestamp(now)
-    if closed or not signal.get("ut_valid") or signal.get("data_valid") is False:
+    if closed:
         state["active_direction"] = None
-        state["active_since"] = None
+        return
+    if not signal.get("ut_valid") or signal.get("data_valid") is False:
+        state["retention_warning"] = "ESPERANDO DATOS ACTUALES"
         return
     fast, slow = signal.get("ut_1m"), signal.get("ut_3m")
     if fast not in ("UP", "DOWN") or candidate != fast:
-        state["active_direction"] = None
-        state["active_since"] = None
-        state["opening_conflict"] = "ESPERANDO UT DE 1 MINUTO"
+        state["retention_warning"] = "ESPERANDO DIRECCIÓN UT VÁLIDA"
         return
-    # The latest CLOSED 1m direction always decides, including when 3m opposes it.
-    if fast != slow:
-        state["retention_warning"] = signal.get("ut_status")
+    stamp = now.timestamp()
+    # Opening uses this round's own observations, not last round's closed candle alone.
+    if state.get("first_direction") is None:
+        pending = state.get("pending_direction")
+        last = state.get("pending_last_at")
+        if pending != candidate or last is None or stamp < last or stamp-last > SIGNAL_CONFIRM_MAX_GAP:
+            state.update(pending_direction=candidate, pending_since=stamp,
+                         pending_last_at=stamp, pending_count=1)
+            state["opening_conflict"] = "REUNIENDO DATOS DE ESTA RONDA"
+            return
+        if stamp-last >= SIGNAL_CONFIRM_INTERVAL:
+            state["pending_count"] = state.get("pending_count", 1)+1
+            state["pending_last_at"] = stamp
+        if state.get("pending_count", 0) < 3 or stamp-state.get("pending_since",stamp) < 6:
+            state["opening_conflict"] = "CONFIRMANDO DIRECCIÓN DE ESTA RONDA"
+            return
+        # Reject a fresh opposing live-price move; flat ticks do not block indefinitely.
+        prev = state.get("previous_live_price")
+        curr = state.get("last_live_price")
+        if prev is not None and curr is not None:
+            move = (float(curr)-float(prev))*(1 if candidate=="UP" else -1)
+            if move < -max(3.0, float(signal.get("atr") or 1)*0.12):
+                state["opening_conflict"] = "PRECIO ACTUAL CONTRADICE LA DIRECCIÓN"
+                return
+    else:
+        active = state.get("active_direction")
+        if active in ("UP", "DOWN") and candidate != active:
+            last = state.get("pending_last_at")
+            if (state.get("pending_direction") != candidate or last is None
+                    or stamp < last or stamp-last > SIGNAL_CONFIRM_MAX_GAP):
+                state.update(pending_direction=candidate, pending_since=stamp,
+                             pending_last_at=stamp, pending_count=1)
+                state["retention_warning"] = active + " PERDIENDO FUERZA"
+                return
+            if stamp-last >= SIGNAL_CONFIRM_INTERVAL:
+                state["pending_count"] = state.get("pending_count",1)+1
+                state["pending_last_at"] = stamp
+            if state.get("pending_count",0) < 2 or stamp-state.get("pending_since",stamp) < SIGNAL_CONFIRM_INTERVAL:
+                state["retention_warning"] = active + " PERDIENDO FUERZA"
+                return
+        else:
+            state["retention_warning"] = ("3m EN CONTRA · OBSERVANDO" if fast != slow else None)
+    state.update(pending_direction=None, pending_since=None, pending_last_at=None,
+                 pending_count=0, opening_conflict=None)
     if state.get("active_direction") != candidate:
         state["active_direction"] = candidate
         state["active_since"] = now
@@ -2469,7 +2506,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["first_signal_time"] = now
         state["first_signal_seconds"] = seconds_left
         state["first_signal_price"] = get_yes_ask(market) if candidate=="UP" else get_no_ask(market)
-
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
