@@ -2241,8 +2241,6 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
             raise ValueError("UT todavía sin dirección confirmada.")
         # Existing RSI/EMA/volume panels are context only; no legacy route can choose a signal.
         sig.update(_legacy_context_metrics(closed, target, seconds_left, live_price, whale))
-        sig["pressure_up"] = sig["up_probability"]
-        sig["pressure_down"] = sig["down_probability"]
         same = fast["direction"] == slow["direction"]
         direction = fast["direction"]
         sig.update(data_valid=True, ut_valid=True, ut_1m=fast["direction"], ut_3m=slow["direction"],
@@ -2267,15 +2265,32 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
 
 
 def build_presignal(sig, seconds_left):
-    """Independent early pressure display, not UT 1m and not the confirmed trade."""
-    if not sig.get("data_valid") or sig.get("pressure_up") is None:
-        return {"direction":"NEUTRAL", "percent":0, "bull":0, "bear":0}
-    up = int(sig["pressure_up"])
-    down = 100-up
-    # Small differences are noise, not a directional pre-signal.
-    direction = "UP" if up >= 55 else "DOWN" if down >= 55 else "NEUTRAL"
-    return {"direction":direction, "percent":max(up,down) if direction != "NEUTRAL" else 50,
-            "bull":up, "bear":down}
+    """Preseñal independiente: no consulta candidate, UT ni señal confirmada."""
+    try:
+        if sig.get("data_valid") is False:
+            raise ValueError("datos inválidos")
+        mom = float(sig.get("mom3", 0))
+        mom5 = float(sig.get("mom5", 0))
+        rsi = float(sig.get("rsi", 50))
+        macd = float(sig.get("macd1", 0))
+        impulse = sig.get("impulse_internal") or {}
+        score = (1 if mom > .015 else -1 if mom < -.015 else 0)
+        score += (1 if mom5 > .025 else -1 if mom5 < -.025 else 0)
+        score += (1 if rsi >= 53 else -1 if rsi <= 47 else 0)
+        score += (1 if macd > 0 else -1 if macd < 0 else 0)
+        if impulse.get("reliable"):
+            score += (1 if impulse.get("up", 0) > impulse.get("down", 0) + .1
+                      else -1 if impulse.get("down", 0) > impulse.get("up", 0) + .1 else 0)
+        direction = "UP" if score >= 2 else "DOWN" if score <= -2 else "NEUTRAL"
+        if direction == "UP" and impulse.get("exhaust_up"):
+            direction = "NEUTRAL"
+        if direction == "DOWN" and impulse.get("exhaust_down"):
+            direction = "NEUTRAL"
+        percent = min(95, 50 + abs(score)*9) if direction != "NEUTRAL" else 50
+        return {"direction": direction, "percent": percent,
+                "bull": max(0, score), "bear": max(0, -score)}
+    except (ValueError, TypeError, OverflowError):
+        return {"direction":"NEUTRAL", "percent":50, "bull":0, "bear":0}
 
 
 def entry_quality(price, seconds_left):
@@ -2416,119 +2431,45 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """Confirma señales por ronda; mantiene la dirección durante retrocesos breves."""
+    # Closed 1m UT decides; no EMA/RSI/5m/target or 3m veto is used.
     signal = signal or {}
-    stamp = now.timestamp()
+    if state.get("ut_engine_revision") != UT_ENGINE_REVISION:
+        state["active_direction"] = None
+        state["active_since"] = None
+        state["ut_engine_revision"] = UT_ENGINE_REVISION
+    _reset_withdrawal(state)
+    state["opening_conflict"] = None
+    for key in ("pending_direction","pending_since","pending_last_at","pending_price_source"):
+        state[key] = None
+    state["pending_count"] = 0
     end = pd.to_datetime((market or {}).get("close_time"), utc=True, errors="coerce")
-    closed = (seconds_left is not None and seconds_left <= 0)
+    closed = seconds_left is not None and seconds_left <= 0
     if not pd.isna(end):
         closed = closed or end <= pd.Timestamp(now)
-    if closed:
+    if closed or not signal.get("ut_valid") or signal.get("data_valid") is False:
         state["active_direction"] = None
         state["active_since"] = None
         return
-
-    # Una revisión de la estrategia obliga a volver a validar la ronda.
-    revision = "round_fresh_stable_v3"
-    if state.get("confirmation_revision") != revision:
-        state.update(confirmation_revision=revision, active_direction=None,
-                     active_since=None, first_direction=None, first_signal_time=None,
-                     first_signal_seconds=None, first_signal_price=None,
-                     opening_live_tapes={}, pending_direction=None, pending_count=0,
-                     pending_since=None, pending_last_at=None, pending_price_source=None,
-                     reversal_live_tape=[])
-
-    active = state.get("active_direction")
-    if not signal.get("ut_valid") or signal.get("data_valid") is False:
-        state["retention_warning"] = (active + " PERDIENDO FUERZA • DATOS NO DISPONIBLES") if active else None
-        return
-
     fast, slow = signal.get("ut_1m"), signal.get("ut_3m")
-    source = signal.get("price_source")
-    valid = (candidate in ("UP", "DOWN") and candidate == fast and
-             fast == slow and source in ("COINBASE", "KALSHI LIVE"))
-    if not valid:
-        state["reversal_live_tape"] = []
-        state.update(pending_direction=None, pending_count=0, pending_since=None,
-                     pending_last_at=None, pending_price_source=None)
-        state["retention_warning"] = (active + " PERDIENDO FUERZA • REEVALUANDO") if active else None
+    if fast not in ("UP", "DOWN") or candidate != fast:
+        state["active_direction"] = None
+        state["active_since"] = None
+        state["opening_conflict"] = "ESPERANDO UT DE 1 MINUTO"
         return
-
-    # No basta con que el UT anterior siga en UP/DOWN: exigimos movimiento
-    # fresco y direccional del precio dentro de esta ronda.
-    fresh = _round_opening_crosscheck(state, candidate, signal, now) if active is None else candidate
-    if fresh != candidate:
-        return
-    if active == candidate:
-        state["reversal_live_tape"] = []
-        state["retention_warning"] = None
-        state.update(pending_direction=None, pending_count=0, pending_since=None,
-                     pending_last_at=None, pending_price_source=None)
-        return
-
-    # Un giro requiere consenso de 1m y 3m, respaldo de precio y varias
-    # observaciones separadas; una lectura aislada no cambia la flecha.
-    if active is not None:
-        price = _plan_number(signal.get("price"))
-        atr = _plan_number(signal.get("atr"))
-        distance = _plan_number(signal.get("distance"))
-        momentum = _plan_number(signal.get("mom5"))
-        sign = 1 if candidate == "UP" else -1
-        # Un giro debe mantenerse en el precio EN VIVO, no solo en las velas UT.
-        # La cinta se reinicia al cambiar el candidato o al perder continuidad.
-        tape = state.get("reversal_live_tape", [])
-        if (not tape or tape[-1][2] != candidate or
-                tape[-1][3] != source or stamp - tape[-1][0] > SIGNAL_CONFIRM_MAX_GAP):
-            tape = []
-        tape = [row for row in tape if 0 <= stamp - row[0] <= 45]
-        if price is not None and (not tape or stamp - tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL):
-            tape.append([stamp, price, candidate, source])
-        state["reversal_live_tape"] = tape
-        live_move = sign * (tape[-1][1] - tape[0][1]) if len(tape) >= 2 else 0.0
-        live_travel = sum(abs(b[1]-a[1]) for a,b in zip(tape, tape[1:]))
-        live_efficiency = live_move / max(live_travel, 1e-8)
-        sustained = (len(tape) >= 5 and tape[-1][0] - tape[0][0] >= 18 and
-                     live_move >= max(4.0, 0.18 * atr) and live_efficiency >= 0.55)
-        if (price is None or atr is None or atr <= 0 or
-                momentum is None or sign * momentum <= 0 or
-                distance is None or sign * distance < max(2.0, 0.10 * atr) or
-                not sustained):
-            state["retention_warning"] = active + " PERDIENDO FUERZA • GIRO SIN CONFIRMAR"
-            state.update(pending_direction=None, pending_count=0, pending_since=None,
-                         pending_last_at=None, pending_price_source=None)
-            return
-
-    previous = state.get("pending_last_at")
-    same = (state.get("pending_direction") == candidate and
-            state.get("pending_price_source") == source and previous is not None and
-            0 <= stamp - previous <= SIGNAL_CONFIRM_MAX_GAP)
-    if not same:
-        state.update(pending_direction=candidate, pending_count=1,
-                     pending_since=stamp, pending_last_at=stamp, pending_price_source=source)
-    elif stamp - previous >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] += 1
-        state["pending_last_at"] = stamp
-    # Tres lecturas en al menos 6 segundos para evitar oscilaciones de pantalla.
-    required = max(3, SIGNAL_CONFIRM_READINGS)
-    if (state.get("pending_count", 0) < required or
-            stamp - state.get("pending_since", stamp) < 6.0):
-        if active:
-            state["retention_warning"] = active + " PERDIENDO FUERZA • REEVALUANDO"
-        return
-
-    state["active_direction"] = candidate
-    state["active_since"] = now
-    state["reversal_live_tape"] = []
-    state["last_ut_direction"] = candidate
-    state["last_ut_signal_time"] = now.isoformat()
-    state["retention_warning"] = None
-    state.update(pending_direction=None, pending_count=0, pending_since=None,
-                 pending_last_at=None, pending_price_source=None)
+    # The latest CLOSED 1m direction always decides, including when 3m opposes it.
+    if fast != slow:
+        state["retention_warning"] = signal.get("ut_status")
+    if state.get("active_direction") != candidate:
+        state["active_direction"] = candidate
+        state["active_since"] = now
+        state["last_ut_direction"] = candidate
+        state["last_ut_signal_time"] = now.isoformat()
     if state.get("first_direction") is None:
         state["first_direction"] = candidate
         state["first_signal_time"] = now
         state["first_signal_seconds"] = seconds_left
-        state["first_signal_price"] = get_yes_ask(market) if candidate == "UP" else get_no_ask(market)
+        state["first_signal_price"] = get_yes_ask(market) if candidate=="UP" else get_no_ask(market)
+
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -4043,12 +3984,14 @@ def live_dashboard():
         pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
         pre_label = "NEUTRAL"
 
-    pre_badge = "COINCIDE CON LA SEÑAL" if active == pre_direction and active in ("UP", "DOWN") else "PRESIÓN ACTUAL"
+    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
+    pre_badge = "PRESIÓN INDEPENDIENTE"
+
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
       <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
       <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
-      <div class="prenote">{pre_note} Porcentaje de apoyo, no probabilidad de acierto.</div>
+      <div class="prenote">{pre_note}</div>
     </section>'''
 
     if active == "UP":
@@ -4136,11 +4079,9 @@ def live_dashboard():
       </div>
     </div>'''
 
-    # Advertencia compacta únicamente visual; usa el aviso existente del motor.
+    # El detector de pérdida de fuerza solo aparece cuando detecta debilidad.
     weakness_html = (
-        '<div class="weakness-inline" role="status">⚠ ' +
-        html.escape(round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
-        '</div>'
+        '<div class="weakness-inline" role="status">SEÑAL PERDIENDO FUERZA</div>'
         if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
     )
 
@@ -4155,7 +4096,7 @@ def live_dashboard():
 
   <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}">
     <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
-    <div class="rconf">{'COINCIDENCIA UT ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
+    <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
   </section>
 
   {weakness_html}
@@ -4185,14 +4126,14 @@ def live_dashboard():
   </div>
 
   <section class="rcard probs">
-    <div class="rlabel">COINCIDENCIA UT · UP / DOWN</div>
+    <div class="rlabel">APOYO CALCULADO · UP / DOWN</div>
     <div class="pbar"><div class="pup" style="width:{up}%">{up}%</div><div class="pdown" style="width:{down}%">{down}%</div></div>
     <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
   </section>
 
   <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{reader['note']}</small></div>
+    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{'' if '1m ' in str(reader['note']) and '3m ' in str(reader['note']) else reader['note']}</small></div>
     <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
     {final_panel}
   </section>
@@ -4732,6 +4673,29 @@ def _recent_alert_rows(current_state=None, sig=None, market=None, limit=4, now=N
         if conn is not None:
             conn.close()
 
+    # Recover first-confirmation rounds persisted in state but not yet archived.
+    # Only the official Kalshi settlement can mark a round GANADA/PERDIDA.
+    missing = [v for v in items.values() if v.get('ticker') != current_ticker]
+    if missing:
+        try:
+            with _history_db() as conn:
+                for v in missing:
+                    at = _recent_alert_time(v.get('first_at'))
+                    if at is None or at > now:
+                        continue
+                    end = _recent_alert_time(v.get('close_time'))
+                    # Ticker represents a 15-minute round; never archive before its end.
+                    if end is None or end > now:
+                        continue
+                    conn.execute("""
+                        INSERT OR IGNORE INTO round_history
+                        (ticker, first_signal, first_signal_time, target, closed_at,
+                         verification_status)
+                        VALUES (?, ?, ?, ?, ?, 'pending')
+                    """, (v['ticker'], v['side'], v['first_at'], v.get('target'), end.isoformat()))
+        except (sqlite3.Error, ValueError, TypeError):
+            pass
+
     # The existing history is the authority for a round's first signal/outcome.
     conn = None
     try:
@@ -4833,6 +4797,17 @@ def render_recent_alerts(state, sig, market):
     end = _recent_alert_time((market or {}).get('close_time'))
     live = bool(market and sig and sig.get('data_valid') is not False and end and now < end)
     try:
+        # Reconcile only after a round has closed, and no more than once per 30s.
+        # Never infer GANADA/PERDIDA from a provisional BTC quote.
+        last_check = st.session_state.get('_recent_official_check_at', 0.0)
+        if time.monotonic() - last_check >= 30:
+            st.session_state['_recent_official_check_at'] = time.monotonic()
+            # First pass archives missing closed rounds; second checks official settlement.
+            _recent_alert_rows(state, sig, market, now=now)
+            try:
+                reconcile_history_once(limit=4)
+            except Exception:
+                pass
         content = _recent_alerts_html(_recent_alert_rows(state, sig, market, now=now), live, now)
     except Exception:
         content = '<section class="ra93-panel"><h2>Alertas recientes</h2><p class="ra93-note">No se pudo leer el historial de señales en esta actualización.</p></section>'
