@@ -2265,10 +2265,32 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
 
 
 def build_presignal(sig, seconds_left):
-    direction = sig.get("candidate") if sig.get("ut_valid") else None
-    aligned = direction and sig.get("ut_1m") == sig.get("ut_3m")
-    return {"direction":direction or "NEUTRAL", "percent":100 if aligned else 50,
-            "bull":1 if direction=="UP" else 0, "bear":1 if direction=="DOWN" else 0}
+    """Preseñal independiente: no consulta candidate, UT ni señal confirmada."""
+    try:
+        if sig.get("data_valid") is False:
+            raise ValueError("datos inválidos")
+        mom = float(sig.get("mom3", 0))
+        mom5 = float(sig.get("mom5", 0))
+        rsi = float(sig.get("rsi", 50))
+        macd = float(sig.get("macd1", 0))
+        impulse = sig.get("impulse_internal") or {}
+        score = (1 if mom > .015 else -1 if mom < -.015 else 0)
+        score += (1 if mom5 > .025 else -1 if mom5 < -.025 else 0)
+        score += (1 if rsi >= 53 else -1 if rsi <= 47 else 0)
+        score += (1 if macd > 0 else -1 if macd < 0 else 0)
+        if impulse.get("reliable"):
+            score += (1 if impulse.get("up", 0) > impulse.get("down", 0) + .1
+                      else -1 if impulse.get("down", 0) > impulse.get("up", 0) + .1 else 0)
+        direction = "UP" if score >= 2 else "DOWN" if score <= -2 else "NEUTRAL"
+        if direction == "UP" and impulse.get("exhaust_up"):
+            direction = "NEUTRAL"
+        if direction == "DOWN" and impulse.get("exhaust_down"):
+            direction = "NEUTRAL"
+        percent = min(95, 50 + abs(score)*9) if direction != "NEUTRAL" else 50
+        return {"direction": direction, "percent": percent,
+                "bull": max(0, score), "bear": max(0, -score)}
+    except (ValueError, TypeError, OverflowError):
+        return {"direction":"NEUTRAL", "percent":50, "bull":0, "bear":0}
 
 
 def entry_quality(price, seconds_left):
@@ -3952,21 +3974,21 @@ def live_dashboard():
     if pre_direction == "UP":
         pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
         pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
-        pre_label = "UP · 1m"
+        pre_label = "POSIBLE UP"
     elif pre_direction == "DOWN":
         pre_color, pre_bg, pre_glow = "#e64b4b", "rgba(104,25,37,.28)", "rgba(230,75,75,.20)"
         pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
-        pre_label = "DOWN · 1m"
+        pre_label = "POSIBLE DOWN"
     else:
         pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
         pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
         pre_label = "NEUTRAL"
 
-    pre_note = sig.get("ut_status", "Esperando velas cerradas de UT Bot.") + " · Sensibilidad 1 / ATR 10. La dirección la decide 1m; 3m solo informa. El porcentaje indica coincidencia de marcos, no acierto."
-    pre_badge = ("3m A FAVOR" if sig.get("ut_1m") == sig.get("ut_3m") else "3m EN CONTRA") if sig.get("ut_valid") else "SIN DATOS"
+    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
+    pre_badge = "PRESIÓN INDEPENDIENTE"
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">UT BOT · 1m PRINCIPAL</span><span class="prebadge">{pre_badge}</span></div>
+      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
       <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
       <div class="prenote">{pre_note}</div>
@@ -4057,11 +4079,9 @@ def live_dashboard():
       </div>
     </div>'''
 
-    # Advertencia compacta únicamente visual; usa el aviso existente del motor.
+    # El detector de pérdida de fuerza solo aparece cuando detecta debilidad.
     weakness_html = (
-        '<div class="weakness-inline" role="status">⚠ ' +
-        html.escape(round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
-        '</div>'
+        '<div class="weakness-inline" role="status">SEÑAL PERDIENDO FUERZA</div>'
         if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
     )
 
@@ -4076,7 +4096,7 @@ def live_dashboard():
 
   <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}">
     <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
-    <div class="rconf">{'COINCIDENCIA UT ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
+    <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
   </section>
 
   {weakness_html}
@@ -4106,14 +4126,14 @@ def live_dashboard():
   </div>
 
   <section class="rcard probs">
-    <div class="rlabel">COINCIDENCIA UT · UP / DOWN</div>
+    <div class="rlabel">APOYO CALCULADO · UP / DOWN</div>
     <div class="pbar"><div class="pup" style="width:{up}%">{up}%</div><div class="pdown" style="width:{down}%">{down}%</div></div>
     <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
   </section>
 
   <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{reader['note']}</small></div>
+    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{'' if '1m ' in str(reader['note']) and '3m ' in str(reader['note']) else reader['note']}</small></div>
     <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
     {final_panel}
   </section>
