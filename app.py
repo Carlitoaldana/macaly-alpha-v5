@@ -2836,14 +2836,14 @@ def closing_reader(sig, seconds_left, micro):
                 drift = float(np.clip(velocity * remaining * 0.25, -expected_move, expected_move))
         adjusted = distance + drift
         z = float(np.clip(adjusted / expected_move, -5.0, 5.0))
-        if abs(z) < 0.10:
-            headline = "CIERRE DISPUTADO"
-        else:
-            direction = "UP" if z > 0 else "DOWN"
-            # Escala orientativa: NO representa una probabilidad calibrada.
-            percent = int(round(50 + 49 * math.erf(abs(z) / math.sqrt(2.0))))
-            percent = max(51, min(99, percent))
-            headline = "SEÑAL DE CIERRE " + direction
+        # Mostrar siempre la inclinación actual cuando hay datos válidos,
+        # incluso cerca del target. Un apoyo cercano a 50% indica incertidumbre.
+        # Esto afecta SOLO al lector de cierre, no a la señal principal.
+        direction = "UP" if z >= 0 else "DOWN"
+        # Índice orientativo, NO probabilidad calibrada.
+        percent = int(round(50 + 49 * math.erf(abs(z) / math.sqrt(2.0))))
+        percent = max(50, min(99, percent))
+        headline = "SEÑAL DE CIERRE " + direction
         note = ""
     color = "#00dfb5" if direction == "UP" else "#e64b4b" if direction == "DOWN" else "#38bdf8"
     return {"percent": percent, "headline": headline, "note": note,
@@ -3812,38 +3812,6 @@ def live_dashboard():
         unsafe_allow_javascript=True,
     )
 
-    # Compactación responsive del bloque de temporalidades; solo presentación.
-    st.markdown("""
-    <style>
-    .st-key-chart_timeframe {
-        margin-block: 0 !important;
-        padding-block: 0 !important;
-    }
-    .st-key-chart_timeframe [data-testid="stRadio"] {
-        margin: 0 !important;
-        padding: 0 !important;
-    }
-    .st-key-chart_timeframe [role="radiogroup"] {
-        display: flex !important;
-        flex-wrap: wrap !important;
-        align-items: center !important;
-        gap: 5px 7px !important;
-        padding: 3px 0 !important;
-        margin: 0 !important;
-        min-height: 0 !important;
-    }
-    .st-key-chart_timeframe label {
-        margin: 0 !important;
-        padding: 5px 9px !important;
-        min-height: 30px !important;
-    }
-    .st-key-chart_timeframe [data-testid="stWidgetLabel"] {display:none !important;}
-    @media (max-width: 600px) {
-        .st-key-chart_timeframe [role="radiogroup"] {gap:4px 5px !important;}
-        .st-key-chart_timeframe label {padding:4px 7px !important;min-height:28px !important;}
-    }
-    </style>
-    """, unsafe_allow_html=True)
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
         chart_timeframe = st.radio(
