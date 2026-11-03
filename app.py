@@ -2393,8 +2393,10 @@ def _record_shared_micro(ticker, price, source, observed_ts=None):
         return
     with _MICRO_SHARED_LOCK:
         shared = _MICRO_SHARED
-        if shared["ticker"] != ticker or shared["source"] != source:
+        if shared["source"] != source:
             shared.update(ticker=ticker, source=source, prices=[])
+        else:
+            shared["ticker"] = ticker
         tape = shared["prices"]
         if tape and (t - tape[-1]["t"] > SIGNAL_CONFIRM_MAX_GAP or t < tape[-1]["t"]):
             tape.clear()
@@ -2587,6 +2589,10 @@ def micro_reading():
     }
 
 
+# Suavizado de volatilidad compartido entre sesiones del mismo proceso.
+_CLOSING_SIGMA_LOCK = threading.RLock()
+_CLOSING_SIGMA_STATE = {"source": None, "sigma": None, "timestamp": 0.0}
+
 def closing_reader(sig, seconds_left, micro):
     """Lector independiente basado en distancia, tiempo y volatilidad observada.
 
@@ -2620,12 +2626,29 @@ def closing_reader(sig, seconds_left, micro):
         # Respaldo con ATR de 1m: evitar falsa certeza si faltan ticks o la
         # volatilidad reciente parece artificialmente baja.
         atr_sigma = (atr / math.sqrt(60.0)) if atr is not None and atr > 0 else price * 0.0005 / math.sqrt(60.0)
+        # Mezcla progresiva: evita el salto al alcanzar la muestra número 8.
+        # Mantiene una base conservadora mientras llegan suficientes observaciones.
         if observed_sigma is None:
             sigma = max(atr_sigma, 0.01)
-            source = "volatilidad estimada de velas"
         else:
-            sigma = max(observed_sigma, atr_sigma * 0.5, 0.01)
-            source = "volatilidad reciente"
+            weight = float(np.clip((len(increments) - 3) / 24.0, 0.0, 1.0))
+            measured = max(observed_sigma, atr_sigma * 0.5, 0.01)
+            sigma = (1.0 - weight) * max(atr_sigma, 0.01) + weight * measured
+        # Suavizado compartido entre recargas de la página, sin tocar el cerebro.
+        global _CLOSING_SIGMA_STATE
+        with _CLOSING_SIGMA_LOCK:
+            state = _CLOSING_SIGMA_STATE
+            now_m = time.monotonic()
+            if state["source"] != st.session_state.get("micro_price_source"):
+                state.update(source=st.session_state.get("micro_price_source"),
+                             sigma=None, timestamp=now_m)
+            previous = state["sigma"]
+            if previous is not None:
+                dt = max(0.0, min(now_m - state["timestamp"], 30.0))
+                alpha = 1.0 - math.exp(-dt / 14.0)
+                sigma = previous + alpha * (sigma - previous)
+            state["sigma"] = sigma
+            state["timestamp"] = now_m
         expected_move = max(sigma * math.sqrt(remaining), 1.0)
         # El movimiento actual solo influye parcialmente y nunca garantiza el cierre.
         drift = 0.0
@@ -2645,9 +2668,7 @@ def closing_reader(sig, seconds_left, micro):
             percent = int(round(50 + 49 * math.erf(abs(z) / math.sqrt(2.0))))
             percent = max(51, min(99, percent))
             headline = "SEÑAL DE CIERRE " + direction
-        note = "Lectura independiente: target, tiempo, " + source + " y velocidad reciente."
-        if observed_sigma is None:
-            note += " Reuniendo historial de segundos."
+        note = ""
     color = "#00dfb5" if direction == "UP" else "#e64b4b" if direction == "DOWN" else "#38bdf8"
     return {"percent": percent, "headline": headline, "note": note,
             "micro": "", "direction": direction, "color": color,
@@ -3585,7 +3606,7 @@ def live_dashboard():
 
   <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div><strong style="color:{reader['color']}">{reader['headline']}</strong><small>{reader['note']}</small></div>
+    <div class="readerbody"><div><strong style="color:{reader['color']}">{reader['headline']}</strong></div>
     <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
     {final_panel}
   </section>
