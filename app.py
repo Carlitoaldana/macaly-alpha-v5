@@ -2131,14 +2131,53 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
 
 
 def build_presignal(sig, seconds_left):
-    """Vista previa del mismo motor Gemini-Kalshi, sin otro cerebro paralelo."""
-    candidate = sig.get("candidate")
-    score = _plan_number(sig.get("final_score")) or 0.0
-    direction = candidate if candidate in ("UP", "DOWN") else "NEUTRAL"
-    # Confianza orientativa, no tasa de aciertos ni predicción independiente.
-    percent = int(round(max(50, min(95, 50 + abs(score) * 7)))) if direction != "NEUTRAL" else 50
+    """Detector temprano independiente; nunca copia candidate ni final_score.
+
+    Observa impulso reciente, MACD de 1m, RSI, posición frente a VWAP y
+    volumen. Es una indicación preliminar, no una predicción calibrada.
+    """
+    if sig.get("data_valid") is False:
+        return {"direction": "NEUTRAL", "percent": 50, "bull": 0.0, "bear": 0.0}
+
+    def safe(key, default=None):
+        v = _plan_number(sig.get(key))
+        return default if v is None else float(v)
+
+    mom3 = safe("mom3")
+    mom5 = safe("mom5")
+    macd = safe("macd1")
+    rsi = safe("rsi")
+    vwap_atr = safe("vwap_atr")
+    rvol = safe("vol_ratio")
+    if any(v is None for v in (mom3, mom5, macd, rsi, vwap_atr, rvol)):
+        return {"direction": "NEUTRAL", "percent": 50, "bull": 0.0, "bear": 0.0}
+
+    # El impulso reciente tiene prioridad sobre las tendencias ya confirmadas.
+    early = 0.0
+    early += 1.4 if mom3 > .012 else -1.4 if mom3 < -.012 else 0.0
+    early += .7 if mom5 > .02 else -.7 if mom5 < -.02 else 0.0
+    early += .7 if macd > 0 else -.7 if macd < 0 else 0.0
+    early += .6 if rsi >= 53 else -.6 if rsi <= 47 else 0.0
+    early += .6 if vwap_atr > .08 else -.6 if vwap_atr < -.08 else 0.0
+
+    # Con volumen débil, exigir más evidencia; no inventar dirección.
+    if rvol < .55:
+        early *= .65
+    elif rvol >= 1.2 and early * mom3 > 0:
+        early += .35 if early > 0 else -.35
+
+    impulse = sig.get("impulse_internal") or {}
+    if isinstance(impulse, dict) and impulse.get("reliable"):
+        if impulse.get("exhaust_up") and early > 0:
+            early -= 1.2
+        if impulse.get("exhaust_down") and early < 0:
+            early += 1.2
+
+    direction = "UP" if early >= 1.65 else "DOWN" if early <= -1.65 else "NEUTRAL"
+    percent = int(round(min(85, 50 + abs(early) * 7))) if direction != "NEUTRAL" else 50
     return {"direction": direction, "percent": percent,
-            "bull": max(0.0, score), "bear": max(0.0, -score)}
+            "bull": max(0.0, early), "bear": max(0.0, -early)}
+
 
 def entry_quality(price, seconds_left):
     if price is None:
