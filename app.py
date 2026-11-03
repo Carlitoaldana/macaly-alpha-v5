@@ -2575,21 +2575,52 @@ def micro_reading():
     }
 
 
-def closing_reader(sig, round_signal, seconds_left, micro):
-    """Presentación del candidato Gemini-Kalshi; no decide otra dirección."""
-    state = round_signal.get("round_state") or {}
-    active = state.get("active_direction")
+def closing_reader(sig, seconds_left, micro):
+    """Lectura INDEPENDIENTE del cierre; nunca consulta la señal UP/DOWN.
+
+    El porcentaje es un índice heurístico de apoyo (no probabilidad calibrada).
+    Combina posición frente al target, tiempo, volatilidad y micro-movimiento.
+    """
+    price = _plan_number(sig.get("price"))
+    distance = _plan_number(sig.get("distance"))
+    atr = _plan_number(sig.get("atr"))
     if seconds_left is not None and seconds_left <= 0:
-        headline, direction = "RONDA TERMINADA · RESULTADO PENDIENTE", None
-    elif active in ("UP", "DOWN"):
-        headline, direction = "SEÑAL " + active, active
+        direction, percent, headline = None, 50, "RONDA TERMINADA · RESULTADO PENDIENTE"
+        note = "Esperando el resultado oficial de Kalshi."
+    elif price is None or distance is None or seconds_left is None:
+        direction, percent, headline = None, 50, "REUNIENDO DATOS"
+        note = "Falta precio, target o tiempo para evaluar el cierre."
     else:
-        headline, direction = "ESPERANDO SEÑAL", None
-    percent = (sig.get("up_probability", 50) if direction == "UP" else
-               sig.get("down_probability", 50) if direction == "DOWN" else 50)
+        remaining = max(1.0, float(seconds_left))
+        # Escala aproximada de movimiento: ATR de 1m y tiempo restante.
+        # No se interpreta como una distribución estadística calibrada.
+        base_atr = atr if atr is not None and atr > 0 else max(price * 0.0005, 1.0)
+        expected_move = max(base_atr * math.sqrt(max(remaining, 60.0) / 60.0), 1.0)
+        distance_strength = float(np.clip(distance / expected_move, -3.0, 3.0))
+
+        # El impulso micro tiene influencia limitada; no anula una distancia amplia.
+        micro_strength = 0.0
+        if micro.get("ready"):
+            slope = _plan_number(micro.get("slope")) or 0.0
+            change_10s = _plan_number(micro.get("change_10s")) or 0.0
+            change_30s = _plan_number(micro.get("change_30s")) or 0.0
+            micro_strength = float(np.clip(
+                0.45 * (slope * 10.0 / expected_move)
+                + 0.35 * (change_10s / expected_move)
+                + 0.20 * (change_30s / expected_move), -0.8, 0.8
+            ))
+        combined = distance_strength + micro_strength
+        if abs(combined) < 0.12:
+            direction, percent, headline = None, 50, "CIERRE DISPUTADO"
+        else:
+            direction = "UP" if combined > 0 else "DOWN"
+            percent = int(round(50 + 45 * (1 - math.exp(-abs(combined)))))
+            percent = max(51, min(95, percent))
+            headline = "SEÑAL DE CIERRE " + direction
+        note = ("Lectura independiente: distancia al target, tiempo, volatilidad"
+                + (" y movimiento reciente." if micro.get("ready") else ". Reuniendo movimiento reciente."))
     color = "#00dfb5" if direction == "UP" else "#e64b4b" if direction == "DOWN" else "#38bdf8"
-    return {"percent": int(percent), "headline": headline,
-            "note": "Señal del motor ALPHA EDGE; el porcentaje indica apoyo interno, no probabilidad de acierto.",
+    return {"percent": percent, "headline": headline, "note": note,
             "micro": "", "direction": direction, "color": color,
             "border": "rgba(56,189,248,.45)",
             "bg": "linear-gradient(135deg,rgba(11,64,91,.30),rgba(9,23,34,.72))"}
@@ -3320,16 +3351,15 @@ def live_dashboard():
     # Cinta live de segundos para el Lector de Cierre.
     update_micro_tape(ticker, live_btc_price, source)
     micro = micro_reading()
-    reader = closing_reader(sig, round_signal, seconds_left, micro)
+    reader = closing_reader(sig, seconds_left, micro)
     if not btc_ok:
-        reader = {**reader, "percent":0, "headline":"SIN DATOS ACTUALES",
-                  "note":"No se puede validar la señal hasta recuperar las velas."}
+        reader = {**reader, "percent":0, "direction":None,
+                  "headline":"SIN DATOS ACTUALES",
+                  "note":"No se puede evaluar el cierre hasta recuperar las velas."}
     reader_percent_label = f"{reader['percent']}%" if reader.get("direction") else "—"
-    if round_signal.get("decision") not in ("UP", "DOWN"):
-        reader_percent_label = "—"
     if seconds_left is not None and seconds_left <= 0:
         # El reloj y el precio instantáneo no prueban la liquidación oficial.
-        reader = {**reader, "percent": 0,
+        reader = {**reader, "percent": 0, "direction":None,
                   "headline": "RONDA TERMINADA · RESULTADO PENDIENTE",
                   "note": "Esperando verificación del resultado oficial de Kalshi."}
         reader_percent_label = "—"
@@ -3433,39 +3463,17 @@ def live_dashboard():
     market_side = "UP" if (distance or 0) > 0 else "DOWN" if (distance or 0) < 0 else "NEUTRAL"
     abs_final_distance = abs(distance or 0)
 
-    # En el tramo final, tiempo + posición REAL frente al target mandan en este cuadro.
-    # Así no muestra "CIERRE MUY DISPUTADO" solo porque la señal vieja o la velocidad
-    # contradigan el lado que realmente está ganando a segundos del cierre.
-    if seconds_left is not None and seconds_left <= 60 and market_side != "NEUTRAL":
-        if active in ("UP", "DOWN") and market_side != active:
-            final_status = f"GIRO FINAL HACIA {market_side}"
-        else:
-            final_status = f"VENTAJA FINAL {market_side}"
-        final_note = (
-            f"Quedan {seconds_left}s · BTC está ${abs_final_distance:,.0f} "
-            f"{'arriba' if distance > 0 else 'abajo'} del target · "
-            f"ahora favorece {market_side}."
-        )
-    elif active in ("UP", "DOWN"):
-        if market_side == active and ((active == "UP" and speed10 >= -0.15) or (active == "DOWN" and speed10 <= 0.15)):
-            final_status = f"AÚN FAVORABLE A {active}"
-            final_note = f"El precio se mantiene {'sobre' if active == 'UP' else 'bajo'} el target, con presión inmediata controlada."
-        elif market_side != "NEUTRAL" and market_side != active and abs_final_distance >= 5:
-            final_status = f"GIRO HACIA {market_side}"
-            final_note = f"BTC está al otro lado del target y la lectura actual favorece {market_side}."
-        else:
-            final_status = f"AÚN FAVORABLE A {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA CLARA"
-            final_note = "La lectura sigue el lado actual del target y el movimiento reciente."
-    else:
-        final_status = f"VENTAJA FINAL {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA FINAL"
-        final_note = "Lectura independiente basada en distancia, tiempo restante y movimiento de los últimos segundos."
-    if seconds_left is None or seconds_left > 60:
-        # Fuera del tramo final, esto describe posición, no pronostica cierre.
-        final_status = f"POSICIÓN ACTUAL {market_side}" if market_side != "NEUTRAL" else "SIN VENTAJA ACTUAL"
-        final_note = "Posición actual frente al target; todavía no es una lectura del cierre final."
+    # Estado factual independiente del motor de señales.
     if seconds_left is not None and seconds_left <= 0:
         final_status = "RESULTADO OFICIAL PENDIENTE"
-        final_note = "El precio mostrado al terminar no confirma la liquidación del contrato."
+        final_note = "Esperando la liquidación oficial de Kalshi."
+    elif distance is None:
+        final_status = "SIN POSICIÓN DISPONIBLE"
+        final_note = "Esperando precio y target actualizados."
+    else:
+        final_status = f"POSICIÓN ACTUAL {market_side}" if market_side != "NEUTRAL" else "PRECIO EN EL TARGET"
+        final_note = "Posición del precio frente al target; no determina el cierre definitivo."
+    final_status_color = "#00dfb5" if market_side == "UP" else "#e64b4b" if market_side == "DOWN" else "#94a3b8"
     final_distance_label = f"${abs(distance):,.0f}" if distance is not None else "—"
     final_dist_pct_label = f"{abs(distance_pct):.2f}%" if distance_pct is not None else "SIN TARGET"
     final_panel = f'''<div class="finalclose">
@@ -3479,7 +3487,7 @@ def live_dashboard():
         <div class="finalcard speed"><div class="finaltitle">VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div><div class="finalnote">En los últimos 10 s.</div></div>
       </div>
       <div class="finalanalysis">
-        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b>{final_status}</b><span>{final_note}</span></div></div>
+        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b style="color:{final_status_color}">{final_status}</b><span>{final_note}</span></div></div>
         <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
       </div>
     </div>'''
@@ -3540,7 +3548,7 @@ def live_dashboard():
 
   <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{reader['note']}</small></div>
+    <div class="readerbody"><div><strong style="color:{reader['color']}">{reader['headline']}</strong><small>{reader['note']}</small></div>
     <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
     {final_panel}
   </section>
