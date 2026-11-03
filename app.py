@@ -920,6 +920,33 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
   .block-container,[data-testid="stMainBlockContainer"] { width:100% !important; max-width:440px !important; margin-inline:auto !important; padding:5px 9px 25px !important; }
 }
 
+/* FINAL VISUAL REFINEMENT — only CSS; engine and reader untouched */
+.refapp .rhero{isolation:isolate!important}
+.refapp .rhero:before{opacity:.82!important;mix-blend-mode:screen!important;filter:drop-shadow(0 0 13px #d9a12b55) saturate(1.2)!important;-webkit-mask-image:radial-gradient(ellipse at 56% 48%,#000 32%,rgba(0,0,0,.85) 50%,transparent 78%)!important;mask-image:radial-gradient(ellipse at 56% 48%,#000 32%,rgba(0,0,0,.85) 50%,transparent 78%)!important}
+.refapp .rsignal{display:flex!important;align-items:center!important;justify-content:center!important;gap:9px!important;transform:translateX(-14px)!important;filter:drop-shadow(0 0 7px var(--accent))!important}
+.refapp .cssarrow{display:block!important;position:relative!important;flex:0 0 auto!important;opacity:1!important;filter:drop-shadow(0 0 9px var(--accent))!important}
+.refapp .rhero.waiting .cssarrow{display:none!important}
+.refapp .readerbody{min-height:0!important;margin:10px 0 12px!important;align-items:center!important}
+.refapp .readerbody strong{display:block!important;max-width:100%!important}
+.refapp .reader{padding-bottom:12px!important}
+.refapp .finalpanel{margin-top:4px!important}
+@media (min-width:700px){
+ .refapp .rhero{height:194px!important;min-height:194px!important}
+ .refapp .rhero:before{width:30%!important;right:18px!important;top:0!important;height:175px!important}
+ .refapp .rsignal{font-size:clamp(90px,11vw,132px)!important}
+ .refapp .readerbody{min-height:0!important;grid-template-columns:minmax(0,1fr) 128px!important;margin:9px 0 12px!important}
+ .refapp .readerbody strong{font-size:clamp(24px,3vw,34px)!important}
+ .refapp .rring{width:118px!important;height:118px!important}
+ .refapp .rring:after{width:89px!important;height:89px!important}
+ .refapp .rring span{font-size:31px!important}
+}
+@media (max-width:699px){
+ .refapp .rhero:before{opacity:.7!important}
+ .refapp .readerbody{grid-template-columns:minmax(0,1fr) 96px!important}
+ .refapp .rring{width:92px!important;height:92px!important}
+ .refapp .rring:after{width:69px!important;height:69px!important}
+}
+
 </style>
 """,
     unsafe_allow_html=True,
