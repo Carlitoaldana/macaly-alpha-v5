@@ -649,18 +649,6 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .reader{min-height:0!important}
 
 
-/* ===== PRESEÑAL — CAPA VISUAL, NO TOCA EL MOTOR ===== */
-.presignal{margin:0 0 6px;padding:9px 10px;border:1px solid var(--precolor);border-radius:10px;background:linear-gradient(135deg,var(--prebg),rgba(8,18,27,.88));box-shadow:0 0 18px var(--preglow)}
-.prehead{display:flex;justify-content:space-between;align-items:center;gap:8px}
-.pretitle{font-size:8px;font-weight:950;letter-spacing:.55px;color:#b9c9db}
-.prebadge{font-size:6.5px;font-weight:900;color:var(--precolor);border:1px solid var(--precolor);border-radius:10px;padding:3px 7px}
-.premain{display:flex;justify-content:space-between;align-items:flex-end;margin-top:7px;gap:8px}
-.predirection{font-size:17px;font-weight:1000;color:var(--precolor);letter-spacing:-.3px}
-.prepercent{font-size:18px;font-weight:1000;color:var(--precolor)}
-.prebar{height:5px;background:#1b2938;border-radius:6px;overflow:hidden;margin-top:7px}
-.prebar b{display:block;height:100%;background:var(--precolor);border-radius:6px;box-shadow:0 0 9px var(--preglow)}
-.prenote{font-size:6.7px;color:#91a2b5;margin-top:5px;line-height:1.25}
-
 /* ===== PANEL FINAL DE CIERRE — EXACTO A LA REFERENCIA ===== */
 .finalclose{margin-top:7px;border:1px solid var(--rr);border-radius:9px;padding:7px;background:rgba(5,15,22,.45)}
 .finalgrid{display:grid;grid-template-columns:1.65fr .85fr .85fr;gap:4px}
@@ -707,30 +695,30 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
 .pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
 .pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
-.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
-.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
+.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
+.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
 .rhero{filter:drop-shadow(0 0 9px var(--accent))}
 .note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
 .floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
 .canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
-@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
+@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.finalanalysis{grid-template-columns:1fr 90px}}
 
 
 /* Purple neon outlines, consistent across dashboard and chart cards. */
-.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
+.rcard,.mini,.section,.close-reader,.reader,.refapp>section[style],
 .finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
 .panel,.card,.metric,details,.floatcounts div{
  border-color:#23685e!important;
  box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
 }
 .panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
-.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
+.rcard,.mini,.reader,.card,.metric,details{border-width:1.5px!important}
 .techrow,.rnav,.chartnav{border-color:#23685e!important}
 
 
 /* Uniform turquoise presentation. Signal values and timing are unchanged. */
 .stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .rcard,.refapp .reader,.refapp .finalclose,
 .refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
 .panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
  background:linear-gradient(125deg,#0c2026,#0a151e)!important;
@@ -786,7 +774,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 
 /* JC ALPHA EDGE — champagne claro de referencia; solo CSS */
 :root{--jc-gold:#e1c99c;--jc-gold-soft:rgba(225,201,156,.92)}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .rcard,.refapp .reader,.refapp .finalclose,
 .refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp .chartbox,
 .refapp>section[style],.refapp .tech,.refapp .rconf,
 .panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div,
@@ -2130,55 +2118,6 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     }
 
 
-def build_presignal(sig, seconds_left):
-    """Detector temprano independiente; nunca copia candidate ni final_score.
-
-    Observa impulso reciente, MACD de 1m, RSI, posición frente a VWAP y
-    volumen. Es una indicación preliminar, no una predicción calibrada.
-    """
-    if sig.get("data_valid") is False:
-        return {"direction": "NEUTRAL", "percent": 50, "bull": 0.0, "bear": 0.0}
-
-    def safe(key, default=None):
-        v = _plan_number(sig.get(key))
-        return default if v is None else float(v)
-
-    mom3 = safe("mom3")
-    mom5 = safe("mom5")
-    macd = safe("macd1")
-    rsi = safe("rsi")
-    vwap_atr = safe("vwap_atr")
-    rvol = safe("vol_ratio")
-    if any(v is None for v in (mom3, mom5, macd, rsi, vwap_atr, rvol)):
-        return {"direction": "NEUTRAL", "percent": 50, "bull": 0.0, "bear": 0.0}
-
-    # El impulso reciente tiene prioridad sobre las tendencias ya confirmadas.
-    early = 0.0
-    early += 1.4 if mom3 > .012 else -1.4 if mom3 < -.012 else 0.0
-    early += .7 if mom5 > .02 else -.7 if mom5 < -.02 else 0.0
-    early += .7 if macd > 0 else -.7 if macd < 0 else 0.0
-    early += .6 if rsi >= 53 else -.6 if rsi <= 47 else 0.0
-    early += .6 if vwap_atr > .08 else -.6 if vwap_atr < -.08 else 0.0
-
-    # Con volumen débil, exigir más evidencia; no inventar dirección.
-    if rvol < .55:
-        early *= .65
-    elif rvol >= 1.2 and early * mom3 > 0:
-        early += .35 if early > 0 else -.35
-
-    impulse = sig.get("impulse_internal") or {}
-    if isinstance(impulse, dict) and impulse.get("reliable"):
-        if impulse.get("exhaust_up") and early > 0:
-            early -= 1.2
-        if impulse.get("exhaust_down") and early < 0:
-            early += 1.2
-
-    direction = "UP" if early >= 1.65 else "DOWN" if early <= -1.65 else "NEUTRAL"
-    percent = int(round(min(85, 50 + abs(early) * 7))) if direction != "NEUTRAL" else 50
-    return {"direction": direction, "percent": percent,
-            "bull": max(0.0, early), "bear": max(0.0, -early)}
-
-
 def entry_quality(price, seconds_left):
     if price is None:
         return "PRECIO NO DISPONIBLE", "#94a3b8"
@@ -2800,30 +2739,30 @@ def render_history_page():
 .red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
 .pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
 .pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
-.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
-.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
+.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
+.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
 .rhero{filter:drop-shadow(0 0 9px var(--accent))}
 .note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
 .floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
 .canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
-@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
+@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.finalanalysis{grid-template-columns:1fr 90px}}
 
 
 /* Purple neon outlines, consistent across dashboard and chart cards. */
-.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
+.rcard,.mini,.section,.close-reader,.reader,.refapp>section[style],
 .finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
 .panel,.card,.metric,details,.floatcounts div{
  border-color:#23685e!important;
  box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
 }
 .panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
-.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
+.rcard,.mini,.reader,.card,.metric,details{border-width:1.5px!important}
 .techrow,.rnav,.chartnav{border-color:#23685e!important}
 
 
 /* Uniform turquoise presentation. Signal values and timing are unchanged. */
 .stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .rcard,.refapp .reader,.refapp .finalclose,
 .refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
 .panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
  background:linear-gradient(125deg,#0c2026,#0a151e)!important;
@@ -3031,30 +2970,30 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 .red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
 .pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
 .pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
-.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
-.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
+.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
+.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
 .rhero{filter:drop-shadow(0 0 9px var(--accent))}
 .note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
 .floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
 .canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
-@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
+@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.finalanalysis{grid-template-columns:1fr 90px}}
 
 
 /* Purple neon outlines, consistent across dashboard and chart cards. */
-.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
+.rcard,.mini,.section,.close-reader,.reader,.refapp>section[style],
 .finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
 .panel,.card,.metric,details,.floatcounts div{
  border-color:#23685e!important;
  box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
 }
 .panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
-.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
+.rcard,.mini,.reader,.card,.metric,details{border-width:1.5px!important}
 .techrow,.rnav,.chartnav{border-color:#23685e!important}
 
 
 /* Uniform turquoise presentation. Signal values and timing are unchanged. */
 .stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .rcard,.refapp .reader,.refapp .finalclose,
 .refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
 .panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
  background:linear-gradient(125deg,#0c2026,#0a151e)!important;
@@ -3071,7 +3010,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 
 /* JC ALPHA EDGE — champagne claro de referencia; solo CSS */
 :root{--jc-gold:#e1c99c;--jc-gold-soft:rgba(225,201,156,.92)}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .rcard,.refapp .reader,.refapp .finalclose,
 .refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp .chartbox,
 .refapp>section[style],.refapp .tech,.refapp .rconf,
 .panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div,
@@ -3460,35 +3399,6 @@ def live_dashboard():
     # Etiqueta visual en español; el motor conserva internamente BULL/BEAR.
     ema_display = "ALCISTA" if sig.get("ema") == "BULL" else "BAJISTA" if sig.get("ema") == "BEAR" else sig.get("ema", "N/A")
 
-    # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
-    # las probabilidades oficiales.
-    pre = build_presignal(sig, seconds_left)
-    pre_direction = pre["direction"]
-    pre_percent = pre["percent"]
-
-    if pre_direction == "UP":
-        pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
-        pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE UP"
-    elif pre_direction == "DOWN":
-        pre_color, pre_bg, pre_glow = "#e64b4b", "rgba(104,25,37,.28)", "rgba(230,75,75,.20)"
-        pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
-        pre_label = "POSIBLE DOWN"
-    else:
-        pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
-        pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
-        pre_label = "NEUTRAL"
-
-    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
-    pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
-
-    pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
-      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
-      <div class="prebar"><b style="width:{pre_percent}%"></b></div>
-      <div class="prenote">{pre_note}</div>
-    </section>'''
-
     if active == "UP":
         hero_arrow, hero_word = "", "UP"
         btc_delta = f"{sig['mom3']:+.2f}%"
@@ -3599,7 +3509,6 @@ def live_dashboard():
 
   {weakness_html}
 
-  {pre_html}
 
   <div class="rgrid">
     <div class="rcard keycard">
@@ -4154,7 +4063,7 @@ _RECENT_ALERTS_HOST = r'''
 
 /* JC ALPHA EDGE — champagne claro de referencia; solo CSS */
 :root{--jc-gold:#e1c99c;--jc-gold-soft:rgba(225,201,156,.92)}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
+.refapp .rcard,.refapp .reader,.refapp .finalclose,
 .refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp .chartbox,
 .refapp>section[style],.refapp .tech,.refapp .rconf,
 .panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div,
