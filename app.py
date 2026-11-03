@@ -965,6 +965,48 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
   .refapp .rring:after{width:92px!important;height:92px!important}
 }
 
+
+/* ALPHA EDGE · FINAL VISUAL 2026 · capa exclusivamente de presentación */
+.refapp{--gold:#eac47b;--neon:#00e7b6; color:#f4faff!important;background:radial-gradient(ellipse at 50% 0%,#103654 0%,#041121 53%,#020b19 100%)!important;}
+.refapp .rhead,.refapp .rhero{background-color:transparent!important;}
+.refapp .rhead{position:relative!important;z-index:2!important;}
+.refapp .rtitle{font-style:italic!important;font-weight:950!important;letter-spacing:2.5px!important;text-transform:uppercase!important;text-shadow:0 1px 0 #8e6c34,0 0 15px #d6aa604d!important;}
+.refapp .rhero{position:relative!important;isolation:isolate!important;overflow:visible!important;background:radial-gradient(ellipse at 48% 45%,#063d4560,transparent 64%)!important;}
+/* El toro no es un rectángulo: fundido amplio hacia el azul del encabezado. */
+.refapp .rhero:before{z-index:-1!important;border:0!important;border-radius:0!important;mix-blend-mode:screen!important;opacity:.98!important;-webkit-mask-image:radial-gradient(ellipse 75% 85% at 53% 47%,#000 30%,#000b 53%,transparent 98%)!important;mask-image:radial-gradient(ellipse 75% 85% at 53% 47%,#000 30%,#000b 53%,transparent 98%)!important;}
+.refapp .rhero:after{z-index:-2!important;}
+.refapp .rsignal{font-weight:950!important;font-style:italic!important;letter-spacing:-4px!important;filter:drop-shadow(0 0 7px var(--accent))!important;text-shadow:0 2px 0 #0a3e32,0 0 12px var(--glow),0 0 24px var(--glow)!important;}
+.refapp .rconf{background:linear-gradient(100deg,#050d18,#17202b 50%,#050d18)!important;border:1.5px solid #f4c96d!important;border-radius:9px!important;box-shadow:0 0 12px #f6c46a55,inset 0 1px 0 #fff4b04a!important;font-weight:900!important;}
+.refapp .rcard,.refapp .reader{background:linear-gradient(145deg,#102e48 0%,#061728 48%,#06111f 100%)!important;border:1px solid #d8b979!important;box-shadow:inset 0 1px 0 #fff3bb38,0 6px 20px #0007,0 0 9px #0a8fd51a!important;}
+.refapp .keycard{background-image:linear-gradient(145deg,#102e48 0%,#061728 50%,#06111f 100%)!important;}
+.refapp .keycard:after{width:58px!important;height:34px!important;background:linear-gradient(137deg,transparent 45%,#d6a13d13 68%,#e8b94b88 100%)!important;}
+.refapp .probs{border-color:#5ca7e8!important;box-shadow:inset 0 1px 0 #a6ddff59,0 0 15px #0879bc4a!important;}
+.refapp .pup{background:linear-gradient(90deg,#00cda5,#00e7b9)!important;box-shadow:0 0 16px #00e7b96b!important;}
+.refapp .pdown{background:linear-gradient(90deg,#e8424d,#f35a63)!important;box-shadow:0 0 12px #f34c5b60!important;}
+.refapp .reader{border-color:#e4b96d!important;box-shadow:inset 0 1px 0 #ffdd9a55,0 0 18px #c08b3940!important;}
+.refapp .readerbody{background:radial-gradient(ellipse at 75% 50%,#08364a65,transparent 60%)!important;}
+.refapp .readerbody strong{font-style:italic!important;font-weight:950!important;letter-spacing:-.5px!important;text-shadow:0 0 8px var(--rr),0 0 20px var(--rr)!important;}
+.refapp .rring{box-shadow:0 0 9px var(--rr),0 0 25px color-mix(in srgb,var(--rr) 35%,transparent)!important;}
+.refapp .finalpanel{background:linear-gradient(150deg,#09223a,#041321)!important;border:1px solid #d8b979!important;border-radius:16px!important;padding:10px!important;}
+.refapp .finalcard,.refapp .motionrow,.refapp .analysisrow>div{background:linear-gradient(145deg,#0d2c47,#061524)!important;border:1px solid #6cb6dc!important;box-shadow:inset 0 1px 0 #8fd6ff26!important;}
+.refapp .tech{border-color:#d8b979!important;}
+@media(max-width:699px){
+ .refapp .rhero{height:168px!important;min-height:168px!important;}
+ .refapp .rhero:before{right:0!important;width:43%!important;height:150px!important;background-size:contain!important;background-position:center right!important;}
+ .refapp .rsignal{font-size:clamp(60px,12vw,86px)!important;}
+ .refapp .rconf{font-size:12px!important;padding:9px 14px!important;}
+ .refapp .readerbody{grid-template-columns:minmax(0,1fr) 110px!important;}
+ .refapp .rring{width:103px!important;height:103px!important;}
+ .refapp .rring:after{width:77px!important;height:77px!important;}
+ .refapp .finalpanel{padding:8px!important;}
+}
+@media(min-width:700px){
+ .refapp .rhero{height:225px!important;min-height:225px!important;}
+ .refapp .rhero:before{width:35%!important;height:205px!important;right:1%!important;background-size:contain!important;}
+ .refapp .rsignal{font-size:clamp(96px,11vw,145px)!important;}
+ .refapp .rconf{font-size:16px!important;}
+}
+
 </style>
 """,
     unsafe_allow_html=True,
