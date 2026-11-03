@@ -2376,6 +2376,38 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     save_round_state(state)
     return state
 
+# Cinta micro compartida entre sesiones Streamlit del MISMO proceso.
+# El trabajador autónomo la alimenta aun cuando el navegador se desconecta.
+_MICRO_SHARED_LOCK = threading.RLock()
+_MICRO_SHARED = {"ticker": None, "source": None, "prices": []}
+
+def _record_shared_micro(ticker, price, source, observed_ts=None):
+    if not ticker or ticker == "--" or not source:
+        return
+    try:
+        p = float(price)
+        t = float(observed_ts) if observed_ts is not None else time.time()
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(p) or p <= 0 or abs(time.time() - t) > LIVE_PRICE_MAX_AGE:
+        return
+    with _MICRO_SHARED_LOCK:
+        shared = _MICRO_SHARED
+        if shared["ticker"] != ticker or shared["source"] != source:
+            shared.update(ticker=ticker, source=source, prices=[])
+        tape = shared["prices"]
+        if tape and (t - tape[-1]["t"] > SIGNAL_CONFIRM_MAX_GAP or t < tape[-1]["t"]):
+            tape.clear()
+        if not tape or t - tape[-1]["t"] >= 1.0:
+            tape.append({"t": t, "p": p})
+        shared["prices"] = [v for v in tape if v["t"] >= time.time() - 90]
+
+def _shared_micro_snapshot(ticker, source):
+    with _MICRO_SHARED_LOCK:
+        if _MICRO_SHARED["ticker"] != ticker or _MICRO_SHARED["source"] != source:
+            return []
+        return [dict(x) for x in _MICRO_SHARED["prices"]]
+
 def _background_history_loop(stop_event=None):
     started = time.monotonic()
     active_ticker = None
@@ -2401,6 +2433,9 @@ def _background_history_loop(stop_event=None):
             seconds_left = get_seconds_remaining(market)
             target = get_target_from_market(market)
             live_price = _background_get_live_price(market)
+            background_source = getattr(_BACKGROUND_PRICE_SOURCE, "value", None)
+            observed = getattr(_PRICE_OBSERVATIONS, "values", {}).get(background_source)
+            _record_shared_micro(ticker, live_price, background_source, observed)
             btc_df = _background_get_btc_data()
             try:
                 whale = get_coinbase_whale_flow(whale_state)
@@ -2476,34 +2511,11 @@ def start_continuous_history_worker():
 def update_micro_tape(ticker, live_price, price_source=None):
     if not ticker or ticker == "--" or live_price is None:
         return
-
-    # Cada ronda empieza con su propia cinta.
-    if (st.session_state.micro_ticker != ticker
-            or st.session_state.get("micro_price_source") != price_source):
-        st.session_state.micro_ticker = ticker
-        st.session_state.micro_price_source = price_source
-        st.session_state.micro_prices = []
-
-    now_ts = datetime.now(timezone.utc).timestamp()
-    observed_ts = getattr(_PRICE_OBSERVATIONS, "values", {}).get(price_source)
-    if (observed_ts is None or not np.isfinite(float(live_price))
-            or not -5 <= now_ts - observed_ts <= LIVE_PRICE_MAX_AGE):
-        st.session_state.micro_prices = []
-        return
-    tape = st.session_state.micro_prices
-
-    # Una pausa rompe la ventana micro; volver a reunir datos continuos.
-    if tape and observed_ts - tape[-1]["t"] > SIGNAL_CONFIRM_MAX_GAP:
-        tape.clear()
-    # Evita duplicar muestras dentro del mismo refresco.
-    if not tape or observed_ts - tape[-1]["t"] >= 1.0:
-        tape.append({"t": observed_ts, "p": float(live_price)})
-
-    # Conserva aproximadamente los últimos 90 segundos.
-    cutoff = now_ts - 90
-    st.session_state.micro_prices = [
-        x for x in tape if x["t"] >= cutoff
-    ]
+    observed = getattr(_PRICE_OBSERVATIONS, "values", {}).get(price_source)
+    _record_shared_micro(ticker, live_price, price_source, observed)
+    st.session_state.micro_ticker = ticker
+    st.session_state.micro_price_source = price_source
+    st.session_state.micro_prices = _shared_micro_snapshot(ticker, price_source)
 
 
 def micro_reading():
