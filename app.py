@@ -4341,21 +4341,6 @@ elif page == "settings":
     render_history_page()
 else:
     st.html(_ALPHA_STABLE_PANEL, unsafe_allow_javascript=True)
-    # Compact only the gap between timeframe controls and the chart host.
-    # No signal logic, calculations, or chart controls are modified.
-    st.markdown("""
-    <style>
-    div[data-testid="stVerticalBlock"] > div:has(#alpha-chart-stable-host) {
-        margin-top: -12px !important;
-    }
-    div[data-testid="stVerticalBlock"] > div:has(.stRadio) {
-        margin-bottom: -8px !important;
-    }
-    div[data-testid="stVerticalBlock"] {
-        gap: 0.20rem !important;
-    }
-    </style>
-    """, unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
     # Initial srcdoc contains the complete original chart markup and controls.
