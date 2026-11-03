@@ -2588,49 +2588,66 @@ def micro_reading():
 
 
 def closing_reader(sig, seconds_left, micro):
-    """Lectura INDEPENDIENTE del cierre; nunca consulta la señal UP/DOWN.
+    """Lector independiente basado en distancia, tiempo y volatilidad observada.
 
-    El porcentaje es un índice heurístico de apoyo (no probabilidad calibrada).
-    Combina posición frente al target, tiempo, volatilidad y micro-movimiento.
+    El porcentaje es un índice de apoyo NO calibrado, no una probabilidad.
+    No lee candidate, round_signal ni up_probability del cerebro principal.
     """
     price = _plan_number(sig.get("price"))
     distance = _plan_number(sig.get("distance"))
     atr = _plan_number(sig.get("atr"))
-    if seconds_left is not None and seconds_left <= 0:
-        direction, percent, headline = None, 50, "RONDA TERMINADA · RESULTADO PENDIENTE"
+    remaining = _plan_number(seconds_left)
+    direction = None
+    percent = 50
+    headline = "REUNIENDO DATOS"
+    note = "Falta precio, target o tiempo para evaluar el cierre."
+    if remaining is not None and remaining <= 0:
+        headline = "RONDA TERMINADA · RESULTADO PENDIENTE"
         note = "Esperando el resultado oficial de Kalshi."
-    elif price is None or distance is None or seconds_left is None:
-        direction, percent, headline = None, 50, "REUNIENDO DATOS"
-        note = "Falta precio, target o tiempo para evaluar el cierre."
-    else:
-        remaining = max(1.0, float(seconds_left))
-        # Escala aproximada de movimiento: ATR de 1m y tiempo restante.
-        # No se interpreta como una distribución estadística calibrada.
-        base_atr = atr if atr is not None and atr > 0 else max(price * 0.0005, 1.0)
-        expected_move = max(base_atr * math.sqrt(remaining / 60.0), 1.0)
-        distance_strength = float(np.clip(distance / expected_move, -3.0, 3.0))
-
-        # El impulso micro tiene influencia limitada; no anula una distancia amplia.
-        micro_strength = 0.0
-        if micro.get("ready"):
-            slope = _plan_number(micro.get("slope")) or 0.0
-            change_10s = _plan_number(micro.get("change_10s")) or 0.0
-            change_30s = _plan_number(micro.get("change_30s")) or 0.0
-            micro_strength = float(np.clip(
-                0.45 * (slope * 10.0 / expected_move)
-                + 0.35 * (change_10s / expected_move)
-                + 0.20 * (change_30s / expected_move), -0.8, 0.8
-            ))
-        combined = distance_strength + micro_strength
-        if abs(combined) < 0.12:
-            direction, percent, headline = None, 50, "CIERRE DISPUTADO"
+    elif price is not None and distance is not None and remaining is not None:
+        remaining = max(1.0, remaining)
+        # Estimar desplazamiento por segundo con diferencias de la cinta compartida.
+        # Usar datos frescos; saltos de sesión no cuentan como movimiento de mercado.
+        tape = list(st.session_state.get("micro_prices", []))
+        now = time.time()
+        tape = [v for v in tape if now - v["t"] <= 65]
+        increments = []
+        for prev, cur in zip(tape, tape[1:]):
+            dt = cur["t"] - prev["t"]
+            if 0.8 <= dt <= 6.0:
+                increments.append((cur["p"] - prev["p"]) / math.sqrt(dt))
+        observed_sigma = float(np.std(increments, ddof=1)) if len(increments) >= 8 else None
+        # Respaldo con ATR de 1m: evitar falsa certeza si faltan ticks o la
+        # volatilidad reciente parece artificialmente baja.
+        atr_sigma = (atr / math.sqrt(60.0)) if atr is not None and atr > 0 else price * 0.0005 / math.sqrt(60.0)
+        if observed_sigma is None:
+            sigma = max(atr_sigma, 0.01)
+            source = "volatilidad estimada de velas"
         else:
-            direction = "UP" if combined > 0 else "DOWN"
-            percent = int(round(50 + 49 * math.tanh(0.85 * abs(combined))))
+            sigma = max(observed_sigma, atr_sigma * 0.5, 0.01)
+            source = "volatilidad reciente"
+        expected_move = max(sigma * math.sqrt(remaining), 1.0)
+        # El movimiento actual solo influye parcialmente y nunca garantiza el cierre.
+        drift = 0.0
+        if micro.get("ready"):
+            c10 = _plan_number(micro.get("change_10s"))
+            c30 = _plan_number(micro.get("change_30s"))
+            if c10 is not None and c30 is not None:
+                velocity = 0.65 * (c10 / 10.0) + 0.35 * (c30 / 30.0)
+                drift = float(np.clip(velocity * remaining * 0.25, -expected_move, expected_move))
+        adjusted = distance + drift
+        z = float(np.clip(adjusted / expected_move, -5.0, 5.0))
+        if abs(z) < 0.10:
+            headline = "CIERRE DISPUTADO"
+        else:
+            direction = "UP" if z > 0 else "DOWN"
+            # Escala orientativa: NO representa una probabilidad calibrada.
+            percent = int(round(50 + 49 * math.erf(abs(z) / math.sqrt(2.0))))
             percent = max(51, min(99, percent))
             headline = "SEÑAL DE CIERRE " + direction
-        note = ("Lectura independiente: distancia al target, tiempo, volatilidad"
-                + (" y movimiento reciente." if micro.get("ready") else ". Reuniendo movimiento reciente."))
+        note = "Lectura independiente: target, tiempo, " + source + " y velocidad reciente."
+        if observed_sigma is None:
+            note += " Reuniendo historial de segundos."
     color = "#00dfb5" if direction == "UP" else "#e64b4b" if direction == "DOWN" else "#38bdf8"
     return {"percent": percent, "headline": headline, "note": note,
             "micro": "", "direction": direction, "color": color,
