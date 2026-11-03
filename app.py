@@ -2595,7 +2595,7 @@ def closing_reader(sig, seconds_left, micro):
         # Escala aproximada de movimiento: ATR de 1m y tiempo restante.
         # No se interpreta como una distribución estadística calibrada.
         base_atr = atr if atr is not None and atr > 0 else max(price * 0.0005, 1.0)
-        expected_move = max(base_atr * math.sqrt(max(remaining, 60.0) / 60.0), 1.0)
+        expected_move = max(base_atr * math.sqrt(remaining / 60.0), 1.0)
         distance_strength = float(np.clip(distance / expected_move, -3.0, 3.0))
 
         # El impulso micro tiene influencia limitada; no anula una distancia amplia.
@@ -2614,8 +2614,8 @@ def closing_reader(sig, seconds_left, micro):
             direction, percent, headline = None, 50, "CIERRE DISPUTADO"
         else:
             direction = "UP" if combined > 0 else "DOWN"
-            percent = int(round(50 + 45 * (1 - math.exp(-abs(combined)))))
-            percent = max(51, min(95, percent))
+            percent = int(round(50 + 49 * math.tanh(0.85 * abs(combined))))
+            percent = max(51, min(99, percent))
             headline = "SEÑAL DE CIERRE " + direction
         note = ("Lectura independiente: distancia al target, tiempo, volatilidad"
                 + (" y movimiento reciente." if micro.get("ready") else ". Reuniendo movimiento reciente."))
