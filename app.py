@@ -1969,7 +1969,7 @@ def _entry_route_checks(sig, seconds_left):
     sides = {}
     for side in ("UP", "DOWN"):
         checks = list(decisions.get(side, []))
-        sides[side] = [{"name": "GEMINI + KALSHI", "checks": checks,
+        sides[side] = [{"name": "ALPHA EDGE", "checks": checks,
                         "met": sum(bool(ok) for _, ok in checks),
                         "total": len(checks),
                         "complete": bool(checks) and all(bool(ok) for _, ok in checks)}]
@@ -2091,9 +2091,9 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     diagnostics = {}
     for side in ("UP", "DOWN"):
         checks = checks_by_side[side]
-        diagnostics[side] = {"route": "GEMINI + KALSHI", "missing": [label for label, ok in checks if not ok],
+        diagnostics[side] = {"route": "ALPHA EDGE", "missing": [label for label, ok in checks if not ok],
                              "met": sum(bool(ok) for _, ok in checks), "total": len(checks)}
-    quality = "GEMINI + KALSHI" if candidate else "SIN CONFIRMACIÓN"
+    quality = "ALPHA EDGE" if candidate else "SIN CONFIRMACIÓN"
     up_probability = float(np.clip(50 + score * 7, 5, 95))
     flow_side = (whale or {}).get("flow_direction") if isinstance(whale, dict) else None
     flow_context = {"direction": flow_side, "valid": False}
@@ -2589,7 +2589,7 @@ def closing_reader(sig, round_signal, seconds_left, micro):
                sig.get("down_probability", 50) if direction == "DOWN" else 50)
     color = "#00dfb5" if direction == "UP" else "#e64b4b" if direction == "DOWN" else "#38bdf8"
     return {"percent": int(percent), "headline": headline,
-            "note": "Lectura del motor Gemini-Kalshi; no es una probabilidad validada.",
+            "note": "Señal del motor ALPHA EDGE; el porcentaje indica apoyo interno, no probabilidad de acierto.",
             "micro": "", "direction": direction, "color": color,
             "border": "rgba(56,189,248,.45)",
             "bg": "linear-gradient(135deg,rgba(11,64,91,.30),rgba(9,23,34,.72))"}
