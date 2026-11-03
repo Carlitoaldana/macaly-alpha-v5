@@ -920,6 +920,51 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
   .block-container,[data-testid="stMainBlockContainer"] { width:100% !important; max-width:440px !important; margin-inline:auto !important; padding:5px 9px 25px !important; }
 }
 
+
+/* ALPHA EDGE · refinamiento responsive de app 22(1) · SOLO CSS */
+/* Señal nítida: reducir halo que ocultaba la flecha y las letras. */
+.refapp .rhero{filter:none!important}
+.refapp .rsignal{
+  filter:drop-shadow(0 0 3px var(--accent))!important;
+  text-shadow:0 1px 0 #05261f,0 0 5px var(--glow)!important;
+  -webkit-text-stroke:1px rgba(225,255,245,.55)!important;
+}
+.refapp .cssarrow{
+  box-shadow:0 0 5px var(--glow),inset 0 0 2px rgba(255,255,255,.42)!important;
+}
+.refapp .cssarrow:before{filter:drop-shadow(0 0 3px var(--glow))!important}
+/* Toro: disolver los límites de la ilustración sobre el fondo, sin moverla. */
+.refapp .rhero:before{
+  -webkit-mask-image:radial-gradient(ellipse 83% 82% at 55% 49%,#000 46%,transparent 100%)!important;
+  mask-image:radial-gradient(ellipse 83% 82% at 55% 49%,#000 46%,transparent 100%)!important;
+}
+/* Lector: conservar círculo y dirección, sin bloque vertical vacío. */
+.refapp .readerbody{
+  min-height:0!important;
+  margin:2px 0 6px!important;
+  align-items:center!important;
+}
+.refapp .readerbody strong{line-height:1.08!important}
+.refapp .reader{padding-bottom:11px!important}
+.refapp .finalclose{margin-top:4px!important}
+/* La tablet conserva ancho completo; el teléfono mantiene sus dos columnas. */
+@media(max-width:699px){
+  .refapp .rhero{height:156px!important;min-height:156px!important}
+  .refapp .rsignal{font-size:clamp(62px,11vw,80px)!important}
+  .refapp .readerbody{grid-template-columns:minmax(0,1fr) 100px!important}
+  .refapp .rring{width:96px!important;height:96px!important}
+  .refapp .rring:after{width:73px!important;height:73px!important}
+  .refapp .rring span{font-size:23px!important}
+  .refapp .finalgrid{grid-template-columns:1fr 1fr!important;gap:6px!important}
+  .refapp .finalcard.motion{grid-column:1 / -1!important}
+  .refapp .finalanalysis{grid-template-columns:minmax(0,1fr) 92px!important}
+}
+@media(min-width:700px){
+  .refapp .readerbody{grid-template-columns:minmax(0,1fr) 130px!important}
+  .refapp .rring{width:122px!important;height:122px!important}
+  .refapp .rring:after{width:92px!important;height:92px!important}
+}
+
 </style>
 """,
     unsafe_allow_html=True,
