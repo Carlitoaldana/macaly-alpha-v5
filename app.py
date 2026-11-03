@@ -3812,6 +3812,38 @@ def live_dashboard():
         unsafe_allow_javascript=True,
     )
 
+    # Compactación responsive del bloque de temporalidades; solo presentación.
+    st.markdown("""
+    <style>
+    .st-key-chart_timeframe {
+        margin-block: 0 !important;
+        padding-block: 0 !important;
+    }
+    .st-key-chart_timeframe [data-testid="stRadio"] {
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    .st-key-chart_timeframe [role="radiogroup"] {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        align-items: center !important;
+        gap: 5px 7px !important;
+        padding: 3px 0 !important;
+        margin: 0 !important;
+        min-height: 0 !important;
+    }
+    .st-key-chart_timeframe label {
+        margin: 0 !important;
+        padding: 5px 9px !important;
+        min-height: 30px !important;
+    }
+    .st-key-chart_timeframe [data-testid="stWidgetLabel"] {display:none !important;}
+    @media (max-width: 600px) {
+        .st-key-chart_timeframe [role="radiogroup"] {gap:4px 5px !important;}
+        .st-key-chart_timeframe label {padding:4px 7px !important;min-height:28px !important;}
+    }
+    </style>
+    """, unsafe_allow_html=True)
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
         chart_timeframe = st.radio(
