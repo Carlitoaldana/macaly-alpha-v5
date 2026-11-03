@@ -2310,8 +2310,8 @@ def _reset_withdrawal(state):
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
     """Confirma solo el candidato Gemini-Kalshi; no recalcula su dirección.
 
-    Una decisión por ronda: tras confirmar UP/DOWN no se cambia ni se
-    retira durante esa misma ronda. Una ronda nueva inicia esperando.
+    La primera señal se conserva para historial; la señal activa puede
+    cambiar tras dos lecturas contrarias confirmadas. Nueva ronda espera.
     """
     close_time = (market or {}).get("close_time")
     if close_time:
@@ -2327,10 +2327,14 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_direction"] = None
         state["pending_count"] = 0
         return
-    if state.get("first_direction") in ("UP", "DOWN"):
-        state["active_direction"] = state["first_direction"]
+    # La primera señal queda registrada como historial, NO como candado.
+    # Una dirección contraria debe superar la misma confirmación de lecturas.
+    # Mientras se confirma, se mantiene la última señal validada.
+    if state.get("active_direction") == candidate and candidate in ("UP", "DOWN"):
         state["pending_direction"] = None
         state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
         return
     if not signal or signal.get("data_valid") is False or candidate not in ("UP", "DOWN"):
         state["pending_direction"] = None
@@ -2358,11 +2362,14 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if state.get("pending_count", 0) >= SIGNAL_CONFIRM_READINGS:
         state["active_direction"] = candidate
         state["active_since"] = now
-        state["first_direction"] = candidate
-        state["first_signal_time"] = now
-        state["first_signal_seconds"] = seconds_left
-        state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                       else get_no_ask(market))
+        # Conservar la primera señal para historial y límite de una entrada.
+        # Los cambios confirmados posteriores actualizan solo active_direction.
+        if state.get("first_direction") not in ("UP", "DOWN"):
+            state["first_direction"] = candidate
+            state["first_signal_time"] = now
+            state["first_signal_seconds"] = seconds_left
+            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                           else get_no_ask(market))
         state["pending_direction"] = None
         state["pending_count"] = 0
         state["pending_since"] = None
