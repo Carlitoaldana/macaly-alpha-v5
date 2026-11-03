@@ -545,7 +545,7 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .bigicon{font-size:31px;font-weight:900;line-height:1}.btcicon{color:#ff9d00}.targeticon{color:#8acfc3}
 .rlabel{font-size:8px;color:#b9c9dc;letter-spacing:.4px}.rvalue{font-size:19px;font-weight:900;line-height:1.05;margin-top:2px}.rdelta{font-size:9px;font-weight:900;margin-top:2px}
 .green{color:#00dfb5!important}.red{color:#e64b4b!important}
-.bars{display:flex;align-items:flex-end;gap:3px;width:31px;height:30px}.bars b{width:7px;background:var(--accent);border-radius:2px}.bars b:nth-child(1){height:11px}.bars b:nth-child(2){height:20px}.bars b:nth-child(3){height:28px}
+.bars{display:flex;align-items:flex-end;gap:3px;width:31px;height:30px}.bars b{width:7px;background:var(--accent);border-radius:2px;transition:height .35s ease,background .35s ease}.bars b:nth-child(1){height:11px}.bars b:nth-child(2){height:20px}.bars b:nth-child(3){height:28px}
 .clock{font-size:30px;color:#8acfc3}.timecontent{flex:1}.timebar{height:6px;background:#16324a;border-radius:5px;margin-top:5px;overflow:hidden}.timebar b{display:block;height:100%;background:var(--accent);border-radius:5px}
 .probs{margin-top:6px;padding:8px}.pbar{display:flex;gap:4px;margin-top:5px}.pup,.pdown{height:21px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;border-radius:4px}.pup{background:linear-gradient(90deg,#10d76d,#54ed91);color:#06331d}.pdown{background:linear-gradient(90deg,#ff3548,#ff6472);color:#3d0710}.pleg{display:flex;justify-content:space-between;font-size:10px;font-weight:900;margin-top:6px}
 .reader{margin-top:6px;border:1.5px solid var(--rb);background:var(--rbg);border-radius:9px;padding:9px 10px}
@@ -3418,6 +3418,14 @@ def live_dashboard():
         distance_text = f"${abs(distance):,.0f}"
         distance_sub = f"{abs(distance_pct):.2f}%"
         distance_color = "#00dfb5" if distance > 0 else "#e64b4b" if distance < 0 else "#94a3b8"
+    # Indicador visual independiente: altura de las tres barras según
+    # la distancia ABSOLUTA al target, con escala de referencia de $150.
+    # No modifica señales, lector de cierre ni porcentajes.
+    bar_level = min(1.0, max(0.0, abs(distance) / 150.0)) if distance is not None else 0.0
+    bar_heights = [round(10 + bar_level * extra) for extra in (12, 26, 44)]
+    # El diseño usa una altura máxima de 30px; se escalan proporcionalmente.
+    bar_heights = [round(h * 28 / 54, 1) for h in bar_heights]
+    bars_html = ''.join(f'<b style="height:{h}px"></b>' for h in bar_heights)
     first_signal = (state.get("first_direction") if state else None) or "--"
     first_time = "--"
     if state and state.get("first_signal_time"):
@@ -3529,7 +3537,7 @@ def live_dashboard():
       <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="bars" style="--accent:{distance_color}"><b></b><b></b><b></b></div>
+      <div class="bars" style="--accent:{distance_color}">{bars_html}</div>
       <div><div class="rlabel">DISTANCIA AL TARGET</div><div class="rvalue" style="color:{distance_color}">{distance_text}</div>
       <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
     </div>
