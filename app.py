@@ -21,7 +21,7 @@ from email.utils import parsedate_to_datetime
 st.set_page_config(
     page_title="BTC Signal v4.6.1",
     page_icon="⚡",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed",
 )
 
@@ -881,6 +881,44 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .refapp .finalcard,.refapp .motionrow,.refapp .analysisrow>div{border-color:#4c9ac7!important;border-radius:12px!important}
 .refapp .tech{margin-top:12px!important;padding:11px!important}
 @media(max-width:380px){.refapp .rhero{height:147px!important;min-height:147px!important}.refapp .rsignal{font-size:67px!important}.refapp .rvalue{font-size:19px!important}.refapp .readerbody strong{font-size:18px!important}.refapp .readerbody{grid-template-columns:minmax(0,1fr) 92px!important}.refapp .rring{width:88px!important;height:88px!important}.refapp .rring:after{width:65px!important;height:65px!important}.refapp .rring span{font-size:23px!important}}
+
+/* iPad / tablet responsive layout: presentation only. */
+@media (min-width: 700px) {
+  .block-container,
+  [data-testid="stMainBlockContainer"] {
+    width: min(94vw, 1050px) !important;
+    max-width: 1050px !important;
+    padding: 12px 18px 35px !important;
+    margin-inline: auto !important;
+  }
+  .refapp { width:100% !important; max-width:none !important; }
+  .refapp .rhead { height:105px !important; padding:14px 20px 0 !important; }
+  .refapp .rtitle { font-size:clamp(25px,3vw,36px) !important; }
+  .refapp .rhero { height:205px !important; min-height:205px !important; }
+  .refapp .rhero:before { width:31% !important; height:178px !important; right:15px !important; }
+  .refapp .rsignal { font-size:clamp(92px,12vw,142px) !important; }
+  .refapp .rhero.waiting .rsignal { font-size:clamp(34px,5vw,57px) !important; }
+  .refapp .rconf { font-size:16px !important; padding:10px 25px !important; }
+  .refapp .rgrid { gap:14px !important; margin-top:15px !important; }
+  .refapp .keycard { height:112px !important; padding:18px 22px !important; }
+  .refapp .rlabel { font-size:13px !important; }
+  .refapp .rvalue { font-size:clamp(27px,3.7vw,38px) !important; }
+  .refapp .rdelta { font-size:14px !important; }
+  .refapp .probs { padding:19px 22px !important; }
+  .refapp .pup,.refapp .pdown { height:38px !important; font-size:17px !important; }
+  .refapp .reader { padding:20px 24px !important; }
+  .refapp .readerhead { font-size:20px !important; }
+  .refapp .readerbody { min-height:130px !important; grid-template-columns:minmax(0,1fr) 145px !important; }
+  .refapp .readerbody strong { font-size:clamp(27px,3.4vw,38px) !important; }
+  .refapp .rring { width:132px !important; height:132px !important; }
+  .refapp .rring:after { width:100px !important; height:100px !important; }
+  .refapp .rring span { font-size:34px !important; }
+  .refapp .tech { padding:16px !important; }
+  .refapp .techrow b { font-size:15px !important; }
+}
+@media (max-width: 699px) {
+  .block-container,[data-testid="stMainBlockContainer"] { width:100% !important; max-width:440px !important; margin-inline:auto !important; padding:5px 9px 25px !important; }
+}
 
 </style>
 """,
