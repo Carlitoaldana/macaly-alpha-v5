@@ -984,6 +984,43 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 
 .refapp.dir-up .rhero .rconf{visibility:visible!important;position:absolute!important;bottom:0!important;left:25%!important;right:25%!important;margin:0!important;font-size:10px!important;padding:2px!important;background:#06131b!important;opacity:.97!important}
 
+
+/* SINGLE LIVE SIGNAL: hide the baked-in UP in the central artwork only.
+   Keep the original header, candles and bull as the decorative layer. */
+.refapp .rhero { isolation:isolate!important; overflow:visible!important; }
+.refapp .rhero::before {
+ content:""!important;display:block!important;position:absolute!important;
+ left:19%!important;right:20%!important;top:-2px!important;bottom:-3px!important;
+ width:auto!important;height:auto!important;inset:auto!important;
+ background:radial-gradient(ellipse at 50% 46%,#061b2b 0%,#061b2b 53%,rgba(4,23,37,.97) 72%,rgba(4,23,37,.05) 100%)!important;
+ opacity:1!important;z-index:0!important;pointer-events:none!important;
+}
+.refapp .rhero::after {display:none!important;content:none!important}
+.refapp.dir-up .rhero .rsignal,
+.refapp.dir-down .rhero .rsignal,
+.refapp.dir-wait .rhero .rsignal {
+ visibility:visible!important;display:flex!important;align-items:center!important;
+ justify-content:center!important;position:relative!important;z-index:3!important;
+ font-size:clamp(48px,12vw,83px)!important;line-height:1!important;
+ letter-spacing:-3px!important;transform:none!important;
+ text-shadow:0 0 8px var(--accent),0 0 20px var(--glow)!important;
+}
+.refapp .rhero .rconf,
+.refapp.dir-up .rhero .rconf,
+.refapp.dir-down .rhero .rconf,
+.refapp.dir-wait .rhero .rconf {
+ visibility:visible!important;position:relative!important;z-index:4!important;
+ inset:auto!important;margin:8px auto 0!important;padding:7px 12px!important;
+ width:max-content!important;max-width:85%!important;font-size:clamp(10px,2.7vw,14px)!important;
+ border:2px solid #e8ba66!important;border-radius:8px!important;
+ background:linear-gradient(95deg,#07111c,#17202b,#07111c)!important;
+ box-shadow:0 0 11px #d9a94d66!important;
+}
+.refapp .rhero {justify-content:center!important;gap:0!important}
+@media(max-width:420px){
+ .refapp .rhero::before{left:16%!important;right:14%!important}
+ .refapp .rhero .rsignal{font-size:clamp(43px,11vw,62px)!important}
+}
 </style>
 """,
     unsafe_allow_html=True,
