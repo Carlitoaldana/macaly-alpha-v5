@@ -4656,6 +4656,34 @@ else:
 @media(max-width:430px){.refapp .reader{padding:12px 10px!important}.refapp .readerbody{gap:6px!important}.refapp .finalcard{padding:9px 6px!important}}
 /* FIN ETAPA LECTOR PREMIUM */
 
+/* REFERENCIA 709px: reconstruccion compacta de proporciones mobile */
+@media(max-width:600px){
+.refapp .rgrid{gap:5px!important;margin-top:4px!important;grid-template-columns:repeat(2,minmax(0,1fr))!important}
+.refapp .rgrid .rcard.keycard{height:49px!important;min-height:49px!important;max-height:49px!important;padding:3px 7px!important;gap:5px!important;border-radius:10px!important;align-items:center!important}
+.refapp .rgrid .keycard .rlabel{font-size:9px!important;line-height:1!important;letter-spacing:0!important}
+.refapp .rgrid .keycard .rvalue{font-size:18px!important;line-height:1!important;letter-spacing:-.4px!important}
+.refapp .rgrid .keycard .rdelta{font-size:9px!important;margin-top:1px!important;line-height:1!important}
+.refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{font-size:23px!important;line-height:1!important}
+.refapp .rgrid .keycard .bigicon svg,.refapp .rgrid .keycard .clock svg{width:25px!important;height:25px!important}
+.refapp .rgrid .keycard .timebar{height:5px!important;margin-top:3px!important}
+.refapp .reader{padding:6px 7px!important;margin-top:5px!important;border-radius:16px!important}
+.refapp .readerhead{font-size:13px!important;line-height:1.1!important}
+.refapp .readerhead em{font-size:9px!important;padding:3px 8px!important}
+.refapp .readerbody{grid-template-columns:minmax(0,1fr) 92px!important;min-height:80px!important;max-height:88px!important;gap:5px!important;margin:4px 0 6px!important}
+.refapp .readerbody strong{font-size:18px!important;line-height:1.05!important}
+.refapp .rring{width:84px!important;height:84px!important;max-width:84px!important;max-height:84px!important}
+.refapp .rring:after{width:62px!important;height:62px!important}
+.refapp .rring span{font-size:22px!important}
+.refapp .finalgrid{gap:5px!important}
+.refapp .finalcard{padding:5px 5px!important;border-radius:9px!important}
+.refapp .finaltitle{font-size:10px!important;line-height:1.1!important}
+.refapp .motionrow{margin-top:3px!important;gap:2px!important}
+.refapp .motionrow small{font-size:10px!important}
+.refapp .motionrow b{font-size:13px!important}
+.refapp .finalclose{padding:0!important}
+}
+
+
 /* FINAL COMPACT REFERENCE: visual-only layout; dynamic values untouched */
 .refapp .rgrid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:6px!important;margin-top:5px!important}
 .refapp .rgrid .rcard.keycard{box-sizing:border-box!important;height:clamp(68px,19vw,86px)!important;min-height:0!important;padding:6px 8px!important;gap:5px!important;border-radius:13px!important}
