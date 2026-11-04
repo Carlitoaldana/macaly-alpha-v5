@@ -3760,7 +3760,7 @@ def live_dashboard():
     motion_labels = {}
     for window in (5, 10, 30):
         value = micro.get(f"change_{window}s")
-        motion_labels[window] = "—" if value is None else f"{'↑' if value > 0 else '↓' if value < 0 else '→'}<br>{value:+.0f}"
+        motion_labels[window] = "—" if value is None else f"{'↗' if value > 0 else '↘' if value < 0 else '→'}<br>{value:+.0f}"
     speed_ready = micro.get("change_10s") is not None
     speed10 = c10 / 10.0
     speed_word = "SUBIENDO" if speed10 > 0.15 else "BAJANDO" if speed10 < -0.15 else "ESTABLE"
@@ -3795,6 +3795,34 @@ def live_dashboard():
         return f'<span class="jcx-bar" style="height:{height:.0f}%;background:{color}"></span>'
 
     micro_chart = ''.join(_micro_bar(w) for w in (30, 10, 5))
+
+    # Mini gráfica de velas REALES: reutiliza OHLC del mismo dataframe Coinbase.
+    # Si no hay suficientes velas, muestra espera; nunca inventa precios.
+    def _reader_candles_svg(frame):
+        if frame is None or len(frame) < 3:
+            return '<div class="jcx-candle-empty">ESPERANDO VELAS</div>'
+        d = frame.sort_values("time").tail(13).copy()
+        vals = list(d["low"].astype(float)) + list(d["high"].astype(float))
+        lo, hi = min(vals), max(vals)
+        pad = max((hi-lo)*.16, 2.0)
+        lo, hi = lo-pad, hi+pad
+        W,H=190,100
+        top,bottom=5,94
+        def yy(v): return top+(hi-float(v))/(hi-lo)*(bottom-top)
+        step=W/len(d); body=max(4,min(8,step*.58)); parts=[]
+        for k in range(3):
+            gy=top+(bottom-top)*k/2
+            parts.append(f'<line x1="0" y1="{gy:.1f}" x2="{W}" y2="{gy:.1f}" stroke="#17445a" stroke-width=".8"/>')
+        for i,row in enumerate(d.itertuples()):
+            x=(i+.5)*step
+            o,c,h,l=map(float,(row.open,row.close,row.high,row.low))
+            col="#00e7ad" if c>=o else "#ed5263"
+            parts.append(f'<line x1="{x:.1f}" y1="{yy(h):.1f}" x2="{x:.1f}" y2="{yy(l):.1f}" stroke="{col}" stroke-width="1.4"/>')
+            by=min(yy(o),yy(c)); bh=max(2,abs(yy(o)-yy(c)))
+            parts.append(f'<rect x="{x-body/2:.1f}" y="{by:.1f}" width="{body:.1f}" height="{bh:.1f}" rx=".7" fill="{col}"/>')
+        return f'<svg class="jcx-candles" viewBox="0 0 {W} {H}" preserveAspectRatio="none" aria-label="Velas reales BTC/USD">{"".join(parts)}</svg>'
+
+    reader_candles = _reader_candles_svg(btc_df)
     final_panel = f'''<div class="jcx-detail">
       <div class="jcx-motion"><div class="jcx-motion-title">MOVIMIENTO ÚLTIMOS SEGUNDOS</div>
         <div class="jcx-motion-row">
@@ -3868,11 +3896,11 @@ def live_dashboard():
   </section>
 
   <section class="reader jcx-reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="jcx-head"><span>◎ LECTOR DE CIERRE</span><em>● ACTIVO</em></div>
+    <div class="jcx-head"><span><b class="jcx-target-icon">◎</b> LECTOR DE CIERRE</span><em>● ACTIVO</em></div>
     <div class="jcx-top">
-      <div class="jcx-signal"><small>SEÑAL DE CIERRE</small><div class="jcx-direction"><span class="jcx-chevrons" style="color:{reader['color']}">{"⇈" if reader.get("direction") == "UP" else "⇊" if reader.get("direction") == "DOWN" else "·"}</span><strong style="color:{reader['color']}">{reader['direction'] if reader.get('direction') in ('UP','DOWN') else 'ESPERANDO'}</strong></div></div>
+      <div class="jcx-signal"><small>SEÑAL DE CIERRE</small><div class="jcx-direction"><span class="jcx-chevrons" style="color:{reader['color']}">{"⌃⌃" if reader.get("direction") == "UP" else "⌄⌄" if reader.get("direction") == "DOWN" else "·"}</span><strong style="color:{reader['color']}">{reader['direction'] if reader.get('direction') in ('UP','DOWN') else 'ESPERANDO'}</strong></div></div>
       <div class="jcx-ring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div>
-      <div class="jcx-market-bars" title="Cambios medidos en 30, 10 y 5 segundos"><div class="jcx-bars">{micro_chart}</div><small>30s · 10s · 5s</small></div>
+      <div class="jcx-market-bars" title="Velas reales BTC/USD de Coinbase">{reader_candles}</div>
     </div>
     {final_panel}
   </section>
@@ -4814,6 +4842,26 @@ else:
 .refapp .jcx-position b{font-size:clamp(14px,4vw,19px)!important;white-space:nowrap!important}
 .refapp .jcx-support b{font-size:26px!important;text-shadow:0 0 9px currentColor}
 @media(max-width:390px){.refapp .jcx-top{grid-template-columns:minmax(0,1fr) 75px 48px!important}.refapp .jcx-ring{width:74px!important;height:74px!important}.refapp .jcx-ring span{font-size:18px!important}.refapp .jcx-position b{font-size:13px!important}}
+
+/* Fidelity pass: reference-like candlestick panel and compact trading details */
+.refapp .jcx-head{font-size:16px!important;font-style:italic!important;letter-spacing:.2px!important}
+.refapp .jcx-target-icon{display:inline-block;color:#ffc34e;font-size:23px;font-style:normal;text-shadow:0 0 8px #ffc34e;vertical-align:-2px;margin-right:3px}
+.refapp .jcx-top{grid-template-columns:minmax(0,1.12fr) 92px minmax(0,.78fr)!important;gap:7px!important;align-items:center!important}
+.refapp .jcx-signal{min-height:78px!important;border-radius:11px!important}
+.refapp .jcx-chevrons{font-size:26px!important;letter-spacing:-7px!important;margin-right:6px!important;transform:scaleX(1.12);font-weight:1000!important}
+.refapp .jcx-ring{width:94px!important;height:94px!important;background:conic-gradient(var(--rr) calc(var(--p)*1%),#19364a 0)!important;box-shadow:0 0 10px var(--rr),0 0 22px color-mix(in srgb,var(--rr) 55%,transparent)!important}
+.refapp .jcx-ring:before{inset:12px!important;background:#031725!important}
+.refapp .jcx-ring span{font-size:24px!important}
+.refapp .jcx-market-bars{height:100px!important;display:flex!important;align-items:center!important;justify-content:center!important;padding:0 1px!important;border-bottom:1px solid #2d829c!important;overflow:hidden!important}
+.refapp .jcx-candles{display:block!important;width:100%!important;height:91px!important;overflow:visible!important;filter:drop-shadow(0 0 2px #00cfa5)!important}
+.refapp .jcx-candle-empty{font-size:7px;color:#8da9ba;text-align:center}
+.refapp .jcx-motion-row>div{min-height:60px!important}
+.refapp .jcx-motion-row b{font-size:14px!important;white-space:normal!important}
+.refapp .jcx-motion-row i{width:8px!important;height:20px!important;right:7px!important}
+.refapp .jcx-tile-icon{color:#ffc34e!important;text-shadow:0 0 6px #e7a94b}
+.refapp .jcx-foot .jcx-position{grid-template-columns:30px 1fr!important}
+.refapp .jcx-position b{font-size:clamp(14px,4vw,19px)!important;white-space:nowrap!important}
+@media(max-width:390px){.refapp .jcx-top{grid-template-columns:minmax(0,1fr) 78px minmax(0,.72fr)!important;gap:5px!important}.refapp .jcx-ring{width:76px!important;height:76px!important}.refapp .jcx-ring span{font-size:19px!important}.refapp .jcx-candles{height:76px!important}.refapp .jcx-market-bars{height:84px!important}.refapp .jcx-chevrons{font-size:22px!important}}
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
