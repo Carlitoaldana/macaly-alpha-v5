@@ -860,7 +860,7 @@ section.main .block-container::before {
 @media (min-width: 601px) and (max-width: 1199px) {
   [data-testid="stMain"] .block-container::before,
   section.main .block-container::before {
-    width: min(100%, 430px) !important;
+    width: min(94%, 680px) !important;
     left: 50% !important;
     transform: translateX(-50%) !important;
   }
