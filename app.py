@@ -855,6 +855,16 @@ section.main .block-container::before {
   -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 72%, transparent 98%) !important;
   mask-image: linear-gradient(to bottom, #000 0%, #000 72%, transparent 98%) !important;
 }
+/* Tablet únicamente: conservar escala de la ilustración superior.
+   El móvil (<=600px) no recibe ningún cambio. */
+@media (min-width: 601px) and (max-width: 1199px) {
+  [data-testid="stMain"] .block-container::before,
+  section.main .block-container::before {
+    width: min(100%, 430px) !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+  }
+}
 [data-testid="stMain"] .block-container > *,
 section.main .block-container > * {
   position: relative !important;
