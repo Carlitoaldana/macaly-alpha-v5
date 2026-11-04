@@ -3889,8 +3889,8 @@ def live_dashboard():
     # Cinta live de segundos para el Lector de Cierre.
     update_micro_tape(ticker, live_btc_price, source)
     micro = micro_reading()
-    # Lector de cierre: solo se activa durante los últimos 90 segundos.
-    # La cinta de precios sigue reuniendo muestras antes de su activación.
+    # El panel permanece visible; solo la predicción se activa en los últimos 90 segundos.
+    # La cinta de precios y las métricas continúan actualizándose durante toda la ronda.
     reader_active = seconds_left is not None and 0 < seconds_left <= 90
     reader = closing_reader(sig, round_signal, seconds_left, micro) if reader_active else {
         "percent": 0, "direction": None, "headline": "",
@@ -4080,7 +4080,7 @@ def live_dashboard():
       </div>
       <div class="finalanalysis">
         <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>POSICIÓN ACTUAL</small><b>{final_status}</b></div></div>
-        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
+        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'LECTURA EN CURSO'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
       </div>
     </div>'''
 
@@ -4094,8 +4094,8 @@ def live_dashboard():
 
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>● ACTIVO</em></div>
-    <div class="jcclose-main">
+    <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>{"● ACTIVO" if reader_active else "● LEYENDO"}</em></div>
+    <div class="jcclose-main" style="{'display:flex' if reader_active else 'display:none'}">
       <div class="jcclose-signal" style="--signal:{reader['color']}">
         <span class="jcclose-double">{'❯❯' if reader.get('direction') == 'UP' else '❮❮' if reader.get('direction') == 'DOWN' else '◌'}</span>
         <strong>{reader.get('direction') or '—'}</strong>
@@ -4105,7 +4105,7 @@ def live_dashboard():
     {final_panel}
   </section>
 
-''' if reader_active else ""
+'''
 
     panel_html = f"""
 <style>
