@@ -2314,10 +2314,12 @@ def _retention_assessment(state, signal):
             support += 1
         else:
             contrary += 1
-    for name in ("mom5", "distance"):
-        value = _plan_number(signal.get(name))
-        if value is None:
-            continue
+    # La EMA y la distancia al target determinan la permanencia.
+    # El mom5, que es una lectura más lenta, ya participa en el cálculo
+    # de la candidatura; se excluye solo de la votación de retirada para
+    # evitar que una señal desfasada fuerce un retiro prematuro.
+    value = _plan_number(signal.get("distance"))
+    if value is not None:
         if value * sign > 0:
             support += 1
         elif value * sign < 0:
@@ -2349,7 +2351,7 @@ def _review_active_retention(state, signal, seconds_left, now):
         _reset_withdrawal(state)
         return
     support, contrary = _retention_assessment(state, signal)
-    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if support < 3 else None
+    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if support < 2 else None
     if contrary < 2:
         _reset_withdrawal(state)
         state["retention_warning"] = warning
@@ -2429,7 +2431,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
 
     La primera señal queda inmutable. Un cambio UP/DOWN posterior también
     necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
-    la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
+    la activa se reevalúa con EMA y distancia al target.
     """
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
@@ -4576,7 +4578,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"limited_retention_exit_plan_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"retention_ema_target_without_mom5_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
