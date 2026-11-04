@@ -3785,19 +3785,22 @@ def live_dashboard():
     final_status_color = "#00dfb5" if market_side == "UP" else "#e64b4b" if market_side == "DOWN" else "#94a3b8"
     final_distance_label = f"${abs(distance):,.0f}" if distance is not None else "—"
     final_dist_pct_label = f"{abs(distance_pct):.2f}%" if distance_pct is not None else "SIN TARGET"
-    final_panel = f'''<div class="finalclose">
-      <div class="finalgrid">
-        <div class="finalcard motion"><div class="finaltitle">MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motionrow">
-          <div class="motiontile"><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
-          <div class="motiontile"><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
-          <div class="motiontile"><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
-        </div></div>
-        <div class="finalcard distance"><div class="finaltitle">🎯 &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">{final_distance_label}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct_label}</div></div>
-        <div class="finalcard speed"><div class="finaltitle">◴ &nbsp; VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div></div>
+    final_panel = f'''<div class="jc-r2-detail">
+      <div class="jc-r2-motion">
+        <div class="jc-r2-title">MOVIMIENTO ÚLTIMOS SEGUNDOS</div>
+        <div class="jc-r2-motions">
+          <div><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
+          <div><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
+          <div><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
+        </div>
       </div>
-      <div class="finalanalysis">
-        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b style="color:{final_status_color}">{final_status}</b><span>{final_note}</span></div></div>
-        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
+      <div class="jc-r2-pair">
+        <div class="jc-r2-tile"><small>◎ DISTANCIA AL TARGET</small><b style="color:{distance_color}">{final_distance_label}</b><span>{final_dist_pct_label}</span></div>
+        <div class="jc-r2-tile"><small>◴ VELOCIDAD</small><b style="color:{speed_color}">{speed_arrow} {speed_word}</b><span>{speed_value}</span></div>
+      </div>
+      <div class="jc-r2-foot">
+        <div class="jc-r2-position"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b style="color:{final_status_color}">{final_status}</b><span>{final_note}</span></div>
+        <div class="jc-r2-support"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
       </div>
     </div>'''
 
@@ -3855,10 +3858,12 @@ def live_dashboard():
     <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
   </section>
 
-  <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div class="reader-signal-box"><small>SEÑAL DE CIERRE</small><strong style="color:{reader['color']}">{reader['headline']}</strong></div>
-    <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
+  <section class="reader jc-reader-v2" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
+    <div class="jc-r2-head"><span>⌁ LECTOR DE CIERRE</span><em>ACTIVO</em></div>
+    <div class="jc-r2-summary">
+      <div class="jc-r2-direction"><small>SEÑAL DE CIERRE</small><strong style="color:{reader['color']}">{reader['headline']}</strong></div>
+      <div class="jc-r2-gauge" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div>
+    </div>
     {final_panel}
   </section>
 
@@ -4741,6 +4746,32 @@ else:
 .refapp .probbox b{font-size:clamp(19px,5.2vw,29px)!important;line-height:1.1!important}
 .refapp .pleg{margin-top:3px!important}
 @media(max-width:430px){.refapp .reader{padding:8px 7px!important}.refapp .readerbody{min-height:88px!important;max-height:100px!important}.refapp .reader-signal-box{min-height:67px!important}.refapp .finalcard{padding:6px 5px!important}}
+
+
+/* JC READER V2 - entirely independent markup, no engine or card styling */
+.refapp .reader.jc-reader-v2{box-sizing:border-box!important;display:block!important;min-height:0!important;height:auto!important;max-height:none!important;padding:7px!important;margin:5px 0!important;border-radius:12px!important;border:1px solid #c49e56!important;background:linear-gradient(150deg,#09263b,#041421)!important;box-shadow:0 0 8px #d5a94b33!important}
+.refapp .jc-r2-head{display:flex;align-items:center;justify-content:space-between;color:#f1f5fb;font-size:11px;font-weight:900;line-height:1.1;margin:0 0 5px}
+.refapp .jc-r2-head em{font-style:normal;font-size:8px;color:#13e4ac;border:1px solid #0c9b77;border-radius:15px;padding:2px 6px}
+.refapp .jc-r2-summary{display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:7px;align-items:center;margin:0 0 6px}
+.refapp .jc-r2-direction{min-width:0;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:1px solid #276c91;border-radius:8px;background:#051b2c;padding:4px}
+.refapp .jc-r2-direction small{font-size:8px;color:#b4cbdc;font-weight:800}
+.refapp .jc-r2-direction strong{font-size:clamp(16px,4.5vw,23px);line-height:1.05;font-weight:950;text-align:center;overflow-wrap:anywhere}
+.refapp .jc-r2-gauge{position:relative;box-sizing:border-box;width:60px;height:60px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--rr) calc(var(--p)*1%),#254458 0)}
+.refapp .jc-r2-gauge:before{content:"";position:absolute;inset:7px;border-radius:50%;background:#061b2b}
+.refapp .jc-r2-gauge span{position:relative;color:#f2fbff;font-size:15px;font-weight:900}
+.refapp .jc-r2-detail{display:grid;gap:5px;min-width:0}
+.refapp .jc-r2-motion,.refapp .jc-r2-tile,.refapp .jc-r2-position,.refapp .jc-r2-support{min-width:0;background:#071d2e;border:1px solid #275e7d;border-radius:7px;padding:5px}
+.refapp .jc-r2-title{text-align:center;color:#e2f0f8;font-size:9px;font-weight:900;line-height:1.1}
+.refapp .jc-r2-motions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin-top:4px}
+.refapp .jc-r2-motions>div{text-align:center;border:1px solid #1b4e68;border-radius:5px;padding:2px;min-width:0}
+.refapp .jc-r2-motions small{display:block;font-size:9px;color:#b4cbdc}
+.refapp .jc-r2-motions b{display:block;font-size:12px;line-height:1.1}
+.refapp .jc-r2-pair,.refapp .jc-r2-foot{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
+.refapp .jc-r2-tile small,.refapp .jc-r2-position small,.refapp .jc-r2-support small{display:block;color:#bdd0dc;font-size:8px;font-weight:800;line-height:1.1}
+.refapp .jc-r2-tile b,.refapp .jc-r2-position b,.refapp .jc-r2-support b{display:block;font-size:12px;font-weight:900;line-height:1.2;overflow-wrap:anywhere;margin-top:2px}
+.refapp .jc-r2-tile span,.refapp .jc-r2-position span{display:block;color:#9bb7c7;font-size:8px;line-height:1.15;margin-top:2px}
+.refapp .jc-r2-support b{color:#16e3b2}
+@media(min-width:700px){.refapp .reader.jc-reader-v2{max-width:560px;margin-left:auto!important;margin-right:auto!important}}
 
 </style>""", unsafe_allow_html=True)
     live_dashboard()
