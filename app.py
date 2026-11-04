@@ -861,6 +861,9 @@ section.main .block-container::before {
   [data-testid="stMain"] .block-container::before,
   section.main .block-container::before {
     width: min(94%, 680px) !important;
+    /* Compactar verticalmente el fondo en tablet sin cambiar su ancho. */
+    aspect-ratio: 709 / 1280 !important;
+    background-size: 100% 100% !important;
     left: 50% !important;
     transform: translateX(-50%) !important;
   }
