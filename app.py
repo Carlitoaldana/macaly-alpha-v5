@@ -3735,45 +3735,102 @@ for(let k=0;k<4;k++){const i=Math.round((rows.length-1)*k/3),tm=new Date(rows[i]
 s+='<g id="crosshair"></g></svg>';$('canvas').innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end,visible,step,candlePlot};
 }
 $('zoomin').onclick=()=>{visible=Math.max(12,Math.round(visible*.75));persist();draw()};$('zoomout').onclick=()=>{visible=Math.round(visible*1.3);persist();draw()};$('older').onclick=()=>{offset+=Math.max(5,Math.floor(visible/4));persist();draw()};$('newer').onclick=()=>{offset-=Math.max(5,Math.floor(visible/4));persist();draw()};$('reset').onclick=()=>{offset=0;visible=32;pricePan=0;draw();persist()};
-const touchPoints=new Map();let gesture=null;
-function chartPoint(e){const r=$('canvas').getBoundingClientRect();return {x:(e.clientX-r.left)/r.width*geometry.W,y:(e.clientY-r.top)/r.height*geometry.H}}
-function beginGesture(){
- if(!geometry||!touchPoints.size){gesture=null;return}
- const p=[...touchPoints.values()],g=geometry;
- gesture={points:p.map(v=>({...v})),visible:g.visible,offset,pricePan,range:g.hi-g.lo,plot:g.candlePlot,height:g.B-g.T,end:g.end};
- if(p.length>=2){gesture.distance=Math.max(12,Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y));gesture.center=(p[0].x+p[1].x)/2;gesture.anchor=g.start+Math.max(0,Math.min(1,(gesture.center-g.L)/gesture.plot))*g.visible}
+// Navigation gestures affect only the chart viewport. They never alter trading data.
+const touchPoints=new Map();
+let gesture=null, chartDrawFrame=0, interactionDirty=false;
+const chart=$('canvas');
+chart.style.touchAction='none';
+chart.style.overscrollBehavior='contain';
+function clampView(){
+  if(!D.rows.length)return;
+  visible=Math.max(12,Math.min(D.rows.length,Math.round(visible)));
+  // Permit some blank future space while keeping real historical candles accessible.
+  offset=Math.max(-Math.floor(visible*.35),Math.min(D.rows.length-visible,Math.round(offset)));
 }
-$('canvas').addEventListener('pointerdown',e=>{
- if(!geometry||(e.pointerType==='mouse'&&e.button!==0))return;
- e.preventDefault();touchPoints.set(e.pointerId,chartPoint(e));try{$('canvas').setPointerCapture(e.pointerId)}catch(_){}beginGesture();
-});
-$('canvas').addEventListener('pointermove',e=>{
- if(!geometry)return;
- if(touchPoints.has(e.pointerId)){
-  e.preventDefault();touchPoints.set(e.pointerId,chartPoint(e));const p=[...touchPoints.values()],a=gesture;if(!a)return;
-  if(p.length>=2&&a.points.length>=2){
-   const distance=Math.max(12,Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y));
-   visible=Math.max(12,Math.min(D.rows.length,Math.round(a.visible*a.distance/distance)));
-   const center=(p[0].x+p[1].x)/2,fraction=Math.max(0,Math.min(1,(center-geometry.L)/a.plot));
-   offset=Math.round(D.rows.length-a.anchor-(1-fraction)*visible);
-  }else if(p.length===1&&a.points.length===1){
-   offset=Math.round(a.offset+(p[0].x-a.points[0].x)/a.plot*a.visible);
-   pricePan=a.pricePan+(p[0].y-a.points[0].y)/a.height*a.range;
+function paintChart(){
+  if(chartDrawFrame)return;
+  chartDrawFrame=requestAnimationFrame(()=>{chartDrawFrame=0;clampView();draw();});
+}
+function chartPoint(e){
+  const r=chart.getBoundingClientRect();
+  return {x:(e.clientX-r.left)/Math.max(1,r.width)*geometry.W,
+          y:(e.clientY-r.top)/Math.max(1,r.height)*geometry.H};
+}
+function startGesture(){
+  if(!geometry||!touchPoints.size){gesture=null;return;}
+  const points=[...touchPoints.values()],g=geometry;
+  gesture={points:points.map(p=>({...p})),visible,offset,pricePan,
+           range:g.hi-g.lo,plot:g.candlePlot,height:g.B-g.T,
+           moved:false};
+  if(points.length>1){
+    gesture.distance=Math.max(12,Math.hypot(points[1].x-points[0].x,points[1].y-points[0].y));
+    const mid=(points[0].x+points[1].x)/2;
+    const fraction=Math.max(0,Math.min(1,(mid-g.L)/g.candlePlot));
+    gesture.anchor=g.start+fraction*g.visible;
   }
-  draw();persist();return;
- }
- inspectCandle(chartPoint(e).x);
-});
-function endGesture(e){
- if(!touchPoints.has(e.pointerId))return;
- const wasTap=gesture&&gesture.points.length===1&&touchPoints.size===1&&Math.hypot(touchPoints.get(e.pointerId).x-gesture.points[0].x,touchPoints.get(e.pointerId).y-gesture.points[0].y)<5;
- const point=touchPoints.get(e.pointerId);touchPoints.delete(e.pointerId);beginGesture();persist();if(wasTap)inspectCandle(point.x);
 }
-for(const event of ['pointerup','pointercancel','lostpointercapture'])$('canvas').addEventListener(event,endGesture);
-$('canvas').addEventListener('dblclick',()=>{$('reset').onclick()});
-$('canvas').addEventListener('wheel',e=>{
- if(!geometry)return;e.preventDefault();const p=chartPoint(e),g=geometry,fraction=Math.max(0,Math.min(1,(p.x-g.L)/g.candlePlot)),anchor=g.start+fraction*g.visible;
- visible=Math.max(12,Math.min(D.rows.length,Math.round(g.visible*(e.deltaY>0?1.15:.85))));offset=Math.round(D.rows.length-anchor-(1-fraction)*visible);draw();persist();
+chart.addEventListener('pointerdown',e=>{
+  if(!geometry||(e.pointerType==='mouse'&&e.button!==0))return;
+  e.preventDefault();
+  touchPoints.set(e.pointerId,chartPoint(e));
+  try{chart.setPointerCapture(e.pointerId)}catch(_){}
+  startGesture();
+});
+chart.addEventListener('pointermove',e=>{
+  if(!geometry)return;
+  if(!touchPoints.has(e.pointerId)){
+    if(e.pointerType==='mouse')inspectCandle(chartPoint(e).x);
+    return;
+  }
+  e.preventDefault();
+  touchPoints.set(e.pointerId,chartPoint(e));
+  const pts=[...touchPoints.values()],g=gesture;
+  if(!g)return;
+  if(pts.length>=2&&g.points.length>=2){
+    const distance=Math.max(12,Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y));
+    visible=Math.round(g.visible*g.distance/distance);
+    visible=Math.max(12,Math.min(D.rows.length,visible));
+    const mid=(pts[0].x+pts[1].x)/2;
+    const fraction=Math.max(0,Math.min(1,(mid-geometry.L)/g.plot));
+    offset=Math.round(D.rows.length-g.anchor-(1-fraction)*visible);
+    // A two-finger vertical move shifts the price scale as well.
+    const initialY=(g.points[0].y+g.points[1].y)/2;
+    const currentY=(pts[0].y+pts[1].y)/2;
+    pricePan=g.pricePan+(currentY-initialY)/g.height*g.range;
+    g.moved=true;
+  }else if(pts.length===1&&g.points.length===1){
+    const dx=pts[0].x-g.points[0].x,dy=pts[0].y-g.points[0].y;
+    if(Math.abs(dx)>3||Math.abs(dy)>3)g.moved=true;
+    offset=Math.round(g.offset+dx/Math.max(1,g.plot)*g.visible);
+    pricePan=g.pricePan+dy/Math.max(1,g.height)*g.range;
+  }else return;
+  interactionDirty=true;
+  paintChart();
+},{passive:false});
+function endGesture(e){
+  if(!touchPoints.has(e.pointerId))return;
+  const point=touchPoints.get(e.pointerId);
+  const tapped=gesture&&!gesture.moved&&gesture.points.length===1&&touchPoints.size===1;
+  touchPoints.delete(e.pointerId);
+  startGesture();
+  if(!touchPoints.size){
+    if(chartDrawFrame){cancelAnimationFrame(chartDrawFrame);chartDrawFrame=0;}
+    clampView();draw();persist();interactionDirty=false;
+    if(tapped)inspectCandle(point.x);
+  }
+}
+for(const name of ['pointerup','pointercancel','lostpointercapture'])chart.addEventListener(name,endGesture);
+chart.addEventListener('dblclick',e=>{e.preventDefault();$('reset').onclick()});
+chart.addEventListener('wheel',e=>{
+  if(!geometry)return;
+  e.preventDefault();
+  const p=chartPoint(e),g=geometry;
+  const fraction=Math.max(0,Math.min(1,(p.x-g.L)/g.candlePlot));
+  const anchor=g.start+fraction*g.visible;
+  const next=Math.max(12,Math.min(D.rows.length,Math.round(g.visible*(e.deltaY>0?1.14:.86))));
+  visible=next;
+  offset=Math.round(D.rows.length-anchor-(1-fraction)*visible);
+  clampView();draw();persist();
 },{passive:false});
 function inspectCandle(px){if(!geometry)return;const g=geometry,i=Math.max(0,Math.min(g.rows.length-1,Math.floor((px-g.L)/g.step))),r=g.rows[i],time=new Date(r.t*1000).toLocaleString('en-US',{timeZone:'America/New_York'});$('tooltip').textContent=time+' · O '+fmt(r.open)+'  H '+fmt(r.high)+'  L '+fmt(r.low)+'  C '+fmt(r.close)+' · Vol '+fmt(r.volume,3);$('crosshair').innerHTML='<line x1="'+g.x(i)+'" x2="'+g.x(i)+'" y1="'+g.T+'" y2="'+g.B+'" stroke="#b8a5e0" stroke-dasharray="4 4"/>'}
 
@@ -3791,12 +3848,14 @@ window.addEventListener('message', function(event){
   if (window.__alphaVisualFrame) cancelAnimationFrame(window.__alphaVisualFrame);
   D = next;
   refreshLabels(); // Etiquetas: siempre el dato REAL, nunca interpolado.
-  if (!sameCandle || offset > 0 || touchPoints.size > 0 || document.hidden) { draw(); return; }
+  if (touchPoints.size > 0) { interactionDirty=true; return; }
+  if (!sameCandle || offset !== 0 || document.hidden) { draw(); return; }
   const previous = old.rows[old.rows.length-1], current = next.rows[next.rows.length-1];
   const keys = ['open','high','low','close','ema9','ema21','vwap','rsi'];
   const start = performance.now(), duration = 580;
   function frame(now) {
     const u = Math.min(1,(now-start)/duration), f = u*u*(3-2*u);
+    if (touchPoints.size > 0) { D = next; window.__alphaVisualFrame = null; return; }
     if (u >= 1) { D = next; draw(); window.__alphaVisualFrame = null; return; }
     const row = {...current};
     for (const k of keys) {
