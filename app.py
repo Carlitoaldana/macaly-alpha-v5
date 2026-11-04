@@ -3013,7 +3013,6 @@ def closing_reader(sig, round_signal, seconds_left, micro):
     distance = sig.get("distance")
     close_direction = active_direction
     terminal_override = False
-    terminal_too_close = False
 
     # En cierre extremo, la posición REAL respecto al target manda.
     # Umbrales deliberadamente conservadores para no llamar un flip por $2-$10.
@@ -3023,22 +3022,16 @@ def closing_reader(sig, round_signal, seconds_left, micro):
 
         if seconds_left <= 15:
             strong_distance = abs_d >= 30
-            too_close = not strong_distance
         elif seconds_left <= 30:
             strong_distance = abs_d >= 45
-            too_close = not strong_distance
         elif seconds_left <= 60:
             strong_distance = abs_d >= 70
-            too_close = abs_d < 25
         else:
             strong_distance = False
-            too_close = False
 
         if strong_distance:
             close_direction = market_side
             terminal_override = True
-        elif too_close and seconds_left <= 30:
-            terminal_too_close = True
 
     direction = close_direction
     base = sig["up_probability"] if direction == "UP" else sig["down_probability"]
@@ -3108,24 +3101,22 @@ def closing_reader(sig, round_signal, seconds_left, micro):
         elif seconds_left <= 60:
             confidence = max(confidence, 80 if abs_d >= 120 else 74)
 
-    confidence = int(round(np.clip(confidence, 5, 95)))
+    confidence = int(round(np.clip(confidence, 5, 100)))
 
-    if terminal_too_close:
-        # En los últimos segundos NO lo llama simplemente "disputado":
-        # muestra qué lado del target está ganando AHORA y la distancia exacta.
-        # La confianza se mantiene moderada porque una diferencia pequeña aún puede cruzarse.
+    # Cerca del target se mantiene un pronóstico y su apoyo calculado.
+    # Una distancia pequeña NO equivale a ausencia de dirección.
+    # Cuando el precio está exactamente en el target, se usa la presión
+    # reciente; si no hay microlectura, se conserva el análisis previo.
+    if seconds_left is not None and 0 < seconds_left <= 30 and distance is not None and abs(distance) < (30 if seconds_left <= 15 else 45):
         if distance == 0:
-            confidence = 50
-            headline = "PRECIO EN EL TARGET"
-            note = f"Quedan {seconds_left}s y el precio está en el target, sin margen a favor de una dirección."
+            headline = f"PRONÓSTICO DE CIERRE {direction}"
+            note = "BTC está exactamente en el target; dirección estimada según el análisis disponible."
         else:
-            market_side = "UP" if distance > 0 else "DOWN"
-            confidence = int(np.clip(confidence, 52, 64))
-            headline = f"POSICIÓN ACTUAL {market_side}"
+            headline = f"PRONÓSTICO DE CIERRE {direction}"
             note = (
-                f"Quedan {seconds_left}s y BTC está ${abs(distance):,.0f} "
+                f"Quedan {seconds_left}s; BTC está ${abs(distance):,.0f} "
                 f"{'arriba' if distance > 0 else 'abajo'} del target. "
-                "El margen es pequeño; no se muestra un apoyo direccional."
+                "Un margen pequeño aún puede cruzarse antes del cierre."
             )
     elif terminal_override:
         headline = f"CIERRE MUY FAVORECIDO PARA {direction}"
@@ -3160,8 +3151,8 @@ def closing_reader(sig, round_signal, seconds_left, micro):
         bg = "linear-gradient(135deg,rgba(102,20,31,.48),rgba(43,10,17,.80))"
 
     return {
-        "percent": 0 if terminal_too_close else confidence,
-        "direction": None if terminal_too_close else direction,
+        "percent": confidence,
+        "direction": direction,
         "headline": headline,
         "note": note,
         "micro": micro_text,
@@ -4000,8 +3991,6 @@ def live_dashboard():
         reader = {**reader, "percent":0, "headline":"SIN DATOS ACTUALES",
                   "note":"No se puede validar la señal hasta recuperar las velas."}
     reader_percent_label = f"{reader['percent']}%" if reader.get("direction") else "—"
-    if round_signal.get("decision") not in ("UP", "DOWN"):
-        reader_percent_label = "—"
     if seconds_left is not None and seconds_left <= 0:
         # El reloj y el precio instantáneo no prueban la liquidación oficial.
         reader = {**reader, "percent": 0,
