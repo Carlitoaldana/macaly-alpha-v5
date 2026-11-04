@@ -3052,6 +3052,63 @@ def render_history_page():
 }
 .panel{background:#06121a!important}
 
+
+/* JC ALPHA EDGE — acabado tridimensional de señal, exclusivamente visual. */
+.refapp.dir-up .rhero .rsignal,
+.refapp.dir-down .rhero .rsignal{
+  display:flex!important;align-items:center!important;justify-content:center!important;
+  gap:9px!important;overflow:visible!important;
+  font-size:clamp(58px,13vw,87px)!important;
+}
+.refapp.dir-up .rhero .rsignal>span:last-child,
+.refapp.dir-down .rhero .rsignal>span:last-child{
+  display:inline-block!important;
+  background:linear-gradient(180deg,#e3fff2 0%,#80ffbd 16%,#13ff80 45%,#00cb64 70%,#008b48 100%)!important;
+  -webkit-background-clip:text!important;background-clip:text!important;
+  -webkit-text-fill-color:transparent!important;
+  -webkit-text-stroke:1px #9affc6!important;
+  font-family:Arial Black,Impact,system-ui,sans-serif!important;
+  font-style:italic!important;font-weight:1000!important;
+  letter-spacing:-5px!important;
+  text-shadow:none!important;
+  filter:drop-shadow(0 3px 0 #00683c) drop-shadow(0 0 6px #33ff98) drop-shadow(0 0 15px #00d874)!important;
+  transform:skewX(-9deg)!important;
+}
+.refapp.dir-down .rhero .rsignal>span:last-child{
+  background:linear-gradient(180deg,#fff1f2 0%,#ffabb6 16%,#ff4766 46%,#d91640 72%,#8b0b2b 100%)!important;
+  -webkit-background-clip:text!important;background-clip:text!important;
+  -webkit-text-stroke:1px #ffb3c2!important;
+  filter:drop-shadow(0 3px 0 #7c1430) drop-shadow(0 0 6px #ff5977) drop-shadow(0 0 15px #e9214b)!important;
+}
+.refapp.dir-up .rhero .cssarrow,
+.refapp.dir-down .rhero .cssarrow{
+  display:block!important;position:relative!important;
+  width:clamp(68px,16vw,105px)!important;height:clamp(69px,15vw,100px)!important;
+  flex:0 0 clamp(68px,16vw,105px)!important;
+  clip-path:polygon(50% 0%,100% 43%,76% 43%,76% 100%,24% 100%,24% 43%,0 43%)!important;
+  background:linear-gradient(120deg,#d4ffe9 0%,#7effb6 17%,#0bff86 37%,#00d773 60%,#006f40 100%)!important;
+  filter:drop-shadow(0 0 5px #1fff8b) drop-shadow(0 0 13px #00b75d)!important;
+  box-shadow:none!important;
+}
+.refapp.dir-up .rhero .cssarrow:after,
+.refapp.dir-down .rhero .cssarrow:after{
+  content:''!important;display:block!important;position:absolute!important;inset:4px!important;
+  clip-path:polygon(50% 0%,100% 43%,76% 43%,76% 100%,24% 100%,24% 43%,0 43%)!important;
+  background:linear-gradient(135deg,rgba(255,255,255,.75),transparent 30%,rgba(0,65,37,.35) 90%)!important;
+  opacity:.65!important;
+}
+.refapp.dir-down .rhero .cssarrow{
+  background:linear-gradient(120deg,#ffe1e4,#ff8193 20%,#ff3658 42%,#d5103c 65%,#770a28 100%)!important;
+  filter:drop-shadow(0 0 5px #ff4c69) drop-shadow(0 0 13px #c71740)!important;
+}
+@media(max-width:460px){
+  .refapp.dir-up .rhero .rsignal,.refapp.dir-down .rhero .rsignal{font-size:clamp(56px,13vw,72px)!important;gap:8px!important;}
+  .refapp.dir-up .rhero .cssarrow,.refapp.dir-down .rhero .cssarrow{
+    width:clamp(65px,16vw,80px)!important;height:clamp(67px,17vw,84px)!important;
+    flex-basis:clamp(65px,16vw,80px)!important;
+  }
+}
+
 </style>""", unsafe_allow_html=True)
     df=load_history(2000); stats=history_stats(df)
     st.markdown(f"""
