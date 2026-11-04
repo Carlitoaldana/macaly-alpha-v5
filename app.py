@@ -984,28 +984,6 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 
 .refapp.dir-up .rhero .rconf{visibility:visible!important;position:absolute!important;bottom:0!important;left:25%!important;right:25%!important;margin:0!important;font-size:10px!important;padding:2px!important;background:#06131b!important;opacity:.97!important}
 
-
-/* Lector reconstruido: estructura propia, sin usar el diseño anterior */
-.refapp .jc-reader{padding:7px 8px!important;margin:5px 0!important;min-height:0!important;border-radius:10px!important;background:linear-gradient(140deg,#071b2b,#03121e)!important;border:1px solid #c19b4d!important;box-shadow:0 0 7px #e3b45135!important}
-.refapp .jc-heading{display:flex;justify-content:space-between;align-items:center;font-size:9px;font-weight:900;color:#e1f0f7;margin-bottom:5px}
-.refapp .jc-heading em{font-size:7px;font-style:normal;color:#00e8a4;border:1px solid #00a77c;border-radius:9px;padding:1px 5px}
-.refapp .jc-top{display:grid;grid-template-columns:minmax(0,1fr) 55px 43px;gap:5px;align-items:center;margin-bottom:5px;min-height:55px}
-.refapp .jc-direction{display:flex;align-items:center;gap:4px;min-width:0;background:#061b2b;border:1px solid #1b6787;border-radius:6px;padding:4px}
-.refapp .jc-direction span{font-size:22px;color:var(--rr)}
-.refapp .jc-direction strong{font-size:clamp(11px,3vw,17px)!important;font-style:italic;line-height:1.08;overflow-wrap:anywhere;text-shadow:0 0 7px var(--rr)}
-.refapp .jc-ring{height:54px;width:54px;border-radius:50%;display:grid;place-items:center;position:relative;background:conic-gradient(var(--ring) calc(var(--p)*1%),#214153 0)}
-.refapp .jc-ring:before{content:"";position:absolute;inset:6px;background:#041421;border-radius:50%}
-.refapp .jc-ring span{position:relative;color:white;font-size:15px;font-weight:900}
-.refapp .jc-candles{height:42px;display:flex;gap:3px;align-items:end;border-left:1px solid #24627b;padding:3px}
-.refapp .jc-candles i{width:4px;height:48%;background:#00d7ad;box-shadow:0 0 4px #00d7ad}
-.refapp .jc-candles i:nth-child(2){height:70%;background:#e84e6b}.refapp .jc-candles i:nth-child(3){height:38%}.refapp .jc-candles i:nth-child(4){height:85%;background:#e84e6b}.refapp .jc-candles i:nth-child(5){height:62%}.refapp .jc-candles i:nth-child(6){height:33%;background:#e84e6b}
-.refapp .jc-close-grid{display:grid;gap:5px}.refapp .jc-motion,.refapp .jc-tile{background:#061b2b;border:1px solid #276989;border-radius:6px;padding:4px 6px;min-width:0}
-.refapp .jc-motion label{display:block;text-align:center;color:#c7dbe6;font-size:7px;font-weight:800}
-.refapp .jc-three{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin-top:3px;text-align:center}
-.refapp .jc-three>div{border:1px solid #19455d;border-radius:5px;padding:2px}.refapp .jc-three small{display:block;color:#8eacbc;font-size:8px}.refapp .jc-three b{display:block;color:#00dfb5;font-size:11px;line-height:1.1}
-.refapp .jc-two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.refapp .jc-tile small{display:block;font-size:7px;color:#a7c2d0;font-weight:800}.refapp .jc-tile b{display:block;font-size:12px;font-weight:900;line-height:1.15;overflow-wrap:anywhere}.refapp .jc-tile i{display:block;font-size:8px;color:#9db3c1;font-style:normal}
-@media(min-width:700px){.refapp .jc-reader{max-width:560px;margin-left:auto!important;margin-right:auto!important}}
-
 </style>
 """,
     unsafe_allow_html=True,
@@ -3807,14 +3785,20 @@ def live_dashboard():
     final_status_color = "#00dfb5" if market_side == "UP" else "#e64b4b" if market_side == "DOWN" else "#94a3b8"
     final_distance_label = f"${abs(distance):,.0f}" if distance is not None else "—"
     final_dist_pct_label = f"{abs(distance_pct):.2f}%" if distance_pct is not None else "SIN TARGET"
-    final_panel = f'''<div class="jc-close-grid">
-      <div class="jc-motion"><label>MOVIMIENTO ÚLTIMOS SEGUNDOS</label><div class="jc-three">
-      <div><small>30s</small><b>{motion_labels[30]}</b></div><div><small>10s</small><b>{motion_labels[10]}</b></div><div><small>5s</small><b>{motion_labels[5]}</b></div>
-      </div></div>
-      <div class="jc-two"><div class="jc-tile"><small>◉ DISTANCIA AL TARGET</small><b style="color:{distance_color}">{final_distance_label}</b><i>{final_dist_pct_label}</i></div>
-      <div class="jc-tile"><small>◷ VELOCIDAD</small><b style="color:{speed_color}">{speed_arrow} {speed_word}</b><i>{speed_value}</i></div></div>
-      <div class="jc-two"><div class="jc-tile"><small>◉ POSICIÓN ACTUAL</small><b style="color:{final_status_color}">{final_status}</b></div>
-      <div class="jc-tile"><small>APOYO AL CIERRE</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div></div>
+    final_panel = f'''<div class="finalclose">
+      <div class="finalgrid">
+        <div class="finalcard motion"><div class="finaltitle">MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motionrow">
+          <div class="motiontile"><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
+          <div class="motiontile"><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
+          <div class="motiontile"><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
+        </div></div>
+        <div class="finalcard distance"><div class="finaltitle">🎯 &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">{final_distance_label}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct_label}</div></div>
+        <div class="finalcard speed"><div class="finaltitle">◴ &nbsp; VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div></div>
+      </div>
+      <div class="finalanalysis">
+        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b style="color:{final_status_color}">{final_status}</b><span>{final_note}</span></div></div>
+        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
+      </div>
     </div>'''
 
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
@@ -3850,7 +3834,7 @@ def live_dashboard():
       <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="bigicon targeticon">◎</div>
+      <div class="bigicon targeticon"><svg viewBox="0 0 48 48" width="33" height="33" fill="none"><circle cx="22" cy="26" r="17" stroke="#ffc34e" stroke-width="3"/><circle cx="22" cy="26" r="10" stroke="#ffc34e" stroke-width="3"/><circle cx="22" cy="26" r="3" fill="#ffc34e"/><path d="M23 25L40 8M32 8h8v8" stroke="#ffe08a" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
       <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
     </div>
     <div class="rcard keycard">
@@ -3859,7 +3843,7 @@ def live_dashboard():
       <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="clock">◷</div>
+      <div class="clock"><svg viewBox="0 0 48 48" width="32" height="32" fill="none"><circle cx="24" cy="27" r="17" stroke="#ffc34e" stroke-width="3.5"/><path d="M24 27V16M24 27l8 5M18 5h12M24 5v5" stroke="#ffe08a" stroke-width="3.5" stroke-linecap="round"/></svg></div>
       <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
       <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
     </div>
@@ -3871,13 +3855,13 @@ def live_dashboard():
     <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
   </section>
 
-  <section class="reader jc-reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="jc-heading"><span>⌁ LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="jc-top"><div class="jc-direction"><span>{'↗' if reader.get('direction') == 'UP' else '↘' if reader.get('direction') == 'DOWN' else '•'}</span><strong style="color:{reader['color']}">{reader['headline']}</strong></div>
-    <div class="jc-ring" style="--p:{reader['percent']};--ring:{reader['color']}"><span>{reader_percent_label}</span></div>
-    <div class="jc-candles"><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+  <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
+    <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
+    <div class="readerbody"><div class="reader-signal-box"><small>SEÑAL DE CIERRE</small><strong style="color:{reader['color']}">{reader['headline']}</strong></div>
+    <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
     {final_panel}
   </section>
+
 
 
 
@@ -4671,6 +4655,92 @@ else:
 .refapp .motionrow b{font-size:clamp(14px,3.6vw,20px)!important;color:#0ae4b7!important}
 @media(max-width:430px){.refapp .reader{padding:12px 10px!important}.refapp .readerbody{gap:6px!important}.refapp .finalcard{padding:9px 6px!important}}
 /* FIN ETAPA LECTOR PREMIUM */
+
+/* REFERENCIA 709px: reconstruccion compacta de proporciones mobile */
+@media(max-width:600px){
+.refapp .rgrid{gap:5px!important;margin-top:4px!important;grid-template-columns:repeat(2,minmax(0,1fr))!important}
+.refapp .rgrid .rcard.keycard{height:49px!important;min-height:49px!important;max-height:49px!important;padding:3px 7px!important;gap:5px!important;border-radius:10px!important;align-items:center!important}
+.refapp .rgrid .keycard .rlabel{font-size:9px!important;line-height:1!important;letter-spacing:0!important}
+.refapp .rgrid .keycard .rvalue{font-size:18px!important;line-height:1!important;letter-spacing:-.4px!important}
+.refapp .rgrid .keycard .rdelta{font-size:9px!important;margin-top:1px!important;line-height:1!important}
+.refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{font-size:23px!important;line-height:1!important}
+.refapp .rgrid .keycard .bigicon svg,.refapp .rgrid .keycard .clock svg{width:25px!important;height:25px!important}
+.refapp .rgrid .keycard .timebar{height:5px!important;margin-top:3px!important}
+.refapp .reader{padding:6px 7px!important;margin-top:5px!important;border-radius:16px!important}
+.refapp .readerhead{font-size:13px!important;line-height:1.1!important}
+.refapp .readerhead em{font-size:9px!important;padding:3px 8px!important}
+.refapp .readerbody{grid-template-columns:minmax(0,1fr) 92px!important;min-height:80px!important;max-height:88px!important;gap:5px!important;margin:4px 0 6px!important}
+.refapp .readerbody strong{font-size:18px!important;line-height:1.05!important}
+.refapp .rring{width:84px!important;height:84px!important;max-width:84px!important;max-height:84px!important}
+.refapp .rring:after{width:62px!important;height:62px!important}
+.refapp .rring span{font-size:22px!important}
+.refapp .finalgrid{gap:5px!important}
+.refapp .finalcard{padding:5px 5px!important;border-radius:9px!important}
+.refapp .finaltitle{font-size:10px!important;line-height:1.1!important}
+.refapp .motionrow{margin-top:3px!important;gap:2px!important}
+.refapp .motionrow small{font-size:10px!important}
+.refapp .motionrow b{font-size:13px!important}
+.refapp .finalclose{padding:0!important}
+}
+
+
+/* FINAL COMPACT REFERENCE: visual-only layout; dynamic values untouched */
+.refapp .rgrid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:6px!important;margin-top:5px!important}
+.refapp .rgrid .rcard.keycard{box-sizing:border-box!important;height:clamp(68px,19vw,86px)!important;min-height:0!important;padding:6px 8px!important;gap:5px!important;border-radius:13px!important}
+.refapp .rgrid .keycard .rlabel{font-size:clamp(9px,2.3vw,12px)!important;line-height:1.08!important}
+.refapp .rgrid .keycard .rvalue{font-size:clamp(17px,4.4vw,25px)!important;line-height:1.08!important}
+.refapp .rgrid .keycard .rdelta{font-size:clamp(9px,2.3vw,12px)!important;margin-top:1px!important}
+.refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{font-size:clamp(22px,5.5vw,30px)!important;line-height:1!important}
+.refapp .rgrid .keycard .bigicon svg,.refapp .rgrid .keycard .clock svg{display:block;width:clamp(23px,6vw,33px)!important;height:clamp(23px,6vw,33px)!important}
+.refapp .reader{padding:9px 8px!important;border-radius:17px!important}
+.refapp .readerbody{gap:8px!important;margin:7px 0 9px!important;grid-template-columns:minmax(0,1fr) minmax(82px,29%)!important}
+.refapp .readerbody strong{font-size:clamp(15px,3.8vw,23px)!important}
+.refapp .rring{max-width:116px!important}
+.refapp .finalgrid{gap:6px!important}
+.refapp .finalcard{padding:7px 6px!important;border-radius:12px!important}
+.refapp .motionrow{margin-top:5px!important;gap:3px!important}
+.refapp .motionrow small{font-size:clamp(10px,2.4vw,13px)!important}
+.refapp .motionrow b{font-size:clamp(12px,3.1vw,17px)!important}
+@media(max-width:430px){.refapp .rgrid .rcard.keycard{height:clamp(68px,19vw,82px)!important;padding:5px 7px!important}.refapp .reader{padding:8px 7px!important}.refapp .finalcard{padding:6px 4px!important}}
+
+
+
+/* REDISEÑO INTEGRAL COMPACTO - proporciones de la referencia, solo vista */
+.refapp .rgrid{gap:6px!important;margin-top:5px!important}
+.refapp .rgrid .rcard.keycard{height:clamp(64px,18vw,83px)!important;min-height:0!important;padding:6px 8px!important;border-radius:13px!important;gap:5px!important}
+.refapp .rgrid .keycard .rlabel{font-size:clamp(8px,2.1vw,11px)!important;line-height:1.08!important}
+.refapp .rgrid .keycard .rvalue{font-size:clamp(16px,4.4vw,24px)!important;line-height:1.05!important}
+.refapp .rgrid .keycard .rdelta{font-size:clamp(9px,2.2vw,12px)!important;margin-top:1px!important}
+.refapp .reader{position:relative!important;padding:9px 9px 11px!important;margin-top:6px!important;border-radius:18px!important;border:1.5px solid #d4a450!important;box-shadow:inset 0 0 18px #0a80cf30,0 0 9px #d7a34e38!important}
+.refapp .readerhead{font-size:clamp(14px,3.6vw,19px)!important;margin-bottom:4px!important}
+.refapp .readerbody{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(75px,26%)!important;gap:8px!important;align-items:center!important;min-height:96px!important;max-height:116px!important;margin:4px 0 9px!important}
+.refapp .reader-signal-box{display:flex!important;flex-direction:column!important;justify-content:center!important;align-items:center!important;gap:3px!important;min-height:76px!important;border:1px solid #397c9e!important;border-radius:12px!important;background:linear-gradient(155deg,#09233e,#03141e)!important;box-shadow:inset 0 -9px 16px #00cfa61a!important;padding:5px!important}
+.refapp .reader-signal-box small{font-size:clamp(9px,2.4vw,12px)!important;font-weight:800!important;color:#f4f7ff!important}
+.refapp .readerbody .reader-signal-box strong{font-size:clamp(17px,4vw,27px)!important;text-align:center!important;line-height:1.05!important;white-space:normal!important;overflow-wrap:normal!important;text-shadow:0 0 12px currentColor!important}
+.refapp .rring{width:clamp(78px,23vw,113px)!important;height:clamp(78px,23vw,113px)!important;max-width:113px!important;max-height:113px!important;margin:auto!important}
+.refapp .rring:after{width:75%!important;height:75%!important}
+.refapp .rring span{font-size:clamp(21px,5.8vw,30px)!important}
+.refapp .finalclose{padding:0!important;background:transparent!important;border:0!important;box-shadow:none!important}
+.refapp .finalgrid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:6px!important}
+.refapp .finalcard{min-width:0!important;padding:7px 7px!important;border:1px solid #4983a8!important;border-radius:11px!important;background:linear-gradient(145deg,#0a2a42,#041520)!important;box-shadow:inset 0 0 11px #00bbac18!important}
+.refapp .finalcard.motion{grid-column:1/-1!important;padding:13px 7px 7px!important;position:relative!important;margin-top:4px!important}
+.refapp .finalcard.motion .finaltitle{position:absolute!important;top:-10px!important;left:50%!important;transform:translateX(-50%)!important;white-space:nowrap!important;border:1px solid #467c9f!important;border-radius:30px!important;background:#07192a!important;padding:2px 10px!important;font-size:clamp(9px,2.4vw,12px)!important}
+.refapp .motionrow{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:5px!important;margin:4px 0 0!important}
+.refapp .motionrow .motiontile{display:flex!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;min-height:47px!important;gap:3px!important;padding:4px 2px!important;border:1px solid #1d5765!important;border-radius:8px!important;background:linear-gradient(150deg,#092c39,#061b26 65%,#005b4d)!important;box-shadow:inset 0 -5px 10px #00d7a31c!important}
+.refapp .motionrow .motiontile small{font-size:clamp(10px,2.7vw,14px)!important;color:#e8f2f8!important}
+.refapp .motionrow .motiontile b{font-size:clamp(12px,3.2vw,17px)!important;line-height:1.1!important}
+.refapp .finalcard .finaltitle{font-size:clamp(9px,2.2vw,11px)!important;line-height:1.15!important}
+.refapp .finalcard .finalbig{font-size:clamp(16px,4.4vw,23px)!important;line-height:1.15!important;margin:3px 0!important;overflow-wrap:anywhere!important}
+.refapp .finalcard .finalsub{font-size:clamp(9px,2.3vw,12px)!important}
+.refapp .finalanalysis{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(100px,42%)!important;gap:5px!important;margin-top:6px!important;padding:6px!important;border:1px solid #4886aa!important;border-radius:12px!important;background:linear-gradient(150deg,#0b2b40,#031521)!important}
+.refapp .analysisbox{min-width:0!important;gap:5px!important}
+.refapp .analysistext small,.refapp .probbox small{font-size:clamp(8px,2.1vw,11px)!important;line-height:1.15!important}
+.refapp .analysistext b{font-size:clamp(10px,2.7vw,14px)!important;line-height:1.15!important}
+.refapp .analysistext span{display:none!important}
+.refapp .probbox{min-width:0!important;padding:4px!important}
+.refapp .probbox b{font-size:clamp(19px,5.2vw,29px)!important;line-height:1.1!important}
+.refapp .pleg{margin-top:3px!important}
+@media(max-width:430px){.refapp .reader{padding:8px 7px!important}.refapp .readerbody{min-height:88px!important;max-height:100px!important}.refapp .reader-signal-box{min-height:67px!important}.refapp .finalcard{padding:6px 5px!important}}
 
 </style>""", unsafe_allow_html=True)
     live_dashboard()
