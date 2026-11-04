@@ -4379,6 +4379,30 @@ else:
 .refapp .rgrid{position:relative!important;z-index:2!important;margin-top:4px!important;}
 .refapp .rcard,.refapp .reader,.refapp .finalclose,.refapp .finalcard{background:linear-gradient(140deg,rgba(10,38,62,.96),rgba(2,12,27,.96))!important;border-color:#cba45c!important;box-shadow:0 0 8px #d8ad4429,inset 0 1px 2px #e7ca7c44!important;}
 @media(max-width:460px){.refapp .rhead{aspect-ratio:852/240!important}.refapp .rhero{aspect-ratio:852/245!important}.refapp .rhero .rsignal{font-size:clamp(35px,11vw,52px)!important}}
+
+/* CORRECCION VISUAL: el fondo aprobado conserva su propia etiqueta de mercado. */
+.refapp .rhead .rlive{display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;}
+/* Senal flotante: sin cuadro, placa, velo ni sombra rectangular. */
+.refapp .rhero,.refapp .rhero.waiting,.refapp.dir-wait .rhero{
+  background:none!important;background-color:transparent!important;background-image:none!important;
+  border:0!important;border-radius:0!important;box-shadow:none!important;
+  backdrop-filter:none!important;-webkit-backdrop-filter:none!important;
+  filter:none!important;overflow:visible!important;
+}
+.refapp .rhero::before,.refapp .rhero::after,
+.refapp .rhero.waiting::before,.refapp .rhero.waiting::after{content:none!important;display:none!important;}
+.refapp .rhero .rsignal,.refapp .rhero .rsignal *{
+  background:none!important;background-color:transparent!important;box-shadow:none!important;
+  border:0!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;
+}
+/* Esperando compacto, centrado y sin invadir el emblema o el toro. */
+.refapp .rhero.waiting .rsignal,.refapp.dir-wait .rhero .rsignal{
+  font-size:clamp(21px,6.3vw,34px)!important;letter-spacing:0!important;
+  line-height:1.1!important;white-space:nowrap!important;max-width:100%!important;
+  text-shadow:0 0 8px #24b9ff88!important;filter:none!important;
+}
+.refapp .rhero.waiting .rconf,.refapp.dir-wait .rhero .rconf{margin-top:12px!important;}
+
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
