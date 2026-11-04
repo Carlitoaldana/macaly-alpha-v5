@@ -3808,7 +3808,7 @@ def live_dashboard():
         <div class="jcx-tile"><span class="jcx-icon">◴</span><div><small>VELOCIDAD</small><b style="color:{speed_color}">{speed_arrow} {speed_word}</b><em>{speed_value}</em></div></div>
       </div>
       <div class="jcx-foot">
-        <div class="jcx-position"><span class="jcx-icon">▱</span><div><small>POSICIÓN ACTUAL</small><b style="color:{final_status_color}">{final_status}</b></div></div>
+        <div class="jcx-position"><span class="jcx-icon">▱</span><div><small>POSICIÓN ACTUAL</small><b style="color:{final_status_color}">{market_side if distance is not None else final_status}</b></div></div>
         <div class="jcx-support"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b style="color:{reader['color']}">{reader_percent_label if reader.get('direction') else '—'}</b></div>
       </div>
     </div>'''
@@ -3870,9 +3870,9 @@ def live_dashboard():
   <section class="reader jcx-reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="jcx-head"><span>◎ LECTOR DE CIERRE</span><em>● ACTIVO</em></div>
     <div class="jcx-top">
-      <div class="jcx-signal"><small>SEÑAL DE CIERRE</small><strong style="color:{reader['color']}">{reader['direction'] if reader.get('direction') in ('UP','DOWN') else 'ESPERANDO'}</strong></div>
+      <div class="jcx-signal"><small>SEÑAL DE CIERRE</small><div class="jcx-direction"><span class="jcx-chevrons" style="color:{reader['color']}">{"⇈" if reader.get("direction") == "UP" else "⇊" if reader.get("direction") == "DOWN" else "·"}</span><strong style="color:{reader['color']}">{reader['direction'] if reader.get('direction') in ('UP','DOWN') else 'ESPERANDO'}</strong></div></div>
       <div class="jcx-ring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div>
-      <div class="jcx-market-bars" title="Movimientos reales 30, 10 y 5 segundos">{micro_chart}</div>
+      <div class="jcx-market-bars" title="Cambios medidos en 30, 10 y 5 segundos"><div class="jcx-bars">{micro_chart}</div><small>30s · 10s · 5s</small></div>
     </div>
     {final_panel}
   </section>
@@ -4787,6 +4787,33 @@ else:
 .refapp .jcx-support{display:block;text-align:center}
 .refapp .jcx-support b{font-size:23px}
 @media(max-width:380px){.refapp .jcx-top{grid-template-columns:minmax(0,1fr) 70px 45px}.refapp .jcx-ring{width:68px;height:68px}.refapp .jcx-ring span{font-size:18px}.refapp .jcx-market-bars{height:60px}}
+
+/* JC FINISH: strictly scoped to rebuilt reader; existing header and metric cards untouched */
+.refapp .reader.jcx-reader{border:1px solid #d8b16b!important;border-radius:16px!important;background:radial-gradient(ellipse at 45% 0%,#103c50 0%,#071c30 58%,#030e1d 100%)!important;box-shadow:0 0 9px #efb24b88,inset 0 0 16px #0968a133!important;padding:8px 10px!important}
+.refapp .jcx-head{font-size:15px!important;letter-spacing:.3px;text-shadow:0 0 5px #ffffff70}
+.refapp .jcx-top{grid-template-columns:minmax(0,1fr) 92px minmax(0,.72fr)!important;min-height:96px!important;gap:7px!important}
+.refapp .jcx-signal{background:linear-gradient(155deg,#09283f,#031c2d 80%)!important;box-shadow:inset 0 0 15px #0bbdba44,0 0 8px #00d6af55!important;border-color:#3c9db2!important;min-height:75px!important}
+.refapp .jcx-direction{display:flex;align-items:center;justify-content:center;gap:3px;min-width:0}
+.refapp .jcx-direction strong{font-size:clamp(25px,7.5vw,40px)!important;letter-spacing:-1px;text-shadow:0 0 7px currentColor,0 0 17px currentColor!important}
+.refapp .jcx-chevrons{font-size:clamp(25px,7vw,39px);line-height:1;font-weight:1000;text-shadow:0 0 8px currentColor}
+.refapp .jcx-ring{width:90px!important;height:90px!important;box-shadow:0 0 8px var(--rr),0 0 20px color-mix(in srgb,var(--rr) 65%,transparent)!important}
+.refapp .jcx-ring:before{inset:12px!important}
+.refapp .jcx-ring span{font-size:23px!important}
+.refapp .jcx-market-bars{height:84px!important;display:flex!important;flex-direction:column;justify-content:end;align-items:stretch;border-bottom:1px solid #3185a0!important;padding:4px!important}
+.refapp .jcx-bars{display:flex;gap:5px;justify-content:space-evenly;align-items:end;height:65px}
+.refapp .jcx-bars .jcx-bar{width:12px;flex:1;box-shadow:0 0 8px #00d7aa!important;border-radius:2px 2px 0 0}
+.refapp .jcx-market-bars small{font-size:6px;color:#a6c7d3;text-align:center;white-space:nowrap}
+.refapp .jcx-motion{border-radius:13px!important;border-color:#398bb6!important;box-shadow:0 0 8px #167cc844!important;padding:6px!important}
+.refapp .jcx-motion-title{font-size:10px!important;border:1px solid #37769a;border-radius:18px;max-width:max-content;padding:2px 12px;margin:-15px auto 6px;background:#071b2e;position:relative}
+.refapp .jcx-motion-row>div{background:linear-gradient(140deg,#092a3d 20%,#053e39 100%)!important;border-color:#287d88!important;box-shadow:inset 0 -7px 12px #00c7a01a!important;min-height:55px!important}
+.refapp .jcx-motion-row b{font-size:15px!important;text-shadow:0 0 5px currentColor}
+.refapp .jcx-pair .jcx-tile{min-height:57px;border-color:#c3a06a!important;box-shadow:inset 0 0 8px #0c689a44!important}
+.refapp .jcx-foot{display:grid!important;grid-template-columns:1.15fr .85fr!important;gap:0!important;border:1px solid #5794b1;border-radius:11px;background:linear-gradient(130deg,#0a3048,#061728);overflow:hidden}
+.refapp .jcx-foot .jcx-position,.refapp .jcx-foot .jcx-support{background:transparent!important;border:0!important;border-radius:0!important;box-shadow:none!important;min-height:55px!important}
+.refapp .jcx-foot .jcx-position{border-right:1px solid #a88b57!important}
+.refapp .jcx-position b{font-size:clamp(14px,4vw,19px)!important;white-space:nowrap!important}
+.refapp .jcx-support b{font-size:26px!important;text-shadow:0 0 9px currentColor}
+@media(max-width:390px){.refapp .jcx-top{grid-template-columns:minmax(0,1fr) 75px 48px!important}.refapp .jcx-ring{width:74px!important;height:74px!important}.refapp .jcx-ring span{font-size:18px!important}.refapp .jcx-position b{font-size:13px!important}}
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
