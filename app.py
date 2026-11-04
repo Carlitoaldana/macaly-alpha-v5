@@ -3050,6 +3050,26 @@ def closing_reader(sig, round_signal, seconds_left, micro):
     micro_text = "MICROLECTURA REUNIENDO DATOS"
     strong_contradiction = False
 
+    # Riesgo de cruce: cuánto movimiento contrario necesitaría BTC por segundo
+    # para alcanzar el target antes de que expire esta ronda.
+    crossing_risk = None
+    if (seconds_left is not None and seconds_left > 0 and distance is not None
+            and abs(distance) > 0 and terminal_override):
+        required_speed = abs(distance) / max(float(seconds_left), 1.0)
+        wanted = 1 if direction == "UP" else -1
+        if micro.get("ready"):
+            adverse_samples = []
+            for window in (5, 10, 30):
+                delta = micro.get(f"change_{window}s")
+                if delta is not None:
+                    adverse_samples.append(max(0.0, -wanted * float(delta) / window))
+            adverse_samples.append(max(0.0, -wanted * float(micro.get("slope") or 0)))
+            # Un movimiento aislado no implica que la tendencia vaya a continuar.
+            adverse_speed = sorted(adverse_samples)[len(adverse_samples) // 2] if adverse_samples else 0.0
+            crossing_risk = adverse_speed / max(required_speed, 0.01)
+        else:
+            crossing_risk = None
+
     if micro.get("ready"):
         wanted = 1 if direction == "UP" else -1
         c10 = micro["change_10s"] * wanted
@@ -3063,15 +3083,14 @@ def closing_reader(sig, round_signal, seconds_left, micro):
         micro_score += 4 if slope > 0.45 else (-5 if slope < -0.45 else 0)
         micro_score += 4 if ratio >= 0.62 else (-5 if ratio <= 0.38 else 0)
 
-        # La microlectura pesa menos cuando quedan segundos y la distancia es amplia.
+        # La microlectura pesa según el riesgo real de alcanzar el target
+        # antes del cierre; no según una bajada aislada en dólares.
         weight = 1.0
         if seconds_left is not None:
-            if seconds_left <= 30:
-                weight = 0.45 if terminal_override else 1.20
+            if terminal_override and crossing_risk is not None:
+                weight = float(np.clip(0.30 + 0.65 * crossing_risk, 0.30, 1.35))
             elif seconds_left <= 60:
-                weight = 0.70 if terminal_override else 1.35
-            elif seconds_left <= 120:
-                weight = 1.35
+                weight = 1.0
             elif seconds_left <= 180:
                 weight = 1.20
 
@@ -3091,15 +3110,17 @@ def closing_reader(sig, round_signal, seconds_left, micro):
     if seconds_left is not None and seconds_left <= 180:
         confidence += 2
 
-    # Refuerzo específico de tiempo + distancia.
-    if terminal_override and distance is not None:
-        abs_d = abs(distance)
-        if seconds_left <= 15:
-            confidence = max(confidence, 90 if abs_d >= 75 else 82)
-        elif seconds_left <= 30:
-            confidence = max(confidence, 86 if abs_d >= 100 else 78)
-        elif seconds_left <= 60:
-            confidence = max(confidence, 80 if abs_d >= 120 else 74)
+    # Refuerzo proporcional al tiempo y distancia, sin imponer porcentajes
+    # mínimos arbitrarios: un cruce rápido aún puede ocurrir.
+    if terminal_override and crossing_risk is not None:
+        if crossing_risk < 0.25:
+            confidence += 8
+        elif crossing_risk < 0.55:
+            confidence += 4
+        elif crossing_risk >= 1.40:
+            confidence -= 14
+        elif crossing_risk >= 1.0:
+            confidence -= 7
 
     confidence = int(round(np.clip(confidence, 5, 100)))
 
@@ -4167,12 +4188,12 @@ def live_dashboard():
           <div><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
           <div><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
           <div><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
-        </div><div class="finalnote">Cambio de precio en los últimos segundos.</div></div>
+        </div></div>
         <div class="finalcard distance"><div class="finaltitle">▥ &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">{final_distance_label}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct_label}</div></div>
-        <div class="finalcard speed"><div class="finaltitle">VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div><div class="finalnote">En los últimos 10 s.</div></div>
+        <div class="finalcard speed"><div class="finaltitle">VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div></div>
       </div>
       <div class="finalanalysis">
-        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b>{final_status}</b><span>{final_note}</span></div></div>
+        <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>POSICIÓN ACTUAL</small><b>{final_status}</b></div></div>
         <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
       </div>
     </div>'''
@@ -4204,6 +4225,25 @@ def live_dashboard():
 @media(max-width:400px){{
   .refapp .rhead.jc-bg-header{{height:145px!important;min-height:145px!important;max-height:145px!important}}
 }}
+/* Lector de cierre: diseño compacto, sin reglas sobre otros paneles. */
+.refapp .reader.jcclose {{
+ padding:9px 10px!important; background:linear-gradient(145deg,#031323,#06283b 72%,#02121e)!important;
+ border:1px solid #d9af60!important;border-radius:16px!important;
+ box-shadow:inset 0 0 11px rgba(0,223,181,.12),0 0 10px rgba(236,181,71,.28)!important;
+}}
+.refapp .jcclose-title {{display:flex;justify-content:space-between;align-items:center;color:#f6fbff;font-size:clamp(12px,3vw,15px);font-weight:800;font-style:italic;gap:8px}}
+.refapp .jcclose-symbol {{color:#e8b84d;font-size:21px;vertical-align:middle;text-shadow:0 0 7px #ffd16e}}
+.refapp .jcclose-title em {{font-style:normal;font-size:9px;color:#00dfb5;border:1px solid #08b88e;border-radius:25px;padding:4px 9px;white-space:nowrap}}
+.refapp .jcclose-main {{display:grid;grid-template-columns:minmax(0,1fr) 99px;align-items:center;gap:9px;margin:8px 0 10px}}
+.refapp .jcclose-signal {{height:82px;min-width:0;border:1px solid var(--signal);border-radius:15px;background:linear-gradient(155deg,#032034,#061729);box-shadow:0 0 12px color-mix(in srgb,var(--signal) 36%,transparent),inset 0 -9px 20px color-mix(in srgb,var(--signal) 12%,transparent);display:flex;align-items:center;justify-content:center;gap:11px;color:var(--signal)}}
+.refapp .jcclose-signal strong {{font-size:clamp(30px,8vw,44px)!important;line-height:1!important;font-weight:950!important;font-style:italic;letter-spacing:.5px;color:#f4fbff;text-shadow:0 0 12px var(--signal)}}
+.refapp .jcclose-double {{font-size:clamp(21px,5.7vw,32px)!important;line-height:.9;letter-spacing:-10px;padding-right:10px;transform:rotate(-90deg);color:var(--signal);text-shadow:0 0 10px currentColor}}
+.refapp .jcclose-dial {{width:95px;height:95px;box-sizing:border-box;border-radius:50%;display:grid;place-items:center;position:relative;background:conic-gradient(var(--dial) calc(var(--p)*1%),#203a4b 0);box-shadow:0 0 14px color-mix(in srgb,var(--dial) 45%,transparent)}}
+.refapp .jcclose-dial:before {{content:"";position:absolute;inset:12px;border-radius:50%;background:#041625}}
+.refapp .jcclose-dial span {{z-index:1;font-size:24px;font-weight:900;color:#f1f9ff}}
+.refapp .jcclose .finalnote {{display:none!important}}
+.refapp .jcclose .analysistext span {{display:none!important}}
+@media(max-width:380px){{.refapp .jcclose-main{{grid-template-columns:minmax(0,1fr) 80px}}.refapp .jcclose-dial{{width:78px;height:78px}}.refapp .jcclose-dial span{{font-size:19px}}.refapp .jcclose-signal{{height:72px}}}}
 </style>
 <div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
   <!-- El fondo ya incluye logo, título, mercado y engranaje. -->
@@ -4248,10 +4288,15 @@ def live_dashboard():
     <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
   </section>
 
-  <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div><strong>{reader['headline']}</strong><small>{reader['note']}</small></div>
-    <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
+  <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
+    <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>● ACTIVO</em></div>
+    <div class="jcclose-main">
+      <div class="jcclose-signal" style="--signal:{reader['color']}">
+        <span class="jcclose-double">{'❯❯' if reader.get('direction') == 'UP' else '❮❮' if reader.get('direction') == 'DOWN' else '◌'}</span>
+        <strong>{reader.get('direction') or '—'}</strong>
+      </div>
+      <div class="jcclose-dial" style="--p:{reader['percent']};--dial:{reader['color']}"><span>{reader_percent_label}</span></div>
+    </div>
     {final_panel}
   </section>
 
