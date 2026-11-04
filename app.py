@@ -3109,18 +3109,6 @@ def render_history_page():
   }
 }
 
-
-/* Arte SVG: señal sólida y 3D, sin cuadro. Solo presentación. */
-.refapp .rhero .rsignal .alpha-signal-art{
- display:block!important;width:min(92%,360px)!important;height:auto!important;
- max-height:135px!important;overflow:visible!important;
- filter:drop-shadow(0 0 7px var(--glow))!important;
-}
-.refapp.dir-up .rhero .rsignal:has(.alpha-signal-art),
-.refapp.dir-down .rhero .rsignal:has(.alpha-signal-art){
- width:100%!important;display:flex!important;justify-content:center!important;
- padding:0!important;background:none!important;filter:none!important;
-}
 </style>""", unsafe_allow_html=True)
     df=load_history(2000); stats=history_stats(df)
     st.markdown(f"""
@@ -3821,28 +3809,6 @@ def live_dashboard():
         if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
     )
 
-    # Solo arte visual SVG: conserva el estado UP/DOWN que entrega el motor.
-    # El texto SVG tiene relleno real (evita el efecto de letras huecas por CSS).
-    art_up = active == "UP"
-    art_light = "#d9ffe8" if art_up else "#ffe3e9"
-    art_mid = "#13ff99" if art_up else "#ff4f75"
-    art_dark = "#008c61" if art_up else "#9b163e"
-    art_glow = "#00fa93" if art_up else "#ff365e"
-    art_word = "UP" if art_up else "DOWN"
-    art_size = "100" if art_up else "77"
-    art_x = "133" if art_up else "124"
-    signal_art_html = f'''<svg class="alpha-signal-art" viewBox="0 0 420 142" role="img" aria-label="Señal {art_word}" xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <linearGradient id="alphaArrowFill" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{art_light}"/><stop offset="0.30" stop-color="{art_mid}"/><stop offset="1" stop-color="{art_dark}"/></linearGradient>
-        <linearGradient id="alphaLetterFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{art_light}"/><stop offset="0.38" stop-color="{art_mid}"/><stop offset="1" stop-color="{art_dark}"/></linearGradient>
-        <filter id="alphaNeon" x="-50%" y="-70%" width="200%" height="240%"><feGaussianBlur stdDeviation="5"/></filter>
-      </defs>
-      <path d="M 65 7 L 127 72 L 95 72 L 95 131 L 36 131 L 36 72 L 3 72 Z" fill="{art_glow}" opacity=".65" filter="url(#alphaNeon)"/>
-      <path d="M 65 7 L 127 72 L 95 72 L 95 131 L 36 131 L 36 72 L 3 72 Z" fill="url(#alphaArrowFill)" stroke="{art_light}" stroke-width="2" stroke-linejoin="round"/>
-      <text x="{art_x}" y="110" font-family="Arial Black,Impact,Arial,sans-serif" font-size="{art_size}" font-style="italic" font-weight="900" letter-spacing="-5" fill="{art_glow}" opacity=".75" filter="url(#alphaNeon)">{art_word}</text>
-      <text x="{art_x}" y="110" font-family="Arial Black,Impact,Arial,sans-serif" font-size="{art_size}" font-style="italic" font-weight="900" letter-spacing="-5" fill="url(#alphaLetterFill)" stroke="{art_light}" stroke-width="1.5" paint-order="stroke fill">{art_word}</text>
-    </svg>'''
-
     panel_html = f"""
 <div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
   <header class="rhead">
@@ -3854,7 +3820,7 @@ def live_dashboard():
   </header>
 
   <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}">
-    <div class="rsignal">{signal_art_html if active in ("UP", "DOWN") else "<span>ESPERANDO</span>"}</div>
+    <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
     <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
   </section>
 
@@ -4607,7 +4573,6 @@ else:
   }
 }
 
-
 /* JC ALPHA EDGE · ETAPA TARJETAS 4 METRICAS · SOLO PRESENTACION */
 .refapp .rgrid{
   gap:clamp(8px,1.5vw,14px)!important;
@@ -4666,7 +4631,6 @@ else:
   .refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{font-size:clamp(22px,7vw,35px)!important}
 }
 /* FIN ETAPA TARJETAS */
-
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
