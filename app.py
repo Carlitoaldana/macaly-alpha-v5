@@ -3834,7 +3834,7 @@ def live_dashboard():
       <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="bigicon targeticon">◎</div>
+      <div class="bigicon targeticon" aria-label="Diana de target"><svg viewBox="0 0 48 48" width="35" height="35" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="22" cy="26" r="17" stroke="#f7bb49" stroke-width="3"/><circle cx="22" cy="26" r="10" stroke="#f7bb49" stroke-width="3"/><circle cx="22" cy="26" r="3" fill="#f7bb49"/><path d="M23 25L40 8M32 8h8v8" stroke="#ffd77b" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
       <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
     </div>
     <div class="rcard keycard">
@@ -3843,7 +3843,7 @@ def live_dashboard():
       <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="clock">◷</div>
+      <div class="clock" aria-label="Reloj"><svg viewBox="0 0 48 48" width="34" height="34" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="24" cy="27" r="17" stroke="#f7bb49" stroke-width="3.5"/><path d="M24 27V16M24 27l8 5" stroke="#ffd77b" stroke-width="3.5" stroke-linecap="round"/><path d="M18 5h12M24 5v5M10 13l-4 4M38 13l4 4" stroke="#f7bb49" stroke-width="3.5" stroke-linecap="round"/></svg></div>
       <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
       <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
     </div>
@@ -4655,6 +4655,37 @@ else:
 .refapp .motionrow b{font-size:clamp(14px,3.6vw,20px)!important;color:#0ae4b7!important}
 @media(max-width:430px){.refapp .reader{padding:12px 10px!important}.refapp .readerbody{gap:6px!important}.refapp .finalcard{padding:9px 6px!important}}
 /* FIN ETAPA LECTOR PREMIUM */
+
+/* AJUSTE FINAL: tarjetas compactas, como la referencia original */
+.refapp .rgrid{
+ grid-template-columns:repeat(2,minmax(0,1fr))!important;
+ gap:clamp(5px,1.3vw,10px)!important;
+ margin-top:5px!important;
+}
+.refapp .rgrid .rcard.keycard{
+ height:clamp(62px,12vw,86px)!important;
+ min-height:0!important;
+ padding:clamp(5px,1.2vw,9px)!important;
+ gap:clamp(3px,1vw,7px)!important;
+ border-radius:clamp(10px,2vw,16px)!important;
+}
+.refapp .rgrid .keycard .rlabel{font-size:clamp(8px,1.3vw,12px)!important;line-height:1.05!important}
+.refapp .rgrid .keycard .rvalue{font-size:clamp(16px,2.8vw,27px)!important;line-height:1.08!important}
+.refapp .rgrid .keycard .rdelta{font-size:clamp(9px,1.25vw,12px)!important;margin-top:1px!important}
+.refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{font-size:clamp(19px,3.3vw,31px)!important}
+.refapp .reader{padding:clamp(8px,1.8vw,12px)!important}
+.refapp .finalgrid{gap:6px!important}
+.refapp .finalcard{padding:7px 6px!important}
+@media(max-width:430px){
+ .refapp .rgrid{gap:6px!important}
+ .refapp .rgrid .rcard.keycard{height:clamp(65px,19vw,79px)!important;padding:6px 7px!important;gap:4px!important}
+ .refapp .rgrid .keycard .rvalue{font-size:clamp(15px,4.5vw,20px)!important}
+ .refapp .rgrid .keycard .rlabel{font-size:clamp(8px,2.25vw,10px)!important}
+ .refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{font-size:clamp(18px,5.8vw,25px)!important}
+ .refapp .reader{padding:9px 7px!important}
+ .refapp .finalcard{padding:6px 4px!important}
+}
+
 
 </style>""", unsafe_allow_html=True)
     live_dashboard()
