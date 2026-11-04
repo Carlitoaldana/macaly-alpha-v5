@@ -4458,6 +4458,64 @@ else:
  }
 }
 
+
+/* Ajuste final: UP/DOWN compacto, letras RELLENAS y brillo tipo referencia.
+   Exclusivamente CSS; ningún cálculo ni decisión del motor se modifica. */
+.refapp.dir-up .rhero .rsignal,
+.refapp.dir-down .rhero .rsignal{
+  gap:7px!important;
+  font-size:clamp(56px,13.2vw,86px)!important;
+  letter-spacing:-3px!important;
+  -webkit-text-stroke:0!important;
+  text-shadow:none!important;
+  overflow:visible!important;
+  padding:3px 7px!important;
+}
+.refapp.dir-up .rhero .rsignal>span:last-child,
+.refapp.dir-down .rhero .rsignal>span:last-child{
+  color:#22ff99!important;
+  background:none!important;
+  background-image:none!important;
+  -webkit-background-clip:border-box!important;
+  background-clip:border-box!important;
+  -webkit-text-fill-color:currentColor!important;
+  -webkit-text-stroke:1px #bcffe2!important;
+  text-shadow:0 1px 0 #047c4c,0 2px 0 #025c44,0 0 5px #a2ffe0,
+              0 0 13px #05ff93,0 0 27px #00c96e!important;
+  filter:drop-shadow(0 0 8px #00e98a)!important;
+  transform:skewX(-9deg)!important;
+  font-weight:1000!important;
+}
+.refapp.dir-down .rhero .rsignal>span:last-child{
+  color:#ff4c67!important;
+  -webkit-text-stroke:1px #ffd0d6!important;
+  text-shadow:0 1px 0 #a51b34,0 2px 0 #70152c,0 0 5px #ffbdc4,
+              0 0 13px #ff405b,0 0 27px #c81443!important;
+  filter:drop-shadow(0 0 8px #ff3957)!important;
+}
+.refapp.dir-up .rhero .cssarrow,
+.refapp.dir-down .rhero .cssarrow{
+  width:clamp(63px,15vw,93px)!important;
+  height:clamp(65px,16vw,98px)!important;
+  flex:0 0 clamp(63px,15vw,93px)!important;
+  background:linear-gradient(115deg,#b8ffe0 0%,#39ffad 22%,#04d880 58%,#008b5a 100%)!important;
+  clip-path:polygon(50% 0%,100% 39%,75% 39%,75% 100%,25% 100%,25% 39%,0 39%)!important;
+  filter:drop-shadow(0 0 5px #48ffb2) drop-shadow(0 0 13px #00dc7f)!important;
+}
+.refapp.dir-down .rhero .cssarrow{
+  background:linear-gradient(115deg,#ffd0d8,#ff576d 34%,#d92048 65%,#8c0e2d)!important;
+  filter:drop-shadow(0 0 5px #ff7488) drop-shadow(0 0 13px #ed2450)!important;
+}
+@media(max-width:460px){
+  .refapp.dir-up .rhero .rsignal,.refapp.dir-down .rhero .rsignal{
+    font-size:clamp(54px,13vw,67px)!important;
+  }
+  .refapp.dir-up .rhero .cssarrow,.refapp.dir-down .rhero .cssarrow{
+    width:clamp(60px,16vw,72px)!important;height:clamp(66px,17vw,80px)!important;
+    flex-basis:clamp(60px,16vw,72px)!important;
+  }
+}
+
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
