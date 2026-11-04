@@ -4607,6 +4607,66 @@ else:
   }
 }
 
+
+/* JC ALPHA EDGE · ETAPA TARJETAS 4 METRICAS · SOLO PRESENTACION */
+.refapp .rgrid{
+  gap:clamp(8px,1.5vw,14px)!important;
+  margin-top:10px!important;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important;
+}
+.refapp .rgrid .rcard.keycard{
+  box-sizing:border-box!important;
+  position:relative!important;
+  isolation:isolate!important;
+  overflow:hidden!important;
+  min-width:0!important;
+  height:clamp(86px,14vw,115px)!important;
+  padding:clamp(10px,2vw,17px)!important;
+  gap:clamp(7px,1.5vw,14px)!important;
+  display:flex!important;
+  align-items:center!important;
+  border:1px solid rgba(238,197,111,.86)!important;
+  border-radius:clamp(13px,2.5vw,19px)!important;
+  background:linear-gradient(142deg,rgba(16,47,72,.97) 0%,rgba(6,25,43,.97) 49%,rgba(2,13,28,.98) 100%)!important;
+  box-shadow:inset 0 1px 0 rgba(218,245,255,.48),inset 0 -2px 12px rgba(0,6,18,.65),0 2px 11px rgba(0,9,22,.6),0 0 9px rgba(247,191,74,.13)!important;
+}
+.refapp .rgrid .rcard.keycard::before{
+  content:""!important;position:absolute!important;inset:0!important;z-index:-1!important;
+  background:linear-gradient(115deg,rgba(21,111,156,.18),transparent 48%),radial-gradient(ellipse at 100% 110%,rgba(246,182,65,.17),transparent 40%)!important;
+  pointer-events:none!important;
+}
+.refapp .rgrid .rcard.keycard::after{
+  content:""!important;position:absolute!important;right:0!important;bottom:0!important;
+  width:25%!important;height:35%!important;z-index:0!important;
+  background:linear-gradient(135deg,transparent 37%,rgba(255,207,104,.16) 67%,rgba(250,186,65,.55) 100%)!important;
+  clip-path:polygon(100% 0,100% 100%,0 100%)!important;pointer-events:none!important;
+}
+.refapp .rgrid .keycard > *{position:relative;z-index:1;min-width:0}
+.refapp .rgrid .keycard .rlabel{
+  font-size:clamp(9px,1.5vw,13px)!important;font-weight:850!important;
+  line-height:1.16!important;letter-spacing:.35px!important;color:#f1f5ff!important;
+}
+.refapp .rgrid .keycard .rvalue{
+  font-size:clamp(20px,3.5vw,34px)!important;font-weight:900!important;
+  line-height:1.12!important;letter-spacing:-.65px!important;
+  text-shadow:0 1px 3px rgba(0,0,0,.48)!important;
+  overflow-wrap:normal!important;white-space:nowrap!important;
+}
+.refapp .rgrid .keycard .rdelta{font-size:clamp(10px,1.6vw,14px)!important;font-weight:850!important;margin-top:3px!important}
+.refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{
+  flex-shrink:0!important;color:#ffcb55!important;
+  filter:drop-shadow(0 1px 2px #b06a1e88)!important;
+}
+.refapp .rgrid .keycard .timecontent{flex:1!important;min-width:0!important}
+.refapp .rgrid .keycard .timebar{overflow:hidden!important;border-radius:20px!important}
+@media(max-width:430px){
+  .refapp .rgrid .rcard.keycard{height:clamp(78px,24vw,102px)!important;padding:9px 10px!important;gap:7px!important}
+  .refapp .rgrid .keycard .rvalue{font-size:clamp(18px,5.4vw,26px)!important}
+  .refapp .rgrid .keycard .rlabel{font-size:clamp(8px,2.3vw,11px)!important}
+  .refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{font-size:clamp(22px,7vw,35px)!important}
+}
+/* FIN ETAPA TARJETAS */
+
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
