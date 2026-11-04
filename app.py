@@ -3682,6 +3682,12 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 .refapp .rlive{color:#e7d5b8!important;border:1px solid var(--jc-gold-soft)!important;border-radius:18px!important;padding:3px 7px!important;bottom:-2px!important}
 .refapp .rlive i{background:var(--accent)!important;box-shadow:0 0 9px var(--glow)!important}
 /* Colores de señales, alertas, barras y números intactos. */
+
+/* TradingView Lightweight Charts: gestures managed by the native library */
+#canvas{height:420px!important;position:relative!important;overflow:hidden!important;touch-action:pan-y!important}
+#canvas canvas{touch-action:none!important}
+#rsi-pane{position:relative;overflow:hidden}
+@media(max-width:480px){#canvas{height:375px!important}}
 </style>
 <section class="panel">
 <header class="header"><div><h2>BTC / USD</h2><div class="sub" id="subtitle"></div></div><div><div class="price" id="price"></div><div class="live" id="live"></div></div></header>
@@ -3690,9 +3696,10 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 <details id="momentum"><summary>⚡ SHORT-TERM MOMENTUM <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>MOVIMIENTO RECIENTE DE BTC</h3><div class="metrics" id="momrows"></div><p class="note">Cambio porcentual calculado por el motor en 3, 5 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.</p></div></details>
 <div class="tools"><h3>INDICADORES</h3><div class="toggles" id="toggles"></div><div class="legend" id="legend"></div></div>
 <div class="floatcounts"><div>🐋 BUY WHALES <b id="floatbuy"></b></div><div>🐋 SELL WHALES <b id="floatsell"></b></div></div>
-<div class="tooltip" id="tooltip">Arrastra con un dedo · amplía con dos · AHORA vuelve al precio actual.</div><div class="canvas" id="canvas"></div>
+<div class="tooltip" id="tooltip">Arrastra las velas · pellizca para ampliar · AHORA vuelve al precio actual.</div><div class="canvas" id="canvas"></div><div id="rsi-pane" style="height:110px;display:none;background:#06121a;border-top:1px solid #294c69"></div>
 <div class="chartnav"><button id="older" aria-label="Velas anteriores">←</button><button id="newer" aria-label="Velas siguientes">→</button><button id="zoomin" aria-label="Acercar">＋</button><button id="zoomout" aria-label="Alejar">−</button><button id="reset">AHORA</button><span id="viewtf"></span></div>
 </section>
+<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 let D=__PAYLOAD__; const $=id=>document.getElementById(id), fmt=(v,n=2)=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:n,maximumFractionDigits:n}), usd=v=>v==null?'—':'$'+fmt(v), compact=v=>v==null?'—':v>=1e6?'$'+(v/1e6).toFixed(2)+'M':v>=1000?'$'+(v/1000).toFixed(0)+'K':'$'+fmt(v,0);
 let saved={};try{saved=JSON.parse(localStorage.getItem('btc-neon-panel-v1')||'{}')}catch(e){}
@@ -3713,161 +3720,113 @@ for(const key of ['mom3','mom5','mom15']){const v=D[key],box=document.createElem
 refreshLabels();
 const colors={ema9:'#f000ff',ema21:'#00eaff',vwap:'#6261ff',volume:'#00d7b0',rsi:'#f000ff'};
 for(const [key,label] of Object.entries({ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',volume:'VOLUME',rsi:'RSI'})){const b=document.createElement('button');b.style.setProperty('--c',colors[key]);b.dataset.key=key;b.onclick=()=>{toggles[key]=!toggles[key];persist();draw()};$('toggles').append(b);b.dataset.label=label}
-let geometry=null;
-function draw(){
-document.querySelectorAll('.toggle').forEach(x=>x.removeAttribute('data-unused'));
-for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
-const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(-Math.floor(visible*.6),Math.min(offset,Math.max(0,n-visible)));const virtualEnd=n-Math.round(offset),end=Math.min(n,virtualEnd),start=Math.max(0,virtualEnd-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$('canvas').innerHTML='<div class="empty">Esperando velas actuales…</div>';return}
-const last=all[n-1];$('legend').innerHTML=['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join('');
-const W=720,H=toggles.rsi?780:615,L=10,R=126,T=28,B=580,plot=W-L-R,freeRight=164,candlePlot=plot-freeRight,step=candlePlot/Math.round(visible),body=Math.max(3.8,Math.min(18,step*.84));
-let vals=rows.flatMap(r=>[r.low,r.high]);for(const k of ['ema9','ema21','vwap'])if(toggles[k])vals.push(...rows.map(r=>r[k]).filter(v=>v!=null));for(const v of [D.target,D.support,D.resistance,D.price])if(v!=null)vals.push(v);let lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,5);lo-=pad;hi+=pad;lo+=pricePan;hi+=pricePan;const y=v=>T+(hi-v)/(hi-lo)*(B-T),x=i=>L+(i+.5)*step;
-let s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Gráfica BTC con velas, indicadores y RSI"><defs><clipPath id="plot"><rect x="0" y="0" width="'+(W-R)+'" height="'+B+'"/></clipPath></defs>';
-for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="14">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
-for(let k=0;k<=4;k++){const xx=L+plot*k/4;s+='<line x1="'+xx+'" y1="'+T+'" x2="'+xx+'" y2="'+(toggles.rsi?H-30:B)+'" stroke="#191c34"/>'}
-s+='<g clip-path="url(#plot)">';if(toggles.volume){const max=Math.max(...rows.map(r=>r.volume),1);rows.forEach((r,i)=>{let h=r.volume/max*105;s+='<rect x="'+(x(i)-body/2)+'" y="'+(B-h)+'" width="'+body+'" height="'+h+'" fill="'+(r.close>=r.open?'#00dfb5':'#e64b4b')+'" opacity=".9"/>'})}
-rows.forEach((r,i)=>{const c=r.close>=r.open?'#00dfb5':'#e64b4b';s+='<line x1="'+x(i)+'" x2="'+x(i)+'" y1="'+y(r.high)+'" y2="'+y(r.low)+'" stroke="'+c+'" stroke-width="2.1"/><rect x="'+(x(i)-body/2)+'" y="'+Math.min(y(r.open),y(r.close))+'" width="'+body+'" height="'+Math.max(1.8,Math.abs(y(r.open)-y(r.close)))+'" fill="'+c+'"/>'});
-for(const k of ['ema9','ema21','vwap'])if(toggles[k]){let points=rows.map((r,i)=>r[k]==null?'':x(i)+','+y(r[k])).filter(Boolean).join(' ');s+='<polyline points="'+points+'" fill="none" stroke="'+colors[k]+'" stroke-width="3" '+(k==='vwap'?'stroke-dasharray="8 6"':'')+'/>'}
-s+='</g>';let levels=[[D.resistance,'RESISTANCE','#e64b4b'],[D.target,'TARGET','#00dfb5'],[D.price,'BTC','#00dfb5'],[D.support,'SUPPORT','#00dfb5']].filter(r=>r[0]!=null).map(r=>({v:r[0],label:r[1],c:r[2],yy:y(r[0]),labelY:y(r[0])})).filter(l=>l.yy>=T&&l.yy<=B).sort((a,b)=>a.yy-b.yy);
-let previous=T-20;for(const l of levels){l.labelY=Math.max(T+14,previous+32,l.yy);previous=l.labelY}let excess=previous-(B-14);if(excess>0)for(const l of levels)l.labelY-=excess;
-for(const l of levels){const edge=W-R,priceX=edge+2,labelWidth=l.label==='BTC'?0:(l.label==='RESISTANCE'?146:106),labelX=priceX-labelWidth;s+='<line x1="0" y1="'+l.yy+'" x2="'+edge+'" y2="'+l.yy+'" stroke="'+l.c+'" stroke-width="'+(l.label==='TARGET'?2.5:1)+'" stroke-dasharray="'+(l.label==='TARGET'?'6 5':'3 4')+'" opacity=".9"/><path d="M '+edge+' '+l.yy+' L '+priceX+' '+l.labelY+'" stroke="'+l.c+'" fill="none"/>';if(labelWidth)s+='<rect x="'+labelX+'" y="'+(l.labelY-14)+'" width="'+labelWidth+'" height="28" rx="2" fill="'+l.c+'"/><text x="'+(labelX+labelWidth/2)+'" y="'+(l.labelY+6)+'" text-anchor="middle" fill="#06101b" font-size="18">'+l.label+'</text>';s+='<rect x="'+priceX+'" y="'+(l.labelY-14)+'" width="120" height="28" rx="2" fill="'+l.c+'"/><line x1="'+priceX+'" x2="'+priceX+'" y1="'+(l.labelY-14)+'" y2="'+(l.labelY+14)+'" stroke="#06101b" stroke-width="1"/><text x="'+(priceX+6)+'" y="'+(l.labelY+6)+'" fill="#06101b" font-size="18">'+fmt(l.v)+'</text>'}
-if(toggles.rsi){const rt=620,rh=120,rvals=rows.map(r=>r.rsi).filter(Number.isFinite),rmin=rvals.length?Math.min(...rvals):30,rmax=rvals.length?Math.max(...rvals):70,rpad=Math.max((rmax-rmin)*.15,3);let rlo=Math.max(0,rmin-rpad),rhi=Math.min(100,rmax+rpad);if(rhi-rlo<20){const mid=(rhi+rlo)/2;rlo=Math.max(0,mid-10);rhi=Math.min(100,rlo+20);rlo=Math.max(0,rhi-20)}const ry=v=>rt+(rhi-v)/(rhi-rlo)*rh;s+='<text x="14" y="610" fill="#aa8dc5" font-size="12">RSI 14</text>';for(let v=Math.ceil(rlo/10)*10;v<=rhi;v+=10)s+='<line x1="0" y1="'+ry(v)+'" x2="'+(W-R)+'" y2="'+ry(v)+'" stroke="#29243d"/><text x="'+(W-R+10)+'" y="'+(ry(v)+5)+'" fill="#9ca6c2" font-size="14">'+fmt(v)+'</text>';s+='<polyline points="'+rows.map((r,i)=>Number.isFinite(r.rsi)?x(i)+','+ry(r.rsi):'').filter(Boolean).join(' ')+'" fill="none" stroke="#f000ff" stroke-width="3"/>';const shownRsi=rows[rows.length-1].rsi;if(Number.isFinite(shownRsi))s+='<rect x="'+(W-R+4)+'" y="'+(ry(shownRsi)-12)+'" width="65" height="25" rx="3" fill="#f000ff"/><text x="'+(W-R+11)+'" y="'+(ry(shownRsi)+6)+'" fill="white" font-size="15">'+fmt(shownRsi)+'</text>'}
-for(let k=0;k<4;k++){const i=Math.round((rows.length-1)*k/3),tm=new Date(rows[i].t*1000).toLocaleString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',...(D.timeframe==='1D'?{month:'short',day:'numeric'}:{})});s+='<text x="'+x(i)+'" y="'+(H-7)+'" fill="#95a1bc" font-size="11" text-anchor="middle">'+tm+'</text>'}
-s+='<g id="crosshair"></g></svg>';$('canvas').innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end,visible,step,candlePlot};
+// The original custom SVG/pointer engine has been fully replaced by TradingView Lightweight Charts.
+// The surrounding cards, signals, toolbars, Python payload and market calculations remain unchanged.
+let lwChart=null, candleSeries=null, volumeSeries=null, overlays={}, levelLines=[], rsiChart=null, rsiSeries=null;
+let applyingData=false, syncing=false;
+const candleOptions={upColor:'#00dfb5',downColor:'#e64b4b',borderUpColor:'#00dfb5',borderDownColor:'#e64b4b',wickUpColor:'#00dfb5',wickDownColor:'#e64b4b'};
+function chartRows(data){return (data.rows||[]).filter(r=>Number.isFinite(r.t)&&[r.open,r.high,r.low,r.close].every(Number.isFinite))
+ .map(r=>({time:r.t,open:r.open,high:r.high,low:r.low,close:r.close}));}
+function seriesRows(key){return (D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r[key]))
+ .map(r=>({time:r.t,value:r[key]}));}
+function refreshToggles(){
+ for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(!!toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
+ const last=D.rows?.[D.rows.length-1];
+ $('legend').innerHTML=last?['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join(''):'';
 }
-$('zoomin').onclick=()=>{visible=Math.max(12,Math.round(visible*.75));persist();draw()};$('zoomout').onclick=()=>{visible=Math.round(visible*1.3);persist();draw()};$('older').onclick=()=>{offset+=Math.max(5,Math.floor(visible/4));persist();draw()};$('newer').onclick=()=>{offset-=Math.max(5,Math.floor(visible/4));persist();draw()};$('reset').onclick=()=>{offset=0;visible=32;pricePan=0;draw();persist()};
-// Navigation gestures affect only the chart viewport. They never alter trading data.
-const touchPoints=new Map();
-let gesture=null, chartDrawFrame=0, interactionDirty=false;
-const chart=$('canvas');
-chart.style.touchAction='none';
-chart.style.overscrollBehavior='contain';
-function clampView(){
-  if(!D.rows.length)return;
-  visible=Math.max(12,Math.min(D.rows.length,Math.round(visible)));
-  // Permit some blank future space while keeping real historical candles accessible.
-  offset=Math.max(-Math.floor(visible*.35),Math.min(D.rows.length-visible,Math.round(offset)));
+function initChart(){
+ if(!window.LightweightCharts){$('canvas').textContent='No se pudo cargar la gráfica de TradingView. Verifica la conexión de internet.';return false;}
+ if(lwChart)return true;
+ const L=window.LightweightCharts;
+ lwChart=L.createChart($('canvas'),{
+  width:$('canvas').clientWidth,height:$('canvas').clientHeight,
+  layout:{background:{type:L.ColorType.Solid,color:'#06121a'},textColor:'#b9c8d9',fontFamily:'Inter,system-ui,sans-serif',fontSize:11},
+  grid:{vertLines:{color:'#142b3a'},horzLines:{color:'#142b3a'}},
+  rightPriceScale:{borderColor:'#34546c',scaleMargins:{top:.12,bottom:.17}},
+  timeScale:{borderColor:'#34546c',rightOffset:8,barSpacing:10,minBarSpacing:2,timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false},
+  crosshair:{mode:L.CrosshairMode.Normal,vertLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'},horzLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'}},
+  handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:false},
+  handleScale:{axisPressedMouseMove:true,mouseWheel:true,pinch:true,axisDoubleClickReset:true}
+ });
+ candleSeries=lwChart.addCandlestickSeries({...candleOptions,priceFormat:{type:'price',precision:2,minMove:.01},lastValueVisible:true,priceLineVisible:true});
+ for(const k of ['ema9','ema21','vwap'])overlays[k]=lwChart.addLineSeries({color:colors[k],lineWidth:2,visible:!!toggles[k],lastValueVisible:false,priceLineVisible:false,...(k==='vwap'?{lineStyle:L.LineStyle.Dashed}:{})});
+ volumeSeries=lwChart.addHistogramSeries({priceScaleId:'',visible:!!toggles.volume,priceLineVisible:false,lastValueVisible:false});
+ volumeSeries.priceScale().applyOptions({scaleMargins:{top:.82,bottom:0}});
+ rsiChart=L.createChart($('rsi-pane'),{
+  width:$('rsi-pane').clientWidth,height:110,
+  layout:{background:{type:L.ColorType.Solid,color:'#06121a'},textColor:'#b9c8d9',fontSize:10},
+  grid:{vertLines:{color:'#142b3a'},horzLines:{color:'#142b3a'}},
+  rightPriceScale:{borderColor:'#34546c'},timeScale:{visible:false,borderColor:'#34546c'},
+  handleScroll:false,handleScale:false,crosshair:{mode:L.CrosshairMode.Normal}
+ });
+ rsiSeries=rsiChart.addLineSeries({color:colors.rsi,lineWidth:2,priceLineVisible:false,lastValueVisible:true});
+ // Keep RSI time aligned with the BTC chart when panning/zooming.
+ lwChart.timeScale().subscribeVisibleLogicalRangeChange(range=>{
+  if(!range||syncing)return;
+  syncing=true;try{rsiChart.timeScale().setVisibleLogicalRange(range)}catch(_){}syncing=false;
+  if(!applyingData)persistView();
+ });
+ lwChart.subscribeCrosshairMove(param=>{
+  if(!param||!param.time||!param.seriesData){return;}
+  const r=param.seriesData.get(candleSeries);if(!r)return;
+  const date=new Date(Number(param.time)*1000).toLocaleString('en-US',{timeZone:'America/New_York'});
+  $('tooltip').textContent=date+' · O '+fmt(r.open)+' H '+fmt(r.high)+' L '+fmt(r.low)+' C '+fmt(r.close);
+ });
+ const resize=()=>{if(!lwChart)return;lwChart.applyOptions({width:$('canvas').clientWidth,height:$('canvas').clientHeight});rsiChart.applyOptions({width:$('rsi-pane').clientWidth,height:110})};
+ if(window.ResizeObserver){new ResizeObserver(resize).observe($('canvas'));new ResizeObserver(resize).observe($('rsi-pane'))}else window.addEventListener('resize',resize);
+ return true;
 }
-function paintChart(){
-  if(chartDrawFrame)return;
-  chartDrawFrame=requestAnimationFrame(()=>{chartDrawFrame=0;clampView();draw();});
+function persistView(){
+ if(!lwChart)return;
+ const range=lwChart.timeScale().getVisibleLogicalRange();
+ if(!range)return;
+ const n=D.rows.length;visible=Math.max(12,Math.round(range.to-range.from));offset=Math.max(0,Math.round((n-1)-range.to));persist();
 }
-function chartPoint(e){
-  const r=chart.getBoundingClientRect();
-  return {x:(e.clientX-r.left)/Math.max(1,r.width)*geometry.W,
-          y:(e.clientY-r.top)/Math.max(1,r.height)*geometry.H};
+function redrawData(preserve=true){
+ refreshToggles();if(!initChart())return;
+ applyingData=true;
+ let oldRange=preserve?lwChart.timeScale().getVisibleLogicalRange():null;
+ const newC=chartRows(D),newN=newC.length;
+ if(!newN){applyingData=false;return;}
+ candleSeries.setData(newC);
+ for(const k of ['ema9','ema21','vwap']){overlays[k].setData(seriesRows(k));overlays[k].applyOptions({visible:!!toggles[k]});}
+ volumeSeries.setData((D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r.volume)).map(r=>({time:r.t,value:r.volume,color:r.close>=r.open?'#00dfb573':'#e64b4b73'})));
+ volumeSeries.applyOptions({visible:!!toggles.volume});
+ rsiSeries.setData(seriesRows('rsi'));
+ $('rsi-pane').style.display=toggles.rsi?'block':'none';
+ for(const l of levelLines)candleSeries.removePriceLine(l);levelLines=[];
+ for(const [value,label,color] of [[D.target,'TARGET','#f1c46b'],[D.support,'SUPPORT','#00dfb5'],[D.resistance,'RESISTANCE','#e64b4b']]){
+  if(Number.isFinite(value))levelLines.push(candleSeries.createPriceLine({price:value,color,lineWidth:1,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:label}));
+ }
+ try{
+  if(oldRange&&preserve){
+   // Preserve the user's camera even when a new candle arrives.
+   // Move one logical bar if old range was already anchored to the live edge.
+   lwChart.timeScale().setVisibleLogicalRange(oldRange);
+  }else if(saved.visible){
+   lwChart.timeScale().setVisibleLogicalRange({from:Math.max(0,newN-saved.visible-saved.offset),to:newN-1-saved.offset});
+  }else lwChart.timeScale().fitContent();
+ }catch(_) {lwChart.timeScale().fitContent()}
+ applyingData=false;
 }
-function startGesture(){
-  if(!geometry||!touchPoints.size){gesture=null;return;}
-  const points=[...touchPoints.values()],g=geometry;
-  gesture={points:points.map(p=>({...p})),visible,offset,pricePan,
-           range:g.hi-g.lo,plot:g.candlePlot,height:g.B-g.T,
-           moved:false};
-  if(points.length>1){
-    gesture.distance=Math.max(12,Math.hypot(points[1].x-points[0].x,points[1].y-points[0].y));
-    const mid=(points[0].x+points[1].x)/2;
-    const fraction=Math.max(0,Math.min(1,(mid-g.L)/g.candlePlot));
-    gesture.anchor=g.start+fraction*g.visible;
-  }
-}
-chart.addEventListener('pointerdown',e=>{
-  if(!geometry||(e.pointerType==='mouse'&&e.button!==0))return;
-  e.preventDefault();
-  touchPoints.set(e.pointerId,chartPoint(e));
-  try{chart.setPointerCapture(e.pointerId)}catch(_){}
-  startGesture();
-});
-chart.addEventListener('pointermove',e=>{
-  if(!geometry)return;
-  if(!touchPoints.has(e.pointerId)){
-    if(e.pointerType==='mouse')inspectCandle(chartPoint(e).x);
-    return;
-  }
-  e.preventDefault();
-  touchPoints.set(e.pointerId,chartPoint(e));
-  const pts=[...touchPoints.values()],g=gesture;
-  if(!g)return;
-  if(pts.length>=2&&g.points.length>=2){
-    const distance=Math.max(12,Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y));
-    visible=Math.round(g.visible*g.distance/distance);
-    visible=Math.max(12,Math.min(D.rows.length,visible));
-    const mid=(pts[0].x+pts[1].x)/2;
-    const fraction=Math.max(0,Math.min(1,(mid-geometry.L)/g.plot));
-    offset=Math.round(D.rows.length-g.anchor-(1-fraction)*visible);
-    // A two-finger vertical move shifts the price scale as well.
-    const initialY=(g.points[0].y+g.points[1].y)/2;
-    const currentY=(pts[0].y+pts[1].y)/2;
-    pricePan=g.pricePan+(currentY-initialY)/g.height*g.range;
-    g.moved=true;
-  }else if(pts.length===1&&g.points.length===1){
-    const dx=pts[0].x-g.points[0].x,dy=pts[0].y-g.points[0].y;
-    if(Math.abs(dx)>3||Math.abs(dy)>3)g.moved=true;
-    offset=Math.round(g.offset+dx/Math.max(1,g.plot)*g.visible);
-    pricePan=g.pricePan+dy/Math.max(1,g.height)*g.range;
-  }else return;
-  interactionDirty=true;
-  paintChart();
-},{passive:false});
-function endGesture(e){
-  if(!touchPoints.has(e.pointerId))return;
-  const point=touchPoints.get(e.pointerId);
-  const tapped=gesture&&!gesture.moved&&gesture.points.length===1&&touchPoints.size===1;
-  touchPoints.delete(e.pointerId);
-  startGesture();
-  if(!touchPoints.size){
-    if(chartDrawFrame){cancelAnimationFrame(chartDrawFrame);chartDrawFrame=0;}
-    clampView();draw();persist();interactionDirty=false;
-    if(tapped)inspectCandle(point.x);
-  }
-}
-for(const name of ['pointerup','pointercancel','lostpointercapture'])chart.addEventListener(name,endGesture);
-chart.addEventListener('dblclick',e=>{e.preventDefault();$('reset').onclick()});
-chart.addEventListener('wheel',e=>{
-  if(!geometry)return;
-  e.preventDefault();
-  const p=chartPoint(e),g=geometry;
-  const fraction=Math.max(0,Math.min(1,(p.x-g.L)/g.candlePlot));
-  const anchor=g.start+fraction*g.visible;
-  const next=Math.max(12,Math.min(D.rows.length,Math.round(g.visible*(e.deltaY>0?1.14:.86))));
-  visible=next;
-  offset=Math.round(D.rows.length-anchor-(1-fraction)*visible);
-  clampView();draw();persist();
-},{passive:false});
-function inspectCandle(px){if(!geometry)return;const g=geometry,i=Math.max(0,Math.min(g.rows.length-1,Math.floor((px-g.L)/g.step))),r=g.rows[i],time=new Date(r.t*1000).toLocaleString('en-US',{timeZone:'America/New_York'});$('tooltip').textContent=time+' · O '+fmt(r.open)+'  H '+fmt(r.high)+'  L '+fmt(r.low)+'  C '+fmt(r.close)+' · Vol '+fmt(r.volume,3);$('crosshair').innerHTML='<line x1="'+g.x(i)+'" x2="'+g.x(i)+'" y1="'+g.T+'" y2="'+g.B+'" stroke="#b8a5e0" stroke-dasharray="4 4"/>'}
-
-window.addEventListener('message', function(event){
-  if (!event.data || event.data.kind !== 'alpha-chart-update') return;
-  // Only the chart data changes: preserve iframe, zoom, gesture handlers and cards.
-  // La lógica y el precio recibido siguen intactos: solo interpolamos la
-  // posición VISUAL de la última vela entre dos cotizaciones reales.
-  const next = event.data.payload;
-  if (!next || !Array.isArray(next.rows)) return;
-  const old = D;
-  const sameCandle = old && old.timeframe === next.timeframe &&
-    old.rows && old.rows.length && next.rows.length &&
-    old.rows[old.rows.length-1].t === next.rows[next.rows.length-1].t;
-  if (window.__alphaVisualFrame) cancelAnimationFrame(window.__alphaVisualFrame);
-  D = next;
-  refreshLabels(); // Etiquetas: siempre el dato REAL, nunca interpolado.
-  if (touchPoints.size > 0) { interactionDirty=true; return; }
-  if (!sameCandle || offset !== 0 || document.hidden) { draw(); return; }
-  const previous = old.rows[old.rows.length-1], current = next.rows[next.rows.length-1];
-  const keys = ['open','high','low','close','ema9','ema21','vwap','rsi'];
-  const start = performance.now(), duration = 580;
-  function frame(now) {
-    const u = Math.min(1,(now-start)/duration), f = u*u*(3-2*u);
-    if (touchPoints.size > 0) { D = next; window.__alphaVisualFrame = null; return; }
-    if (u >= 1) { D = next; draw(); window.__alphaVisualFrame = null; return; }
-    const row = {...current};
-    for (const k of keys) {
-      if (Number.isFinite(previous[k]) && Number.isFinite(current[k]))
-        row[k] = previous[k] + (current[k]-previous[k])*f;
-    }
-    // El histórico es el real. Solo la vela abierta se anima.
-    D = {...next, rows: next.rows.slice(0,-1).concat(row)};
-    draw();
-    window.__alphaVisualFrame = requestAnimationFrame(frame);
-  }
-  window.__alphaVisualFrame = requestAnimationFrame(frame);
+function draw(){redrawData(true)}
+$('zoomin').onclick=()=>{if(!lwChart)return;const t=lwChart.timeScale(),r=t.getVisibleLogicalRange();if(r){const m=(r.from+r.to)/2,w=(r.to-r.from)*.72;t.setVisibleLogicalRange({from:m-w/2,to:m+w/2})}};
+$('zoomout').onclick=()=>{if(!lwChart)return;const t=lwChart.timeScale(),r=t.getVisibleLogicalRange();if(r){const m=(r.from+r.to)/2,w=(r.to-r.from)*1.35;t.setVisibleLogicalRange({from:m-w/2,to:m+w/2})}};
+$('older').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToPosition(lwChart.timeScale().scrollPosition()+10,false)};
+$('newer').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToPosition(lwChart.timeScale().scrollPosition()-10,false)};
+$('reset').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToRealTime();persistView()};
+// Controls call draw(), so toggles update the native series without a new chart element.
+window.addEventListener('message',function(event){
+ if(!event.data||event.data.kind!=='alpha-chart-update')return;
+ const next=event.data.payload;
+ if(!next||!Array.isArray(next.rows))return;
+ const previous=D;
+ const sameTimeframe=previous.timeframe===next.timeframe;
+ D=next;refreshLabels();
+ if(!initChart())return;
+ if(!sameTimeframe){redrawData(false);return;}
+ // Native data update never rebuilds the canvas; gestures and scroll are preserved.
+ redrawData(true);
 });
 draw();
 </script></html>'''
