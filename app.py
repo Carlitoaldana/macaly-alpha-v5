@@ -3787,13 +3787,13 @@ def live_dashboard():
     final_dist_pct_label = f"{abs(distance_pct):.2f}%" if distance_pct is not None else "SIN TARGET"
     final_panel = f'''<div class="finalclose">
       <div class="finalgrid">
-        <div class="finalcard motion"><div class="finaltitle">▥ &nbsp; MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motionrow">
-          <div><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
-          <div><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
-          <div><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
-        </div><div class="finalnote">Cambio de precio en los últimos segundos.</div></div>
-        <div class="finalcard distance"><div class="finaltitle">▥ &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">{final_distance_label}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct_label}</div></div>
-        <div class="finalcard speed"><div class="finaltitle">VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div><div class="finalnote">En los últimos 10 s.</div></div>
+        <div class="finalcard motion"><div class="finaltitle">MOVIMIENTO ÚLTIMOS SEGUNDOS</div><div class="motionrow">
+          <div class="motiontile"><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
+          <div class="motiontile"><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
+          <div class="motiontile"><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
+        </div></div>
+        <div class="finalcard distance"><div class="finaltitle">🎯 &nbsp; DISTANCIA AL TARGET</div><div class="finalbig" style="color:{distance_color}">{final_distance_label}</div><div class="finalsub" style="color:{distance_color}">{final_dist_pct_label}</div></div>
+        <div class="finalcard speed"><div class="finaltitle">◴ &nbsp; VELOCIDAD</div><div class="finalbig" style="color:{speed_color}">{speed_arrow} {speed_word}</div><div class="finalsub" style="color:{speed_color}">{speed_value}</div></div>
       </div>
       <div class="finalanalysis">
         <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b style="color:{final_status_color}">{final_status}</b><span>{final_note}</span></div></div>
@@ -3857,7 +3857,7 @@ def live_dashboard():
 
   <section class="reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="readerhead"><span class="pulse">⌁</span><span>LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="readerbody"><div><strong style="color:{reader['color']}">{reader['headline']}</strong></div>
+    <div class="readerbody"><div class="reader-signal-box"><small>SEÑAL DE CIERRE</small><strong style="color:{reader['color']}">{reader['headline']}</strong></div>
     <div class="rring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div></div>
     {final_panel}
   </section>
@@ -4703,6 +4703,44 @@ else:
 .refapp .motionrow b{font-size:clamp(12px,3.1vw,17px)!important}
 @media(max-width:430px){.refapp .rgrid .rcard.keycard{height:clamp(68px,19vw,82px)!important;padding:5px 7px!important}.refapp .reader{padding:8px 7px!important}.refapp .finalcard{padding:6px 4px!important}}
 
+
+
+/* REDISEÑO INTEGRAL COMPACTO - proporciones de la referencia, solo vista */
+.refapp .rgrid{gap:6px!important;margin-top:5px!important}
+.refapp .rgrid .rcard.keycard{height:clamp(64px,18vw,83px)!important;min-height:0!important;padding:6px 8px!important;border-radius:13px!important;gap:5px!important}
+.refapp .rgrid .keycard .rlabel{font-size:clamp(8px,2.1vw,11px)!important;line-height:1.08!important}
+.refapp .rgrid .keycard .rvalue{font-size:clamp(16px,4.4vw,24px)!important;line-height:1.05!important}
+.refapp .rgrid .keycard .rdelta{font-size:clamp(9px,2.2vw,12px)!important;margin-top:1px!important}
+.refapp .reader{position:relative!important;padding:9px 9px 11px!important;margin-top:6px!important;border-radius:18px!important;border:1.5px solid #d4a450!important;box-shadow:inset 0 0 18px #0a80cf30,0 0 9px #d7a34e38!important}
+.refapp .readerhead{font-size:clamp(14px,3.6vw,19px)!important;margin-bottom:4px!important}
+.refapp .readerbody{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(75px,26%)!important;gap:8px!important;align-items:center!important;min-height:96px!important;max-height:116px!important;margin:4px 0 9px!important}
+.refapp .reader-signal-box{display:flex!important;flex-direction:column!important;justify-content:center!important;align-items:center!important;gap:3px!important;min-height:76px!important;border:1px solid #397c9e!important;border-radius:12px!important;background:linear-gradient(155deg,#09233e,#03141e)!important;box-shadow:inset 0 -9px 16px #00cfa61a!important;padding:5px!important}
+.refapp .reader-signal-box small{font-size:clamp(9px,2.4vw,12px)!important;font-weight:800!important;color:#f4f7ff!important}
+.refapp .readerbody .reader-signal-box strong{font-size:clamp(17px,4vw,27px)!important;text-align:center!important;line-height:1.05!important;white-space:normal!important;overflow-wrap:normal!important;text-shadow:0 0 12px currentColor!important}
+.refapp .rring{width:clamp(78px,23vw,113px)!important;height:clamp(78px,23vw,113px)!important;max-width:113px!important;max-height:113px!important;margin:auto!important}
+.refapp .rring:after{width:75%!important;height:75%!important}
+.refapp .rring span{font-size:clamp(21px,5.8vw,30px)!important}
+.refapp .finalclose{padding:0!important;background:transparent!important;border:0!important;box-shadow:none!important}
+.refapp .finalgrid{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr))!important;gap:6px!important}
+.refapp .finalcard{min-width:0!important;padding:7px 7px!important;border:1px solid #4983a8!important;border-radius:11px!important;background:linear-gradient(145deg,#0a2a42,#041520)!important;box-shadow:inset 0 0 11px #00bbac18!important}
+.refapp .finalcard.motion{grid-column:1/-1!important;padding:13px 7px 7px!important;position:relative!important;margin-top:4px!important}
+.refapp .finalcard.motion .finaltitle{position:absolute!important;top:-10px!important;left:50%!important;transform:translateX(-50%)!important;white-space:nowrap!important;border:1px solid #467c9f!important;border-radius:30px!important;background:#07192a!important;padding:2px 10px!important;font-size:clamp(9px,2.4vw,12px)!important}
+.refapp .motionrow{display:grid!important;grid-template-columns:repeat(3,minmax(0,1fr))!important;gap:5px!important;margin:4px 0 0!important}
+.refapp .motionrow .motiontile{display:flex!important;flex-direction:column!important;align-items:center!important;justify-content:center!important;min-height:47px!important;gap:3px!important;padding:4px 2px!important;border:1px solid #1d5765!important;border-radius:8px!important;background:linear-gradient(150deg,#092c39,#061b26 65%,#005b4d)!important;box-shadow:inset 0 -5px 10px #00d7a31c!important}
+.refapp .motionrow .motiontile small{font-size:clamp(10px,2.7vw,14px)!important;color:#e8f2f8!important}
+.refapp .motionrow .motiontile b{font-size:clamp(12px,3.2vw,17px)!important;line-height:1.1!important}
+.refapp .finalcard .finaltitle{font-size:clamp(9px,2.2vw,11px)!important;line-height:1.15!important}
+.refapp .finalcard .finalbig{font-size:clamp(16px,4.4vw,23px)!important;line-height:1.15!important;margin:3px 0!important;overflow-wrap:anywhere!important}
+.refapp .finalcard .finalsub{font-size:clamp(9px,2.3vw,12px)!important}
+.refapp .finalanalysis{display:grid!important;grid-template-columns:minmax(0,1fr) minmax(100px,42%)!important;gap:5px!important;margin-top:6px!important;padding:6px!important;border:1px solid #4886aa!important;border-radius:12px!important;background:linear-gradient(150deg,#0b2b40,#031521)!important}
+.refapp .analysisbox{min-width:0!important;gap:5px!important}
+.refapp .analysistext small,.refapp .probbox small{font-size:clamp(8px,2.1vw,11px)!important;line-height:1.15!important}
+.refapp .analysistext b{font-size:clamp(10px,2.7vw,14px)!important;line-height:1.15!important}
+.refapp .analysistext span{display:none!important}
+.refapp .probbox{min-width:0!important;padding:4px!important}
+.refapp .probbox b{font-size:clamp(19px,5.2vw,29px)!important;line-height:1.1!important}
+.refapp .pleg{margin-top:3px!important}
+@media(max-width:430px){.refapp .reader{padding:8px 7px!important}.refapp .readerbody{min-height:88px!important;max-height:100px!important}.refapp .reader-signal-box{min-height:67px!important}.refapp .finalcard{padding:6px 5px!important}}
 
 </style>""", unsafe_allow_html=True)
     live_dashboard()
