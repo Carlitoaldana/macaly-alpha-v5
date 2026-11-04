@@ -3670,9 +3670,9 @@ let geometry=null;
 function draw(){
 document.querySelectorAll('.toggle').forEach(x=>x.removeAttribute('data-unused'));
 for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
-const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(0,Math.min(offset,Math.max(0,n-visible)));const end=n-Math.round(offset),start=Math.max(0,end-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$('canvas').innerHTML='<div class="empty">Esperando velas actuales…</div>';return}
+const all=D.rows,n=all.length;visible=Math.max(12,Math.min(visible,Math.max(12,n)));offset=Math.max(-Math.floor(visible*.6),Math.min(offset,Math.max(0,n-visible)));const virtualEnd=n-Math.round(offset),end=Math.min(n,virtualEnd),start=Math.max(0,virtualEnd-Math.round(visible)),rows=all.slice(start,end);if(!rows.length){$('canvas').innerHTML='<div class="empty">Esperando velas actuales…</div>';return}
 const last=all[n-1];$('legend').innerHTML=['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join('');
-const W=720,H=toggles.rsi?780:615,L=10,R=126,T=28,B=580,plot=W-L-R,step=plot/rows.length,body=Math.max(3.8,Math.min(18,step*.84));
+const W=720,H=toggles.rsi?780:615,L=10,R=126,T=28,B=580,plot=W-L-R,freeRight=164,candlePlot=plot-freeRight,step=candlePlot/Math.round(visible),body=Math.max(3.8,Math.min(18,step*.84));
 let vals=rows.flatMap(r=>[r.low,r.high]);for(const k of ['ema9','ema21','vwap'])if(toggles[k])vals.push(...rows.map(r=>r[k]).filter(v=>v!=null));for(const v of [D.target,D.support,D.resistance,D.price])if(v!=null)vals.push(v);let lo=Math.min(...vals),hi=Math.max(...vals),pad=Math.max((hi-lo)*.12,5);lo-=pad;hi+=pad;lo+=pricePan;hi+=pricePan;const y=v=>T+(hi-v)/(hi-lo)*(B-T),x=i=>L+(i+.5)*step;
 let s='<svg viewBox="0 0 '+W+' '+H+'" role="img" aria-label="Gráfica BTC con velas, indicadores y RSI"><defs><clipPath id="plot"><rect x="0" y="0" width="'+(W-R)+'" height="'+B+'"/></clipPath></defs>';
 for(let k=0;k<7;k++){const yy=T+(B-T)*k/6;s+='<line x1="0" y1="'+yy+'" x2="'+(W-R)+'" y2="'+yy+'" stroke="#202039"/><text x="'+(W-R+10)+'" y="'+(yy+5)+'" fill="#9ca6c2" font-size="14">'+fmt(hi-(hi-lo)*k/6)+'</text>'}
@@ -3685,7 +3685,7 @@ let previous=T-20;for(const l of levels){l.labelY=Math.max(T+14,previous+32,l.yy
 for(const l of levels){const edge=W-R,priceX=edge+2,labelWidth=l.label==='BTC'?0:(l.label==='RESISTANCE'?146:106),labelX=priceX-labelWidth;s+='<line x1="0" y1="'+l.yy+'" x2="'+edge+'" y2="'+l.yy+'" stroke="'+l.c+'" stroke-width="'+(l.label==='TARGET'?2.5:1)+'" stroke-dasharray="'+(l.label==='TARGET'?'6 5':'3 4')+'" opacity=".9"/><path d="M '+edge+' '+l.yy+' L '+priceX+' '+l.labelY+'" stroke="'+l.c+'" fill="none"/>';if(labelWidth)s+='<rect x="'+labelX+'" y="'+(l.labelY-14)+'" width="'+labelWidth+'" height="28" rx="2" fill="'+l.c+'"/><text x="'+(labelX+labelWidth/2)+'" y="'+(l.labelY+6)+'" text-anchor="middle" fill="#06101b" font-size="18">'+l.label+'</text>';s+='<rect x="'+priceX+'" y="'+(l.labelY-14)+'" width="120" height="28" rx="2" fill="'+l.c+'"/><line x1="'+priceX+'" x2="'+priceX+'" y1="'+(l.labelY-14)+'" y2="'+(l.labelY+14)+'" stroke="#06101b" stroke-width="1"/><text x="'+(priceX+6)+'" y="'+(l.labelY+6)+'" fill="#06101b" font-size="18">'+fmt(l.v)+'</text>'}
 if(toggles.rsi){const rt=620,rh=120,rvals=rows.map(r=>r.rsi).filter(Number.isFinite),rmin=rvals.length?Math.min(...rvals):30,rmax=rvals.length?Math.max(...rvals):70,rpad=Math.max((rmax-rmin)*.15,3);let rlo=Math.max(0,rmin-rpad),rhi=Math.min(100,rmax+rpad);if(rhi-rlo<20){const mid=(rhi+rlo)/2;rlo=Math.max(0,mid-10);rhi=Math.min(100,rlo+20);rlo=Math.max(0,rhi-20)}const ry=v=>rt+(rhi-v)/(rhi-rlo)*rh;s+='<text x="14" y="610" fill="#aa8dc5" font-size="12">RSI 14</text>';for(let v=Math.ceil(rlo/10)*10;v<=rhi;v+=10)s+='<line x1="0" y1="'+ry(v)+'" x2="'+(W-R)+'" y2="'+ry(v)+'" stroke="#29243d"/><text x="'+(W-R+10)+'" y="'+(ry(v)+5)+'" fill="#9ca6c2" font-size="14">'+fmt(v)+'</text>';s+='<polyline points="'+rows.map((r,i)=>Number.isFinite(r.rsi)?x(i)+','+ry(r.rsi):'').filter(Boolean).join(' ')+'" fill="none" stroke="#f000ff" stroke-width="3"/>';const shownRsi=rows[rows.length-1].rsi;if(Number.isFinite(shownRsi))s+='<rect x="'+(W-R+4)+'" y="'+(ry(shownRsi)-12)+'" width="65" height="25" rx="3" fill="#f000ff"/><text x="'+(W-R+11)+'" y="'+(ry(shownRsi)+6)+'" fill="white" font-size="15">'+fmt(shownRsi)+'</text>'}
 for(let k=0;k<4;k++){const i=Math.round((rows.length-1)*k/3),tm=new Date(rows[i].t*1000).toLocaleString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit',...(D.timeframe==='1D'?{month:'short',day:'numeric'}:{})});s+='<text x="'+x(i)+'" y="'+(H-7)+'" fill="#95a1bc" font-size="11" text-anchor="middle">'+tm+'</text>'}
-s+='<g id="crosshair"></g></svg>';$('canvas').innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end};
+s+='<g id="crosshair"></g></svg>';$('canvas').innerHTML=s;geometry={W,H,L,R,T,B,rows,x,y,lo,hi,start,end,visible,step,candlePlot};
 }
 $('zoomin').onclick=()=>{visible=Math.max(12,Math.round(visible*.75));persist();draw()};$('zoomout').onclick=()=>{visible=Math.round(visible*1.3);persist();draw()};$('older').onclick=()=>{offset+=Math.max(5,Math.floor(visible/4));persist();draw()};$('newer').onclick=()=>{offset-=Math.max(5,Math.floor(visible/4));persist();draw()};$('reset').onclick=()=>{offset=0;visible=32;pricePan=0;draw();persist()};
 const touchPoints=new Map();let gesture=null;
@@ -3693,8 +3693,8 @@ function chartPoint(e){const r=$('canvas').getBoundingClientRect();return {x:(e.
 function beginGesture(){
  if(!geometry||!touchPoints.size){gesture=null;return}
  const p=[...touchPoints.values()],g=geometry;
- gesture={points:p.map(v=>({...v})),visible:g.rows.length,offset,pricePan,range:g.hi-g.lo,plot:g.W-g.L-g.R,height:g.B-g.T,end:g.end};
- if(p.length>=2){gesture.distance=Math.max(12,Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y));gesture.center=(p[0].x+p[1].x)/2;gesture.anchor=g.start+Math.max(0,Math.min(1,(gesture.center-g.L)/gesture.plot))*g.rows.length}
+ gesture={points:p.map(v=>({...v})),visible:g.visible,offset,pricePan,range:g.hi-g.lo,plot:g.candlePlot,height:g.B-g.T,end:g.end};
+ if(p.length>=2){gesture.distance=Math.max(12,Math.hypot(p[1].x-p[0].x,p[1].y-p[0].y));gesture.center=(p[0].x+p[1].x)/2;gesture.anchor=g.start+Math.max(0,Math.min(1,(gesture.center-g.L)/gesture.plot))*g.visible}
 }
 $('canvas').addEventListener('pointerdown',e=>{
  if(!geometry||(e.pointerType==='mouse'&&e.button!==0))return;
@@ -3725,10 +3725,10 @@ function endGesture(e){
 for(const event of ['pointerup','pointercancel','lostpointercapture'])$('canvas').addEventListener(event,endGesture);
 $('canvas').addEventListener('dblclick',()=>{$('reset').onclick()});
 $('canvas').addEventListener('wheel',e=>{
- if(!geometry)return;e.preventDefault();const p=chartPoint(e),g=geometry,fraction=Math.max(0,Math.min(1,(p.x-g.L)/(g.W-g.L-g.R))),anchor=g.start+fraction*g.rows.length;
- visible=Math.max(12,Math.min(D.rows.length,Math.round(g.rows.length*(e.deltaY>0?1.15:.85))));offset=Math.round(D.rows.length-anchor-(1-fraction)*visible);draw();persist();
+ if(!geometry)return;e.preventDefault();const p=chartPoint(e),g=geometry,fraction=Math.max(0,Math.min(1,(p.x-g.L)/g.candlePlot)),anchor=g.start+fraction*g.visible;
+ visible=Math.max(12,Math.min(D.rows.length,Math.round(g.visible*(e.deltaY>0?1.15:.85))));offset=Math.round(D.rows.length-anchor-(1-fraction)*visible);draw();persist();
 },{passive:false});
-function inspectCandle(px){if(!geometry)return;const g=geometry,i=Math.max(0,Math.min(g.rows.length-1,Math.floor((px-g.L)/(g.W-g.L-g.R)*g.rows.length))),r=g.rows[i],time=new Date(r.t*1000).toLocaleString('en-US',{timeZone:'America/New_York'});$('tooltip').textContent=time+' · O '+fmt(r.open)+'  H '+fmt(r.high)+'  L '+fmt(r.low)+'  C '+fmt(r.close)+' · Vol '+fmt(r.volume,3);$('crosshair').innerHTML='<line x1="'+g.x(i)+'" x2="'+g.x(i)+'" y1="'+g.T+'" y2="'+g.B+'" stroke="#b8a5e0" stroke-dasharray="4 4"/>'}
+function inspectCandle(px){if(!geometry)return;const g=geometry,i=Math.max(0,Math.min(g.rows.length-1,Math.floor((px-g.L)/g.step))),r=g.rows[i],time=new Date(r.t*1000).toLocaleString('en-US',{timeZone:'America/New_York'});$('tooltip').textContent=time+' · O '+fmt(r.open)+'  H '+fmt(r.high)+'  L '+fmt(r.low)+'  C '+fmt(r.close)+' · Vol '+fmt(r.volume,3);$('crosshair').innerHTML='<line x1="'+g.x(i)+'" x2="'+g.x(i)+'" y1="'+g.T+'" y2="'+g.B+'" stroke="#b8a5e0" stroke-dasharray="4 4"/>'}
 
 window.addEventListener('message', function(event){
   if (!event.data || event.data.kind !== 'alpha-chart-update') return;
