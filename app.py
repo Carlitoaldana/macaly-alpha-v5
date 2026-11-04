@@ -4403,6 +4403,61 @@ else:
 }
 .refapp .rhero.waiting .rconf,.refapp.dir-wait .rhero .rconf{margin-top:12px!important;}
 
+
+/* JC ALPHA EDGE — SOLO ESTILO VISUAL DE LA SEÑAL PRINCIPAL UP/DOWN.
+   No se modifica el motor, la cabecera de fondo ni las tarjetas. */
+.refapp.dir-up .rhero .rsignal,
+.refapp.dir-down .rhero .rsignal{
+  display:flex!important;align-items:center!important;justify-content:center!important;
+  gap:10px!important;white-space:nowrap!important;max-width:100%!important;
+  font-size:clamp(65px,15vw,100px)!important;
+  font-weight:1000!important;font-style:italic!important;
+  letter-spacing:-4px!important;line-height:1!important;
+  color:var(--accent)!important;
+  -webkit-text-stroke:1.5px rgba(219,255,245,.8)!important;
+  text-shadow:0 0 5px var(--accent),0 0 15px var(--glow),0 0 26px var(--glow)!important;
+  filter:none!important;
+}
+.refapp.dir-up .rhero .rsignal>span:last-child,
+.refapp.dir-down .rhero .rsignal>span:last-child{
+  display:inline-block!important;
+  background:linear-gradient(180deg,#e2fff2 0%,var(--accent) 29%,var(--accent) 67%,#078b6a 100%)!important;
+  -webkit-background-clip:text!important;background-clip:text!important;
+  -webkit-text-fill-color:transparent!important;
+  filter:drop-shadow(0 0 6px var(--accent)) drop-shadow(0 0 13px var(--glow))!important;
+}
+.refapp.dir-down .rhero .rsignal>span:last-child{
+  background:linear-gradient(180deg,#ffe6e6 0%,#ff666c 33%,#e52e4c 72%,#8c102b 100%)!important;
+  -webkit-background-clip:text!important;background-clip:text!important;
+}
+.refapp.dir-up .rhero .cssarrow,
+.refapp.dir-down .rhero .cssarrow{
+  display:block!important;position:relative!important;
+  width:clamp(64px,17vw,99px)!important;
+  height:clamp(71px,19vw,112px)!important;
+  flex:0 0 clamp(64px,17vw,99px)!important;
+  background:linear-gradient(115deg,#caffdf 0%,var(--accent) 35%,#04a976 83%)!important;
+  clip-path:polygon(50% 0%,100% 42%,73% 42%,73% 100%,27% 100%,27% 42%,0% 42%)!important;
+  border-radius:0!important;border:0!important;box-shadow:none!important;
+  filter:drop-shadow(0 0 8px var(--glow))!important;
+}
+.refapp.dir-up .rhero .cssarrow:before,
+.refapp.dir-down .rhero .cssarrow:before{content:none!important;display:none!important;}
+.refapp.dir-down .rhero .cssarrow{
+  transform:rotate(180deg)!important;
+  background:linear-gradient(115deg,#ffd7dc,#f24a60 43%,#9f1736)!important;
+}
+/* El estado ESPERANDO permanece compacto, sin flecha y sin cuadro. */
+.refapp.dir-wait .rhero .cssarrow,.refapp .rhero.waiting .cssarrow{display:none!important;}
+@media(max-width:460px){
+ .refapp.dir-up .rhero,.refapp.dir-down .rhero{min-height:138px!important;aspect-ratio:auto!important;}
+ .refapp.dir-up .rhero .rsignal,.refapp.dir-down .rhero .rsignal{font-size:clamp(60px,16vw,75px)!important;}
+ .refapp.dir-up .rhero .cssarrow,.refapp.dir-down .rhero .cssarrow{
+   width:clamp(62px,18vw,80px)!important;height:clamp(70px,20vw,90px)!important;
+   flex-basis:clamp(62px,18vw,80px)!important;
+ }
+}
+
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
