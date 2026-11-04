@@ -3684,7 +3684,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 /* Colores de señales, alertas, barras y números intactos. */
 
 /* TradingView Lightweight Charts: gestures managed by the native library */
-#canvas{height:420px!important;position:relative!important;overflow:hidden!important;touch-action:pan-y!important}
+#canvas{height:420px!important;position:relative!important;overflow:hidden!important;touch-action:none!important;-webkit-user-select:none!important;user-select:none!important}
 #canvas canvas{touch-action:none!important}
 #rsi-pane{position:relative;overflow:hidden}
 @media(max-width:480px){#canvas{height:375px!important}}
@@ -3696,7 +3696,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 <details id="momentum"><summary>⚡ SHORT-TERM MOMENTUM <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>MOVIMIENTO RECIENTE DE BTC</h3><div class="metrics" id="momrows"></div><p class="note">Cambio porcentual calculado por el motor en 3, 5 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.</p></div></details>
 <div class="tools"><h3>INDICADORES</h3><div class="toggles" id="toggles"></div><div class="legend" id="legend"></div></div>
 <div class="floatcounts"><div>🐋 BUY WHALES <b id="floatbuy"></b></div><div>🐋 SELL WHALES <b id="floatsell"></b></div></div>
-<div class="tooltip" id="tooltip">Arrastra las velas · pellizca para ampliar · AHORA vuelve al precio actual.</div><div class="canvas" id="canvas"></div><div id="rsi-pane" style="height:110px;display:none;background:#06121a;border-top:1px solid #294c69"></div>
+<div class="tooltip" id="tooltip">Arrastra velas y escala de precios · pellizca para zoom · AHORA regresa al presente.</div><div class="canvas" id="canvas"></div><div id="rsi-pane" style="height:110px;display:none;background:#06121a;border-top:1px solid #294c69"></div>
 <div class="chartnav"><button id="older" aria-label="Velas anteriores">←</button><button id="newer" aria-label="Velas siguientes">→</button><button id="zoomin" aria-label="Acercar">＋</button><button id="zoomout" aria-label="Alejar">−</button><button id="reset">AHORA</button><span id="viewtf"></span></div>
 </section>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
@@ -3743,10 +3743,11 @@ function initChart(){
   layout:{background:{type:L.ColorType.Solid,color:'#06121a'},textColor:'#b9c8d9',fontFamily:'Inter,system-ui,sans-serif',fontSize:11},
   grid:{vertLines:{color:'#142b3a'},horzLines:{color:'#142b3a'}},
   rightPriceScale:{borderColor:'#34546c',scaleMargins:{top:.12,bottom:.17}},
-  timeScale:{borderColor:'#34546c',rightOffset:8,barSpacing:10,minBarSpacing:2,timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false},
+  timeScale:{borderColor:'#34546c',rightOffset:2,barSpacing:11,minBarSpacing:3,timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false},
   crosshair:{mode:L.CrosshairMode.Normal,vertLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'},horzLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'}},
-  handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:false},
-  handleScale:{axisPressedMouseMove:true,mouseWheel:true,pinch:true,axisDoubleClickReset:true}
+  kineticScroll:{touch:true,mouse:true},
+  handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:true},
+  handleScale:{axisPressedMouseMove:{time:true,price:true},mouseWheel:true,pinch:true,axisDoubleClickReset:true}
  });
  candleSeries=lwChart.addCandlestickSeries({...candleOptions,priceFormat:{type:'price',precision:2,minMove:.01},lastValueVisible:true,priceLineVisible:true});
  for(const k of ['ema9','ema21','vwap'])overlays[k]=lwChart.addLineSeries({color:colors[k],lineWidth:2,visible:!!toggles[k],lastValueVisible:false,priceLineVisible:false,...(k==='vwap'?{lineStyle:L.LineStyle.Dashed}:{})});
@@ -3805,7 +3806,11 @@ function redrawData(preserve=true){
    lwChart.timeScale().setVisibleLogicalRange(oldRange);
   }else if(saved.visible){
    lwChart.timeScale().setVisibleLogicalRange({from:Math.max(0,newN-saved.visible-saved.offset),to:newN-1-saved.offset});
-  }else lwChart.timeScale().fitContent();
+  }else{
+   // Show recent candles at a readable size, with only two future candle spaces.
+   const count=Math.min(35,newN);
+   lwChart.timeScale().setVisibleLogicalRange({from:newN-count-0.5,to:newN+1.5});
+  }
  }catch(_) {lwChart.timeScale().fitContent()}
  applyingData=false;
 }
