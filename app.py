@@ -3892,15 +3892,11 @@ def live_dashboard():
     # El panel permanece visible; solo la predicción se activa en los últimos 90 segundos.
     # La cinta de precios y las métricas continúan actualizándose durante toda la ronda.
     reader_active = seconds_left is not None and 0 < seconds_left <= 90
-    reader = closing_reader(sig, round_signal, seconds_left, micro) if reader_active else {
-        "percent": 0, "direction": None, "headline": "",
-        "note": "", "micro": "", "color": "#94a3b8",
-        "border": "transparent", "bg": "transparent",
-    }
+    reader = closing_reader(sig, round_signal, seconds_left, micro)
     if not btc_ok:
         reader = {**reader, "percent":0, "headline":"SIN DATOS ACTUALES",
                   "note":"No se puede validar la señal hasta recuperar las velas."}
-    reader_percent_label = f"{reader['percent']}%" if reader.get("direction") else "—"
+    reader_percent_label = f"{reader['percent']}%" if reader.get("direction") and btc_ok else "—"
     if seconds_left is not None and seconds_left <= 0:
         # El reloj y el precio instantáneo no prueban la liquidación oficial.
         reader = {**reader, "percent": 0,
@@ -4080,7 +4076,7 @@ def live_dashboard():
       </div>
       <div class="finalanalysis">
         <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>POSICIÓN ACTUAL</small><b>{final_status}</b></div></div>
-        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'LECTURA EN CURSO'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
+        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader_active and reader.get('direction') else 'APOYO CALCULADO'}</small><b>{reader_percent_label}</b></div>
       </div>
     </div>'''
 
@@ -4095,8 +4091,8 @@ def live_dashboard():
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>{"● ACTIVO" if reader_active else "● LEYENDO"}</em></div>
-    <div class="jcclose-main" style="{'display:flex' if reader_active else 'display:none'}">
-      <div class="jcclose-signal" style="--signal:{reader['color']}">
+    <div class="jcclose-main">
+      <div class="jcclose-signal" style="--signal:{reader['color']};visibility:{'visible' if reader_active else 'hidden'}">
         <span class="jcclose-double">{'❯❯' if reader.get('direction') == 'UP' else '❮❮' if reader.get('direction') == 'DOWN' else '◌'}</span>
         <strong>{reader.get('direction') or '—'}</strong>
       </div>
