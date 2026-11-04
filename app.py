@@ -4631,6 +4631,31 @@ else:
   .refapp .rgrid .keycard .bigicon,.refapp .rgrid .keycard .clock{font-size:clamp(22px,7vw,35px)!important}
 }
 /* FIN ETAPA TARJETAS */
+
+/* ETAPA LECTOR PREMIUM: solo presentación, sin cambiar señales ni datos */
+.refapp .reader{
+ background:linear-gradient(145deg,rgba(8,31,47,.97),rgba(2,13,29,.98))!important;
+ border:1.5px solid #d4aa5d!important;border-radius:22px!important;
+ padding:14px 12px!important;
+ box-shadow:0 0 12px #e6b65d33,inset 0 0 22px #00baff13!important;
+}
+.refapp .readerhead{font-size:clamp(14px,3.8vw,20px)!important;font-weight:900!important;font-style:italic!important;color:#f5f7ff!important;gap:7px!important}
+.refapp .readerhead .pulse{color:#f7c968!important;font-size:22px!important}
+.refapp .readerhead em{font-size:11px!important;font-style:normal!important;border:1px solid #00e49d!important;border-radius:30px!important;padding:5px 12px!important;background:#002b2388!important}
+.refapp .readerbody{grid-template-columns:minmax(0,1fr) minmax(90px,28%)!important;gap:12px!important;align-items:center!important;margin:16px 0!important}
+.refapp .readerbody strong{font-size:clamp(16px,4.1vw,25px)!important;line-height:1.2!important;font-style:italic!important;font-weight:950!important;text-shadow:0 0 13px currentColor!important;overflow-wrap:anywhere!important}
+.refapp .rring{filter:drop-shadow(0 0 9px #00e0bb66)!important;max-width:145px!important;margin-left:auto!important}
+.refapp .finalclose{background:transparent!important;border:0!important;box-shadow:none!important;padding:0!important}
+.refapp .finalgrid{gap:9px!important}
+.refapp .finalcard{border:1px solid #4481a0!important;border-radius:14px!important;background:linear-gradient(145deg,#0a2940,#06131f)!important;box-shadow:inset 0 0 12px #05a5e01a,0 0 7px #00a8f522!important;padding:11px 8px!important}
+.refapp .finalcard.motion{border-color:#4bb8e9!important}
+.refapp .finaltitle{font-size:clamp(10px,2.5vw,14px)!important;font-weight:900!important;color:#e8f2fc!important}
+.refapp .motionrow{gap:4px!important;margin-top:10px!important}
+.refapp .motionrow small{font-size:clamp(11px,2.8vw,15px)!important;color:#dceaf6!important}
+.refapp .motionrow b{font-size:clamp(14px,3.6vw,20px)!important;color:#0ae4b7!important}
+@media(max-width:430px){.refapp .reader{padding:12px 10px!important}.refapp .readerbody{gap:6px!important}.refapp .finalcard{padding:9px 6px!important}}
+/* FIN ETAPA LECTOR PREMIUM */
+
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
