@@ -3785,22 +3785,31 @@ def live_dashboard():
     final_status_color = "#00dfb5" if market_side == "UP" else "#e64b4b" if market_side == "DOWN" else "#94a3b8"
     final_distance_label = f"${abs(distance):,.0f}" if distance is not None else "—"
     final_dist_pct_label = f"{abs(distance_pct):.2f}%" if distance_pct is not None else "SIN TARGET"
-    final_panel = f'''<div class="jc-r2-detail">
-      <div class="jc-r2-motion">
-        <div class="jc-r2-title">MOVIMIENTO ÚLTIMOS SEGUNDOS</div>
-        <div class="jc-r2-motions">
-          <div><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b></div>
-          <div><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b></div>
-          <div><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b></div>
+    def _micro_bar(window):
+        value = micro.get(f'change_{window}s')
+        if value is None:
+            return '<span class="jcx-no-data">—</span>'
+        value = float(value)
+        height = min(100, max(12, abs(value) * 4))
+        color = '#00e4a6' if value >= 0 else '#f04e60'
+        return f'<span class="jcx-bar" style="height:{height:.0f}%;background:{color}"></span>'
+
+    micro_chart = ''.join(_micro_bar(w) for w in (30, 10, 5))
+    final_panel = f'''<div class="jcx-detail">
+      <div class="jcx-motion"><div class="jcx-motion-title">MOVIMIENTO ÚLTIMOS SEGUNDOS</div>
+        <div class="jcx-motion-row">
+          <div><small>30s</small><b style="color:{'#00dfb5' if c30>=0 else '#e64b4b'}">{motion_labels[30]}</b><i>{_micro_bar(30)}</i></div>
+          <div><small>10s</small><b style="color:{'#00dfb5' if c10>=0 else '#e64b4b'}">{motion_labels[10]}</b><i>{_micro_bar(10)}</i></div>
+          <div><small>5s</small><b style="color:{'#00dfb5' if c5>=0 else '#e64b4b'}">{motion_labels[5]}</b><i>{_micro_bar(5)}</i></div>
         </div>
       </div>
-      <div class="jc-r2-pair">
-        <div class="jc-r2-tile"><small>◎ DISTANCIA AL TARGET</small><b style="color:{distance_color}">{final_distance_label}</b><span>{final_dist_pct_label}</span></div>
-        <div class="jc-r2-tile"><small>◴ VELOCIDAD</small><b style="color:{speed_color}">{speed_arrow} {speed_word}</b><span>{speed_value}</span></div>
+      <div class="jcx-pair">
+        <div class="jcx-tile"><span class="jcx-icon">◎</span><div><small>DISTANCIA AL TARGET</small><b style="color:{distance_color}">{final_distance_label}</b><em>{final_dist_pct_label}</em></div></div>
+        <div class="jcx-tile"><span class="jcx-icon">◴</span><div><small>VELOCIDAD</small><b style="color:{speed_color}">{speed_arrow} {speed_word}</b><em>{speed_value}</em></div></div>
       </div>
-      <div class="jc-r2-foot">
-        <div class="jc-r2-position"><small>{'ANÁLISIS DE CIERRE (ÚLTIMOS 60 s)' if seconds_left is not None and 0 < seconds_left <= 60 else 'POSICIÓN ACTUAL FRENTE AL TARGET'}</small><b style="color:{final_status_color}">{final_status}</b><span>{final_note}</span></div>
-        <div class="jc-r2-support"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b>{reader_percent_label if reader.get('direction') else '—'}</b></div>
+      <div class="jcx-foot">
+        <div class="jcx-position"><span class="jcx-icon">▱</span><div><small>POSICIÓN ACTUAL</small><b style="color:{final_status_color}">{final_status}</b></div></div>
+        <div class="jcx-support"><small>{'APOYO A ' + reader['direction'] if reader.get('direction') else 'SIN APOYO DIRECCIONAL'}</small><b style="color:{reader['color']}">{reader_percent_label if reader.get('direction') else '—'}</b></div>
       </div>
     </div>'''
 
@@ -3858,17 +3867,15 @@ def live_dashboard():
     <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
   </section>
 
-  <section class="reader jc-reader-v2" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="jc-r2-head"><span>⌁ LECTOR DE CIERRE</span><em>ACTIVO</em></div>
-    <div class="jc-r2-summary">
-      <div class="jc-r2-direction"><small>SEÑAL DE CIERRE</small><strong style="color:{reader['color']}">{reader['headline']}</strong></div>
-      <div class="jc-r2-gauge" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div>
+  <section class="reader jcx-reader" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
+    <div class="jcx-head"><span>◎ LECTOR DE CIERRE</span><em>● ACTIVO</em></div>
+    <div class="jcx-top">
+      <div class="jcx-signal"><small>SEÑAL DE CIERRE</small><strong style="color:{reader['color']}">{reader['direction'] if reader.get('direction') in ('UP','DOWN') else 'ESPERANDO'}</strong></div>
+      <div class="jcx-ring" style="--p:{reader['percent']}"><span>{reader_percent_label}</span></div>
+      <div class="jcx-market-bars" title="Movimientos reales 30, 10 y 5 segundos">{micro_chart}</div>
     </div>
     {final_panel}
   </section>
-
-
-
 
   <section class="rcard tech">
     <div class="techhead"><span>DETALLES TÉCNICOS</span><span>⌃</span></div>
@@ -4748,31 +4755,38 @@ else:
 @media(max-width:430px){.refapp .reader{padding:8px 7px!important}.refapp .readerbody{min-height:88px!important;max-height:100px!important}.refapp .reader-signal-box{min-height:67px!important}.refapp .finalcard{padding:6px 5px!important}}
 
 
-/* JC READER V2 - entirely independent markup, no engine or card styling */
-.refapp .reader.jc-reader-v2{box-sizing:border-box!important;display:block!important;min-height:0!important;height:auto!important;max-height:none!important;padding:7px!important;margin:5px 0!important;border-radius:12px!important;border:1px solid #c49e56!important;background:linear-gradient(150deg,#09263b,#041421)!important;box-shadow:0 0 8px #d5a94b33!important}
-.refapp .jc-r2-head{display:flex;align-items:center;justify-content:space-between;color:#f1f5fb;font-size:11px;font-weight:900;line-height:1.1;margin:0 0 5px}
-.refapp .jc-r2-head em{font-style:normal;font-size:8px;color:#13e4ac;border:1px solid #0c9b77;border-radius:15px;padding:2px 6px}
-.refapp .jc-r2-summary{display:grid;grid-template-columns:minmax(0,1fr) 64px;gap:7px;align-items:center;margin:0 0 6px}
-.refapp .jc-r2-direction{min-width:0;min-height:52px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border:1px solid #276c91;border-radius:8px;background:#051b2c;padding:4px}
-.refapp .jc-r2-direction small{font-size:8px;color:#b4cbdc;font-weight:800}
-.refapp .jc-r2-direction strong{font-size:clamp(16px,4.5vw,23px);line-height:1.05;font-weight:950;text-align:center;overflow-wrap:anywhere}
-.refapp .jc-r2-gauge{position:relative;box-sizing:border-box;width:60px;height:60px;border-radius:50%;display:grid;place-items:center;background:conic-gradient(var(--rr) calc(var(--p)*1%),#254458 0)}
-.refapp .jc-r2-gauge:before{content:"";position:absolute;inset:7px;border-radius:50%;background:#061b2b}
-.refapp .jc-r2-gauge span{position:relative;color:#f2fbff;font-size:15px;font-weight:900}
-.refapp .jc-r2-detail{display:grid;gap:5px;min-width:0}
-.refapp .jc-r2-motion,.refapp .jc-r2-tile,.refapp .jc-r2-position,.refapp .jc-r2-support{min-width:0;background:#071d2e;border:1px solid #275e7d;border-radius:7px;padding:5px}
-.refapp .jc-r2-title{text-align:center;color:#e2f0f8;font-size:9px;font-weight:900;line-height:1.1}
-.refapp .jc-r2-motions{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin-top:4px}
-.refapp .jc-r2-motions>div{text-align:center;border:1px solid #1b4e68;border-radius:5px;padding:2px;min-width:0}
-.refapp .jc-r2-motions small{display:block;font-size:9px;color:#b4cbdc}
-.refapp .jc-r2-motions b{display:block;font-size:12px;line-height:1.1}
-.refapp .jc-r2-pair,.refapp .jc-r2-foot{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}
-.refapp .jc-r2-tile small,.refapp .jc-r2-position small,.refapp .jc-r2-support small{display:block;color:#bdd0dc;font-size:8px;font-weight:800;line-height:1.1}
-.refapp .jc-r2-tile b,.refapp .jc-r2-position b,.refapp .jc-r2-support b{display:block;font-size:12px;font-weight:900;line-height:1.2;overflow-wrap:anywhere;margin-top:2px}
-.refapp .jc-r2-tile span,.refapp .jc-r2-position span{display:block;color:#9bb7c7;font-size:8px;line-height:1.15;margin-top:2px}
-.refapp .jc-r2-support b{color:#16e3b2}
-@media(min-width:700px){.refapp .reader.jc-reader-v2{max-width:560px;margin-left:auto!important;margin-right:auto!important}}
-
+/* Lector nuevo aislado. No modifica tarjetas ni lógica de señales. */
+.refapp .reader.jcx-reader{display:block!important;height:auto!important;max-height:none!important;min-height:0!important;padding:8px!important;margin:6px 0!important;border:1px solid #d5a34e!important;border-radius:14px!important;background:linear-gradient(145deg,#09243b,#03111f)!important;box-shadow:0 0 10px #e7a43e66!important}
+.refapp .jcx-head{display:flex;justify-content:space-between;align-items:center;font-size:13px;font-weight:900;font-style:italic;color:#fff;margin-bottom:7px}
+.refapp .jcx-head em{font-style:normal;font-size:9px;color:#05e4a7;border:1px solid #05bb8a;border-radius:15px;padding:3px 7px}
+.refapp .jcx-top{display:grid;grid-template-columns:minmax(0,1.15fr) 84px minmax(0,.65fr);gap:6px;align-items:center;margin-bottom:8px;min-height:88px}
+.refapp .jcx-signal{border:1px solid #4c8ca5;border-radius:10px;background:linear-gradient(160deg,#092943,#051a2d);padding:8px 3px;display:flex;align-items:center;justify-content:center;flex-direction:column;min-height:70px;min-width:0;box-shadow:inset 0 0 12px #0d5c7855}
+.refapp .jcx-signal small{font-size:9px;font-weight:900;color:#dbe9f4}
+.refapp .jcx-signal strong{font-size:clamp(23px,7vw,38px)!important;line-height:1.05!important;font-weight:950!important;font-style:italic!important;text-shadow:0 0 12px currentColor!important}
+.refapp .jcx-ring{width:82px;height:82px;border-radius:50%;position:relative;display:grid;place-items:center;background:conic-gradient(var(--rr) calc(var(--p)*1%),#16394e 0);box-shadow:0 0 14px var(--rr)}
+.refapp .jcx-ring:before{content:'';position:absolute;inset:10px;border-radius:50%;background:#051927}
+.refapp .jcx-ring span{position:relative;color:white;font-size:22px;font-weight:900}
+.refapp .jcx-market-bars{height:78px;display:flex;align-items:end;justify-content:space-around;gap:5px;padding:6px 4px;border-bottom:1px solid #33748d}
+.refapp .jcx-market-bars .jcx-bar{display:block;flex:1;max-width:14px;min-height:8px;box-shadow:0 0 7px #0dbfa0}
+.refapp .jcx-no-data{font-size:14px;color:#8aa6b9}
+.refapp .jcx-detail{display:grid;gap:6px}
+.refapp .jcx-motion{border:1px solid #3777a3;border-radius:10px;padding:6px;background:#051a2b}
+.refapp .jcx-motion-title{text-align:center;font-size:10px;font-weight:900;color:#e2edf6;margin-bottom:5px}
+.refapp .jcx-motion-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.refapp .jcx-motion-row>div{position:relative;min-height:50px;border:1px solid #285b7a;border-radius:7px;background:linear-gradient(145deg,#062239,#052c30);text-align:center;padding:4px;overflow:hidden}
+.refapp .jcx-motion-row small{display:block;font-size:10px;color:#e5f2fa}
+.refapp .jcx-motion-row b{display:block;font-size:13px;line-height:1.15}
+.refapp .jcx-motion-row i{position:absolute;right:6px;bottom:5px;height:18px;width:7px;display:flex;align-items:end}
+.refapp .jcx-motion-row .jcx-bar{width:100%;box-shadow:0 0 5px #09d8ab}
+.refapp .jcx-pair,.refapp .jcx-foot{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}
+.refapp .jcx-tile,.refapp .jcx-position,.refapp .jcx-support{min-width:0;display:flex;align-items:center;gap:7px;padding:7px;background:linear-gradient(145deg,#09283f,#041826);border:1px solid #b68c4e;border-radius:9px}
+.refapp .jcx-icon{font-size:22px;color:#ffc44f;flex-shrink:0}
+.refapp .jcx-tile small,.refapp .jcx-position small,.refapp .jcx-support small{display:block;font-size:9px;font-weight:800;color:#dce8f2}
+.refapp .jcx-tile b,.refapp .jcx-position b,.refapp .jcx-support b{display:block;font-size:clamp(12px,3.7vw,18px);font-weight:900;line-height:1.15;overflow-wrap:anywhere}
+.refapp .jcx-tile em{display:block;font-style:normal;font-size:10px;color:#b9cbd8}
+.refapp .jcx-support{display:block;text-align:center}
+.refapp .jcx-support b{font-size:23px}
+@media(max-width:380px){.refapp .jcx-top{grid-template-columns:minmax(0,1fr) 70px 45px}.refapp .jcx-ring{width:68px;height:68px}.refapp .jcx-ring span{font-size:18px}.refapp .jcx-market-bars{height:60px}}
 </style>""", unsafe_allow_html=True)
     live_dashboard()
     # Persistent chart host: not within the periodic Streamlit fragment.
