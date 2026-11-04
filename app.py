@@ -2145,6 +2145,17 @@ def _entry_route_checks(sig, seconds_left):
                              and (all(ok for _,ok in current) or d3==side or d5==side))
         sides[side] = []
         for name,checks in routes:
+            # Una alineación heredada de 3m/5m no basta para confirmar
+            # la siguiente ronda: exigir evidencia reciente independiente.
+            # Se aplica simétricamente a UP/DOWN, sin espera fija.
+            if d3 == side and d5 == side:
+                recent_atr = _plan_number(impulse.get("recent_atr"))
+                efficiency = _plan_number(impulse.get("efficiency"))
+                live_fresh = (reliable and recent_atr is not None
+                              and efficiency is not None
+                              and recent_atr * sign >= .08
+                              and efficiency >= .35)
+                checks = checks + [("Movimiento reciente confirma tendencia alineada", live_fresh)]
             checks = checks+[("Fuera de la zona de ruido",noise_ok),
                             ("Distancia al target y tiempo respaldan la dirección",target_ok)]
             sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
