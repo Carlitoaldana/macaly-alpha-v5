@@ -2073,10 +2073,10 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 
-def _microstructure_decision(whale, seconds_left):
+def _microstructure_decision(whale, seconds_left, distance, atr):
     """Independent first-entry engine: aggressive trades + resting liquidity.
 
-    No RSI/EMA/MACD, target-distance, or price displacement used to choose side.
+    El flujo de 30 s y el libro eligen el lado. El target filtra rondas alejadas.
     A snapshot is only an experimental directional hypothesis, not calibrated odds.
     """
     result = {"candidate": None, "reason": "ESPERANDO MICROESTRUCTURA",
@@ -2084,25 +2084,32 @@ def _microstructure_decision(whale, seconds_left):
     if seconds_left is None or not 0 < float(seconds_left) <= 900:
         result["reason"] = "FUERA DE VENTANA DE ENTRADA"
         return result
+    if distance is None or not np.isfinite(distance) or not np.isfinite(atr) or atr <= 0:
+        result["reason"] = "SIN DISTANCIA AL TARGET O VOLATILIDAD"
+        return result
+    # Filtro experimental basado en ATR de un minuto y tiempo restante.
+    if abs(distance) > atr * math.sqrt(float(seconds_left) / 60):
+        result["reason"] = "TARGET FUERA DEL RANGO ESTIMADO"
+        return result
     if not isinstance(whale, dict):
         result["reason"] = "SIN OPERACIONES RECIENTES"
         return result
     try:
         buy = float(whale.get("buy30") or 0)
         sell = float(whale.get("sell30") or 0)
-        buy60 = float(whale.get("buy60") or 0)
-        sell60 = float(whale.get("sell60") or 0)
-        if not all(np.isfinite(x) and x >= 0 for x in (buy, sell, buy60, sell60)):
+        if not all(np.isfinite(x) and x >= 0 for x in (buy, sell)):
             return result
-        if buy + sell < 500_000 or buy60 + sell60 < 750_000:
+        if buy + sell < 500_000:
             result["reason"] = "POCAS OPERACIONES PARA EVALUAR"
             return result
-        flow30 = (buy-sell)/(buy+sell)
-        flow60 = (buy60-sell60)/(buy60+sell60)
+        flow30 = (buy - sell) / (buy + sell)
         result["trade_imbalance"] = round(flow30, 4)
-        # One-sided activity must persist beyond a single 10-second burst.
-        if abs(flow30) < .22 or abs(flow60) < .12 or flow30*flow60 <= 0:
-            result["reason"] = "FLUJO SIN PRESION SOSTENIDA"
+        buy60 = _plan_number(whale.get("buy60"))
+        sell60 = _plan_number(whale.get("sell60"))
+        if buy60 is not None and sell60 is not None and min(buy60, sell60) >= 0 and buy60 + sell60 > 0:
+            result["trade_imbalance_60s"] = round((buy60 - sell60) / (buy60 + sell60), 4)
+        if abs(flow30) < .22:
+            result["reason"] = "FLUJO DE 30S SIN PRESION SUFICIENTE"
             return result
         book = get_coinbase_order_book()
         imbalance = float(book.get("imbalance"))
@@ -2230,7 +2237,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         "price_ema9_atr":(price-float(l1["ema9"]))/atr,
         "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
         "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    micro = _microstructure_decision(whale, seconds_left)
+    micro = _microstructure_decision(whale, seconds_left, distance, atr)
     candidate = micro["candidate"]
     quality = "MICROESTRUCTURA · " + micro["reason"]
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
@@ -2558,24 +2565,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         return
 
-    # Reversión anticipada: si el motor independiente ya detectó presión
-    # ejecutada y liquidez concordantes en dirección opuesta, actualizar
-    # la señal activa sin esperar a que el precio cruce el target.
-    # La primera señal histórica se conserva para evaluar el desempeño.
-    micro = (signal or {}).get("microstructure_internal")
-    if (state.get("active_direction") in ("UP", "DOWN")
-            and candidate != state.get("active_direction")
-            and isinstance(micro, dict)
-            and micro.get("candidate") == candidate
-            and micro.get("reason") == "PRESION DE OPERACIONES Y LIQUIDEZ COINCIDENTE"):
-        state["active_direction"] = candidate
-        state["active_since"] = now
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        return
-
     last = state.get("pending_last_at")
     if isinstance(last, str):
         try:
@@ -2757,7 +2746,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3109,7 +3098,7 @@ def closing_reader(sig, round_signal, seconds_left, micro):
 
     # La distancia se evalúa contra el movimiento plausible en el tiempo que
     # resta. Un pequeño retroceso no invalida automáticamente una ventaja amplia.
-    score = 1.65 * tanh(distance / price_range)
+    score = 1.65 * (distance / price_range)
     observed = 0
     for window, weight in ((5, 0.32), (10, 0.43), (30, 0.25)):
         movement = finite(micro.get(f"change_{window}s"))
@@ -3137,8 +3126,7 @@ def closing_reader(sig, round_signal, seconds_left, micro):
 
     direction = "UP" if score > 0 else "DOWN"
     # Dirección y apoyo están alineados: jamás DOWN con apoyo menor a 50 %.
-    percent = int(round(50 + 50 * tanh(abs(score) / 1.75) / tanh(2.87 / 1.75)))
-    percent = min(100, max(50, percent))
+    percent = int(round(50 + 50 * tanh(abs(score) / 1.75)))
 
     color = "#00dfb5" if direction == "UP" else "#e64b4b"
     border = "rgba(0,223,181,.48)" if direction == "UP" else "rgba(230,75,75,.48)"
