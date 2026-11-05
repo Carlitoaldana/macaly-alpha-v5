@@ -1679,7 +1679,7 @@ def get_btc_data():
     return _fetch_current_btc_candles()
 
 
-def get_coinbase_whale_flow():
+def get_coinbase_whale_flow(closing_tape=None):
     """Lee presión agresiva de Coinbase en ventanas 10s/30s/60s y conserva alertas breves."""
     response = requests.get(
         "https://api.exchange.coinbase.com/products/BTC-USD/trades",
@@ -1696,6 +1696,7 @@ def get_coinbase_whale_flow():
     tape = st.session_state.setdefault("whale_flow_tape", [])
     seen = st.session_state.setdefault("whale_seen_ids", {})
 
+    closing_points = {}
     for row in reversed(rows):
         try:
             trade_id = str(row.get("trade_id", ""))
@@ -1716,8 +1717,15 @@ def get_coinbase_whale_flow():
             if notional > 0 and aggressor:
                 tape.append({"id": trade_id, "t": t, "notional": notional, "side": aggressor})
                 seen[trade_id] = t
+                if closing_tape is not None:
+                    second = int(t)
+                    if second not in closing_points or t > closing_points[second][0]:
+                        closing_points[second] = (t, price)
         except Exception:
             continue
+
+    if closing_tape is not None:
+        closing_tape.ingest("COINBASE TRADES", closing_points.values())
 
     tape[:] = [x for x in tape if 0 <= now - x["t"] <= 75]
     for k in [k for k, t in seen.items() if now - t > 90]:
@@ -3138,11 +3146,15 @@ def closing_reader(target, seconds_left, micro, whale):
         return {**empty, "headline": "RESULTADO OFICIAL PENDIENTE"}
     if target is None or not math.isfinite(target) or seconds_left is None:
         return {**empty, "headline": "FALTA TARGET O TIEMPO"}
-    if "speed" not in micro or micro["volatility"] <= 0:
-        return empty
+    if "speed" not in micro:
+        return {**empty, "headline": "FALTAN MUESTRAS DE PRECIO"}
+    if micro["volatility"] <= 0:
+        return {**empty, "headline": "VOLATILIDAD INSUFICIENTE"}
 
     flow = whale or {}
-    buy, sell = flow.get("buy10", 0), flow.get("sell10", 0)
+    buy, sell = flow.get("live_buy", 0), flow.get("live_sell", 0)
+    if buy == sell == 0:
+        buy, sell = flow.get("buy30", 0), flow.get("sell30", 0)
     if not all(math.isfinite(v) and v >= 0 for v in (buy, sell)) or buy + sell <= 0:
         return {**empty, "headline": "FALTA FLUJO COMPRADOR Y VENDEDOR"}
     imbalance = (buy - sell) / (buy + sell)
@@ -3958,7 +3970,7 @@ def live_dashboard():
 
     # Una sola lectura de Whale Flow por ciclo; la misma alimenta el panel.
     try:
-        whale = get_coinbase_whale_flow()
+        whale = get_coinbase_whale_flow(closing_tape)
     except Exception:
         whale = None
 
@@ -3997,12 +4009,19 @@ def live_dashboard():
     update_micro_tape(ticker, live_btc_price, source)
     micro = micro_reading()
     closing_micro = closing_tape.reading("KALSHI LIVE")
-    coinbase_micro = closing_tape.reading("COINBASE")
+    closing_micro["source"] = "KALSHI"
     if ("speed" not in closing_micro or closing_micro["volatility"] <= 0
             or closing_micro["age"] > 6):
-        if "speed" in coinbase_micro and coinbase_micro["volatility"] > 0:
-            closing_micro = {**coinbase_micro, "source": "COINBASE"}
-    closing_micro.setdefault("source", "KALSHI LIVE")
+        for feed in ("COINBASE TRADES", "COINBASE"):
+            candidate = closing_tape.reading(feed)
+            if "speed" in candidate and candidate["volatility"] > 0:
+                if closing_micro.get("age", float("inf")) <= 6:
+                    candidate.update(price=closing_micro["price"], age=closing_micro["age"],
+                                     source="KALSHI / COINBASE")
+                else:
+                    candidate["source"] = "COINBASE"
+                closing_micro = candidate
+                break
     # El reloj general redondea hacia abajo. El lector conserva la fracción final.
     try:
         closing_time = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
