@@ -2861,7 +2861,7 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     _shadow_capture(state.get("ticker"), sig, state, seconds_left)
     return state
 
-def _background_history_loop(stop_event=None):
+def _background_history_loop(stop_event=None, closing_tape=None):
     started = time.monotonic()
     active_ticker = None
     active_state = None
@@ -2885,6 +2885,8 @@ def _background_history_loop(stop_event=None):
             seconds_left = get_seconds_remaining(market)
             target = get_target_from_market(market)
             live_price = _background_get_live_price(market)
+            if closing_tape is not None:
+                closing_tape.record(live_price, getattr(_BACKGROUND_PRICE_SOURCE, "value", None))
             btc_df = _background_get_btc_data()
             try:
                 background_whale = get_coinbase_whale_flow()
@@ -2946,7 +2948,7 @@ def start_continuous_history_worker():
     if current is not None:
         return current
     stop_event = threading.Event()
-    worker = threading.Thread(target=_background_history_loop, args=(stop_event,), name="btc-history-source-v1", daemon=True)
+    worker = threading.Thread(target=_background_history_loop, args=(stop_event, closing_price_tape()), name="btc-history-source-v1", daemon=True)
     worker._btc_stop_event = stop_event
     worker._btc_data_revision = BACKGROUND_DATA_REVISION
     worker.start()
@@ -3061,102 +3063,111 @@ def micro_reading():
     }
 
 
-def closing_reader(sig, round_signal, seconds_left, micro):
-    """Pronóstico independiente UP/DOWN con apoyo derivado de la MISMA decisión.
+class ClosingPriceTape:
+    """Comparte muestras reales entre el worker y el panel, separadas por fuente."""
 
-    El cálculo no lee ni cambia el estado de confirmación/retirada del motor.
-    Distancia, tiempo y muestras observadas generan una única puntuación con
-    signo: positivo UP, negativo DOWN. El porcentaje expresa intensidad del
-    apoyo de este modelo heurístico, NO probabilidad calibrada de acierto.
-    """
-    from math import isfinite, sqrt, tanh
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.by_source = {}
 
-    def finite(value):
-        try:
-            result = float(value)
-            return result if isfinite(result) else None
-        except (TypeError, ValueError, OverflowError):
-            return None
+    def record(self, price, source):
+        stamp = getattr(_PRICE_OBSERVATIONS, "values", {}).get(source)
+        if stamp is None or price is None or not math.isfinite(price) or price <= 0:
+            return
+        now = time.time()
+        if not -5 <= now - stamp <= LIVE_PRICE_MAX_AGE:
+            return
+        with self.lock:
+            samples = self.by_source.setdefault(source, {})
+            for old in list(samples):
+                if old < now - 90:
+                    del samples[old]
+            samples[stamp] = price
 
-    seconds = finite(seconds_left)
-    distance = finite(sig.get("distance"))
-    price = finite(sig.get("price"))
-    if seconds is None or distance is None or price is None or price <= 0:
-        return {
-            "percent": 0, "direction": None, "headline": "SIN DATOS",
-            "note": "Faltan precio, target o tiempo de ronda.",
-            "micro": "SIN DATOS", "color": "#94a3b8",
-            "border": "rgba(148,163,184,.45)",
-            "bg": "linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))",
-        }
+    def reading(self, source):
+        stamp = getattr(_PRICE_OBSERVATIONS, "values", {}).get(source)
+        if stamp is None:
+            return {}
+        age = max(0.0, time.time() - stamp)
+        if age > 6:
+            return {}
+        with self.lock:
+            samples = sorted((t, p) for t, p in self.by_source.get(source, {}).items()
+                             if stamp - 30 - SIGNAL_CONFIRM_INTERVAL <= t <= stamp)
+        if not samples or samples[-1][0] != stamp:
+            return {}
 
-    if seconds <= 0:
-        return {
-            "percent": 0, "direction": None, "headline": "RONDA TERMINADA",
-            "note": "El resultado oficial debe verificarse en Kalshi.",
-            "micro": "RONDA CERRADA", "color": "#94a3b8",
-            "border": "rgba(148,163,184,.45)",
-            "bg": "linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))",
-        }
+        # Usa el tramo continuo más reciente. Una pausa no borra otras fuentes.
+        for i in range(len(samples) - 1, 0, -1):
+            if samples[i][0] - samples[i - 1][0] > SIGNAL_CONFIRM_MAX_GAP:
+                samples = samples[i:]
+                break
 
-    # Volatilidad observada en velas de un minuto: no supone que el precio
-    # puede mantener durante minutos la velocidad de sus últimos 5 segundos.
-    atr = finite(sig.get("atr"))
-    if atr is None or atr <= 0:
-        atr = max(price * 0.0005, 1.0)
-    horizon = max(seconds / 60.0, 1.0 / 60.0)
-    price_range = max(atr * sqrt(horizon), 1.0)
+        current = samples[-1][1]
+        reading = {"age": age, "price": current}
+        for window in (5, 10, 30):
+            earlier = [(t, p) for t, p in samples if t <= stamp - window]
+            if earlier and stamp - window - earlier[-1][0] <= SIGNAL_CONFIRM_INTERVAL:
+                reading[f"change_{window}s"] = current - earlier[-1][1]
 
-    # La distancia se evalúa contra el movimiento plausible en el tiempo que
-    # resta. Un pequeño retroceso no invalida automáticamente una ventaja amplia.
-    score = 1.65 * tanh(distance / price_range)
-    observed = 0
-    for window, weight in ((5, 0.32), (10, 0.43), (30, 0.25)):
-        movement = finite(micro.get(f"change_{window}s"))
-        if movement is not None:
-            observed += 1
-            # Reescala al tamaño normal de un movimiento en esa ventana.
-            micro_range = max(atr * sqrt(window / 60.0), 1.0)
-            score += weight * tanh(movement / micro_range)
+        if len(samples) < 4 or stamp - samples[0][0] < 5:
+            return reading
+        times, prices = map(np.asarray, zip(*samples))
+        intervals = np.diff(times)
+        changes = np.diff(prices)
+        speed = float((prices[-1] - prices[0]) / (times[-1] - times[0]))
+        residuals = (changes - speed * intervals) / np.sqrt(intervals)
+        volatility = float(np.sqrt(np.sum(residuals ** 2) / (len(changes) - 1)))
+        reading.update(speed=speed, volatility=volatility, cadence=float(np.median(intervals)))
+        return reading
 
-    # Slope solo se usa si hay lecturas suficientes; no se interpreta 0.0
-    # (valor por defecto cuando faltan datos) como velocidad real.
-    if observed >= 2:
-        slope = finite(micro.get("slope"))
-        if slope is not None:
-            micro_range = max(atr / sqrt(60.0), 0.15)
-            score += 0.22 * tanh(slope / micro_range)
 
-    # Si BTC coincide exactamente con el target, el movimiento observado
-    # decide. Las velas recientes se usan como desempate, nunca la señal activa.
-    if abs(score) < 1e-9:
-        momentum = finite(sig.get("mom3")) or 0.0
-        score = 0.12 * tanh(momentum / 0.10)
-        if abs(score) < 1e-9:
-            score = 0.001 if sig.get("ema") == "BULL" else -0.001
+@st.cache_resource
+def closing_price_tape():
+    return ClosingPriceTape()
 
-    direction = "UP" if score > 0 else "DOWN"
-    # Dirección y apoyo están alineados: jamás DOWN con apoyo menor a 50 %.
-    percent = int(round(50 + 50 * tanh(abs(score) / 1.75)))
-    percent = min(100, max(50, percent))
-    # No afirmar casi certeza si faltan las lecturas breves. Mantiene dirección.
-    if observed == 0:
-        percent = min(percent, 75)
-    elif observed == 1:
-        percent = min(percent, 83)
-    elif observed == 2:
-        percent = min(percent, 92)
 
-    color = "#00dfb5" if direction == "UP" else "#e64b4b"
-    border = "rgba(0,223,181,.48)" if direction == "UP" else "rgba(230,75,75,.48)"
-    bg = ("linear-gradient(135deg,rgba(4,86,43,.46),rgba(7,36,25,.78))"
-          if direction == "UP" else
-          "linear-gradient(135deg,rgba(102,20,31,.48),rgba(43,10,17,.80))")
+def closing_reader(target, seconds_left, micro, whale):
+    """Probabilidad bajo un modelo normal local del precio al vencimiento."""
+    empty = {
+        "percent": 0, "direction": None, "headline": "DATOS INSUFICIENTES",
+        "color": "#94a3b8", "border": "rgba(148,163,184,.45)",
+        "bg": "linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))",
+    }
+    if seconds_left is not None and seconds_left <= 0:
+        return {**empty, "headline": "RESULTADO OFICIAL PENDIENTE"}
+    if target is None or not math.isfinite(target) or seconds_left is None:
+        return {**empty, "headline": "FALTA TARGET O TIEMPO"}
+    if "speed" not in micro or micro["volatility"] <= 0:
+        return empty
+
+    flow = whale or {}
+    buy, sell = flow.get("buy10", 0), flow.get("sell10", 0)
+    if not all(math.isfinite(v) and v >= 0 for v in (buy, sell)) or buy + sell <= 0:
+        return {**empty, "headline": "FALTA FLUJO COMPRADOR Y VENDEDOR"}
+    imbalance = (buy - sell) / (buy + sell)
+    volatility = micro["volatility"]
+    cadence = micro["cadence"]
+    # El desequilibrio de volumen ajusta el movimiento esperado por muestra.
+    speed = micro["speed"] + imbalance * volatility / math.sqrt(cadence)
+    horizon = seconds_left + micro["age"]
+    # La velocidad inmediata pierde peso con el tiempo, con escala de 10 s
+    # igual a la ventana del flujo agresor.
+    drift = speed * 10 * math.log1p(horizon / 10)
+    z = (micro["price"] - target + drift) / (volatility * math.sqrt(horizon))
+    if z == 0:
+        return {**empty, "percent": 50, "headline": "SIN VENTAJA"}
+    direction = "UP" if z > 0 else "DOWN"
+    tail = 0.5 * math.erfc(abs(z) / math.sqrt(2))
+    percent = 100 * (1 - tail)
+    label = f"{percent:.1f}%" if percent < 99.95 else ">99.9%"
     return {
-        "percent": percent, "direction": direction,
-        "headline": direction, "note": "",
-        "micro": "LECTURAS DISPONIBLES" if observed else "SIN MICROLECTURA",
-        "color": color, "border": border, "bg": bg,
+        "percent": percent, "label": label, "direction": direction, "headline": direction,
+        "color": "#00dfb5" if direction == "UP" else "#e64b4b",
+        "border": "rgba(0,223,181,.48)" if direction == "UP" else "rgba(230,75,75,.48)",
+        "bg": ("linear-gradient(135deg,rgba(4,86,43,.46),rgba(7,36,25,.78))"
+               if direction == "UP" else
+               "linear-gradient(135deg,rgba(102,20,31,.48),rgba(43,10,17,.80))"),
     }
 
 
@@ -3982,20 +3993,17 @@ def live_dashboard():
     # Cinta live de segundos para el Lector de Cierre.
     update_micro_tape(ticker, live_btc_price, source)
     micro = micro_reading()
-    # El panel permanece visible; solo la predicción se activa en los últimos 90 segundos.
-    # La cinta de precios y las métricas continúan actualizándose durante toda la ronda.
-    reader_active = seconds_left is not None and 0 < seconds_left <= 90
-    reader = closing_reader(sig, round_signal, seconds_left, micro)
-    if not btc_ok:
-        reader = {**reader, "percent":0, "headline":"SIN DATOS ACTUALES",
-                  "note":"No se puede validar la señal hasta recuperar las velas."}
-    reader_percent_label = f"{reader['percent']}%" if reader.get("direction") and btc_ok else "—"
-    if seconds_left is not None and seconds_left <= 0:
-        # El reloj y el precio instantáneo no prueban la liquidación oficial.
-        reader = {**reader, "percent": 0,
-                  "headline": "RONDA TERMINADA · RESULTADO PENDIENTE",
-                  "note": "Esperando verificación del resultado oficial de Kalshi."}
-        reader_percent_label = "—"
+    closing_tape = closing_price_tape()
+    closing_tape.record(live_btc_price, source)
+    closing_micro = closing_tape.reading(source) if live_btc_price is not None else {}
+    # El reloj general redondea hacia abajo. El lector conserva la fracción final.
+    try:
+        closing_time = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
+        closing_seconds = (closing_time - datetime.now(timezone.utc)).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        closing_seconds = None
+    reader = closing_reader(target, closing_seconds, closing_micro, whale)
+    reader_percent_label = reader.get("label", "50.0%" if reader["percent"] == 50 else "—")
 
     # Whale Flow: panel visual y apoyo opcional a candidatura en el laboratorio.
     # No se consulta por segunda vez ni modifica las confirmaciones temporales.
@@ -4107,20 +4115,20 @@ def live_dashboard():
     time_pct = max(0, min(100, int((seconds_left or 0) / 900 * 100)))
 
     # Panel de cierre de últimos segundos — solo lectura; NO cambia la señal principal.
-    c30 = float(micro.get("change_30s", 0.0) or 0.0)
-    c10 = float(micro.get("change_10s", 0.0) or 0.0)
-    c5 = float(micro.get("change_5s", 0.0) or 0.0)
+    c30 = float(closing_micro.get("change_30s", 0.0) or 0.0)
+    c10 = float(closing_micro.get("change_10s", 0.0) or 0.0)
+    c5 = float(closing_micro.get("change_5s", 0.0) or 0.0)
     motion_labels = {}
     for window in (5, 10, 30):
-        value = micro.get(f"change_{window}s")
+        value = closing_micro.get(f"change_{window}s")
         motion_labels[window] = "—" if value is None else f"{'↑' if value > 0 else '↓' if value < 0 else '→'}<br>{value:+.0f}"
-    speed_ready = micro.get("change_10s") is not None
-    speed10 = c10 / 10.0
+    speed_ready = "speed" in closing_micro
+    speed10 = closing_micro.get("speed", 0.0)
     speed_word = "SUBIENDO" if speed10 > 0.15 else "BAJANDO" if speed10 < -0.15 else "ESTABLE"
     speed_arrow = "↑" if speed10 > 0.15 else "↓" if speed10 < -0.15 else "→"
     speed_value = f"{speed10:+.1f}/s" if speed_ready else "—"
     if not speed_ready:
-        speed_word, speed_arrow = "REUNIENDO DATOS", ""
+        speed_word, speed_arrow = "DATOS INSUFICIENTES", ""
     speed_color = "#00dfb5" if speed10 > 0.15 else "#e64b4b" if speed10 < -0.15 else "#94a3b8"
     market_side = "UP" if (distance or 0) > 0 else "DOWN" if (distance or 0) < 0 else "NEUTRAL"
     abs_final_distance = abs(distance or 0)
@@ -4169,7 +4177,7 @@ def live_dashboard():
       </div>
       <div class="finalanalysis">
         <div class="analysisbox"><div class="analysisicon">◎</div><div class="analysistext"><small>POSICIÓN ACTUAL</small><b>{final_status}</b></div></div>
-        <div class="probbox"><small>{'APOYO A ' + reader['direction'] if reader_active and reader.get('direction') else 'APOYO CALCULADO'}</small><b>{reader_percent_label}</b></div>
+        <div class="probbox"><small>{'ESTIMACIÓN ' + reader['direction'] if reader.get('direction') else 'ESTIMACIÓN DE CIERRE'}</small><b>{reader_percent_label}</b></div>
       </div>
     </div>'''
 
@@ -4183,9 +4191,9 @@ def live_dashboard():
 
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
-    <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>{"● ACTIVO" if reader_active else "● LEYENDO"}</em></div>
+    <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>{html.escape(reader["headline"])}</em></div>
     <div class="jcclose-main">
-      <div class="jcclose-signal" style="--signal:{reader['color']};visibility:{'visible' if reader_active else 'hidden'}">
+      <div class="jcclose-signal" style="--signal:{reader['color']}">
         <span class="jcclose-double">{'❯❯' if reader.get('direction') == 'UP' else '❮❮' if reader.get('direction') == 'DOWN' else '◌'}</span>
         <strong>{reader.get('direction') or '—'}</strong>
       </div>
