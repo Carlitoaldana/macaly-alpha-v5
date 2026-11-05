@@ -1679,7 +1679,7 @@ def get_btc_data():
     return _fetch_current_btc_candles()
 
 
-def get_coinbase_whale_flow():
+def get_coinbase_whale_flow(flow_state=None):
     """Lee presión agresiva de Coinbase en ventanas 10s/30s/60s y conserva alertas breves."""
     response = requests.get(
         "https://api.exchange.coinbase.com/products/BTC-USD/trades",
@@ -1693,8 +1693,9 @@ def get_coinbase_whale_flow():
         raise ValueError("Coinbase no devolvió operaciones recientes.")
 
     now = pd.Timestamp.now(tz="UTC").timestamp()
-    tape = st.session_state.setdefault("whale_flow_tape", [])
-    seen = st.session_state.setdefault("whale_seen_ids", {})
+    flow_state = st.session_state if flow_state is None else flow_state
+    tape = flow_state.setdefault("whale_flow_tape", [])
+    seen = flow_state.setdefault("whale_seen_ids", {})
 
     for row in reversed(rows):
         try:
@@ -1714,7 +1715,7 @@ def get_coinbase_whale_flow():
                     or price <= 0 or size <= 0 or not 0 <= now - t <= 75):
                 continue
             if notional > 0 and aggressor:
-                tape.append({"id": trade_id, "t": t, "notional": notional, "side": aggressor})
+                tape.append({"id": trade_id, "t": t, "notional": notional, "size": size, "side": aggressor})
                 seen[trade_id] = t
         except Exception:
             continue
@@ -1742,19 +1743,27 @@ def get_coinbase_whale_flow():
     same_side = d10 is not None and d10 == d30
     qualifies = bool(same_side and (burst or sustained))
 
-    alert = st.session_state.get("whale_flow_alert")
+    alert = flow_state.get("whale_flow_alert")
     if qualifies:
         alert = {
             "direction": d10, "time": now,
             "buy": b30, "sell": s30, "total": t30,
             "imbalance": i30, "buy10": b10, "sell10": s10,
         }
-        st.session_state["whale_flow_alert"] = alert
+        flow_state["whale_flow_alert"] = alert
     elif alert and now - float(alert.get("time", 0)) > 12:
         alert = None
-        st.session_state["whale_flow_alert"] = None
+        flow_state["whale_flow_alert"] = None
 
+    def traded_price(min_age, max_age):
+        trades = [x for x in tape if min_age <= now - x["t"] < max_age and x.get("size", 0) > 0]
+        size = sum(x["size"] for x in trades)
+        return sum(x["notional"] for x in trades) / size if size else None
+
+    recent_price, previous_price = traded_price(0, 5), traded_price(5, 10)
+    move = recent_price - previous_price if recent_price is not None and previous_price is not None else None
     return {
+        "trade_price_move": move,
         "detected": alert is not None, "alert": alert,
         "live_buy": b10, "live_sell": s10, "live_total": t10,
         "imbalance": i10, "buy30": b30, "sell30": s30,
@@ -2074,54 +2083,36 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
 
 
 def _microstructure_decision(whale, seconds_left):
-    """Independent first-entry engine: aggressive trades + resting liquidity.
-
-    El flujo de 30 s y el libro eligen el lado.
-    A snapshot is only an experimental directional hypothesis, not calibrated odds.
-    """
-    result = {"candidate": None, "reason": "ESPERANDO MICROESTRUCTURA",
-              "book_imbalance": None, "trade_imbalance": None}
-    checks = result["checks"] = {}
+    """Busca presión ejecutada reciente respaldada por el precio negociado."""
+    result = {"candidate": None, "reason": "SIN OPERACIONES RECIENTES", "checks": {}}
+    checks = result["checks"]
     if seconds_left is None or not 0 < float(seconds_left) <= 900:
         result["reason"] = "FUERA DE VENTANA DE ENTRADA"
         return result
     checks["time"] = True
     if not isinstance(whale, dict):
-        result["reason"] = "SIN OPERACIONES RECIENTES"
         return result
-    try:
-        buy = float(whale.get("buy30") or 0)
-        sell = float(whale.get("sell30") or 0)
-        if not all(np.isfinite(x) and x >= 0 for x in (buy, sell)):
-            return result
-        checks["volume"] = buy + sell
-        if buy + sell == 0:
-            result["reason"] = "SIN VOLUMEN PARA MEDIR PRESION"
-            return result
-        flow30 = (buy - sell) / (buy + sell)
-        result["trade_imbalance"] = round(flow30, 4)
-        buy60 = _plan_number(whale.get("buy60"))
-        sell60 = _plan_number(whale.get("sell60"))
-        if buy60 is not None and sell60 is not None and min(buy60, sell60) >= 0 and buy60 + sell60 > 0:
-            result["trade_imbalance_60s"] = round((buy60 - sell60) / (buy60 + sell60), 4)
-        checks["flow"] = abs(flow30) >= .22
-        if not checks["flow"]:
-            result["reason"] = "FLUJO DE 30S SIN PRESION SUFICIENTE"
-            return result
-        book = get_coinbase_order_book()
-        imbalance = float(book.get("imbalance"))
-        if not np.isfinite(imbalance):
-            return result
-        result["book_imbalance"] = round(imbalance, 4)
-        # Book and executed trades must independently agree.
-        checks["book"] = abs(imbalance) >= .15 and imbalance * flow30 > 0
-        if not checks["book"]:
-            result["reason"] = "LIBRO Y OPERACIONES NO COINCIDEN"
-            return result
-        result["candidate"] = "UP" if flow30 > 0 else "DOWN"
-        result["reason"] = "PRESION DE OPERACIONES Y LIQUIDEZ COINCIDENTE"
-    except (ValueError, TypeError, KeyError, requests.RequestException):
-        result["reason"] = "LIBRO NO DISPONIBLE"
+    buy, sell, buy30, sell30 = (_plan_number(whale.get(key))
+                                for key in ("live_buy", "live_sell", "buy30", "sell30"))
+    if buy30 is not None and sell30 is not None:
+        checks["volume"] = buy30 + sell30
+    if buy is None or sell is None or min(buy, sell) < 0 or buy + sell <= 0:
+        return result
+    flow = (buy - sell) / (buy + sell)
+    result["trade_imbalance"] = flow
+    checks["flow"] = flow != 0
+    move = _plan_number(whale.get("trade_price_move"))
+    result["price_move"] = move
+    checks["price_move"] = flow * move > 0 if move is not None else None
+    if not checks["flow"]:
+        result["reason"] = "PRESION EJECUTADA NEUTRAL"
+    elif move is None:
+        result["reason"] = "FALTAN PRECIOS DE OPERACIONES RECIENTES"
+    elif not checks["price_move"]:
+        result["reason"] = "EL PRECIO TODAVIA NO ACOMPAÑA LA PRESION"
+    else:
+        result["candidate"] = "UP" if flow > 0 else "DOWN"
+        result["reason"] = "PRESION Y PRECIO NEGOCIADO COINCIDEN"
     return result
 
 
@@ -2595,8 +2586,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = now.isoformat()
 
     elapsed = (now - since).total_seconds() if since else 0
-    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+    readings_required = SIGNAL_CONFIRM_READINGS + int(state.get("active_direction") in ("UP", "DOWN"))
+    if (state["pending_count"] >= readings_required
+            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (readings_required - 1)):
         state["active_direction"] = candidate
         state["active_since"] = now
         if state.get("first_direction") is None:
@@ -2744,7 +2736,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_target_info"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2849,6 +2841,7 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     return state
 
 def _background_history_loop(stop_event=None):
+    flow_state = {}
     started = time.monotonic()
     active_ticker = None
     active_state = None
@@ -2874,7 +2867,7 @@ def _background_history_loop(stop_event=None):
             live_price = _background_get_live_price(market)
             btc_df = _background_get_btc_data()
             try:
-                background_whale = get_coinbase_whale_flow()
+                background_whale = get_coinbase_whale_flow(flow_state)
             except Exception:
                 background_whale = None
             sig = build_signal(btc_df, target, seconds_left, live_price,
@@ -4162,19 +4155,20 @@ def live_dashboard():
 
     engine = sig.get("microstructure_internal") or {}
     checks = engine.get("checks", {})
-    flow30 = engine.get("trade_imbalance")
-    book = engine.get("book_imbalance")
+    flow10 = engine.get("trade_imbalance")
+    price_move = engine.get("price_move")
     volume = checks.get("volume")
     target_distance = _plan_number(sig.get("distance"))
     pending = (state or {}).get("pending_count", 0)
     candidate = engine.get("candidate")
     confirmed = candidate in ("UP", "DOWN") and candidate == active
+    needed = SIGNAL_CONFIRM_READINGS + int(active in ("UP", "DOWN") and candidate != active)
 
     def direction_label(value):
         return "UP" if value > 0 else "DOWN" if value < 0 else "NEUTRAL"
 
-    def flow_label(value, minimum):
-        return f"{direction_label(value)} {abs(value):.1%} / mín. {minimum}" if value is not None else "—"
+    def flow_label(value):
+        return f"{direction_label(value)} {abs(value):.1%}" if value is not None else "—"
 
     rows = [
         ("TIEMPO DE RONDA", checks.get("time", False), f"{seconds_left}s restantes" if seconds_left is not None else "Sin reloj"),
@@ -4183,11 +4177,11 @@ def live_dashboard():
                                if target_distance is not None else "—")),
         ("VOLUMEN 30S", None, (f"${volume:,.0f} · {'Bajo · ' if volume < 500_000 else ''}Informativo"
                                if volume is not None else "—")),
-        ("PRESIÓN 30S", checks.get("flow"), flow_label(flow30, "22 %")),
-        ("LIBRO DE ÓRDENES", checks.get("book"), flow_label(book, "15 %")),
+        ("PRESIÓN 10S", checks.get("flow"), flow_label(flow10)),
+        ("PRECIO NEGOCIADO 5S / 5S", checks.get("price_move"), f"${price_move:+.2f}" if price_move is not None else "—"),
         ("CONFIRMACIÓN", True if confirmed else None,
-         f"{candidate} · {SIGNAL_CONFIRM_READINGS}/{SIGNAL_CONFIRM_READINGS}" if confirmed else
-         f"{candidate} · {pending}/{SIGNAL_CONFIRM_READINGS}" if candidate else "Sin candidatura"),
+         f"{candidate} · Confirmada" if confirmed else
+         f"{candidate} · {pending}/{needed}" if candidate else "Sin candidatura"),
     ]
     diagnostic_rows = "".join(
         f'<div class="jc-engine-check"><span>{html.escape(label)}</span>'
