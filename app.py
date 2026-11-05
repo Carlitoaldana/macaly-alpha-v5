@@ -2416,7 +2416,7 @@ def _review_active_retention(state, signal, seconds_left, now):
         _reset_withdrawal(state)
         return
     support, contrary = _retention_assessment(state, signal)
-    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if support < 2 else None
+    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if contrary > 0 and support < 2 else None
     if contrary < 2:
         _reset_withdrawal(state)
         state["retention_warning"] = warning
