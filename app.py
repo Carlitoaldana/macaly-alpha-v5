@@ -2388,7 +2388,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     ut_live, ut_closed, ut_closed_at = _ut_bot_events(df, 3, now)
     ut_short, _, _ = _ut_bot_events(df, 1, now)
     if seconds_left is None or not 0 < seconds_left <= 900:
-        ut_live = ut_closed = ut_short = None
+        ut_closed = None
     elif (now - ut_closed_at).total_seconds() > 900 - seconds_left:
         ut_closed = None
     micro.update(ut_live=ut_live, ut_closed=ut_closed, ut_short=ut_short)
