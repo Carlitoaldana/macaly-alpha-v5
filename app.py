@@ -2393,7 +2393,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         ut_closed = None
     micro.update(ut_live=ut_live, ut_closed=ut_closed, ut_short=ut_short)
     if micro.get("route") == "GIRO TEMPRANO" and micro["candidate"] and micro["candidate"] != ut_closed:
-        micro.update(candidate=None, reason="GIRO · ESPERANDO UT BOT 3M AL CIERRE")
+        micro.update(candidate=None, reason="GIRO · ESPERANDO CONFIRMACIÓN")
     candidate = micro["candidate"]
     quality = "MICROESTRUCTURA · " + micro["reason"]
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
@@ -4204,37 +4204,26 @@ def live_dashboard():
     # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
     # las probabilidades oficiales.
     ut = sig.get("microstructure_internal") or {}
-    ut_direction = ut.get("ut_live")
-    ut_notice = (
-        f'<div class="prenote">UT BOT 3M · POSIBLE {ut_direction} · VELA ABIERTA</div>'
-        if ut_direction in ("UP", "DOWN") else ""
-    )
     pre = build_presignal(sig, seconds_left)
     pre_direction = pre["direction"]
     pre_percent = pre["percent"]
 
     if pre_direction == "UP":
         pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
-        pre_note = "Presión alcista temprana detectada. Esperando evolución del mercado."
         pre_label = "POSIBLE UP"
     elif pre_direction == "DOWN":
         pre_color, pre_bg, pre_glow = "#e64b4b", "rgba(104,25,37,.28)", "rgba(230,75,75,.20)"
-        pre_note = "Presión bajista temprana detectada. Esperando evolución del mercado."
         pre_label = "POSIBLE DOWN"
     else:
         pre_color, pre_bg, pre_glow = "#38bdf8", "rgba(24,73,101,.24)", "rgba(56,189,248,.18)"
-        pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
         pre_label = "NEUTRAL"
 
-    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
     pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
+      <div class="prehead"><span class="pretitle">PRESEÑAL</span><span class="prebadge">{pre_badge}</span></div>
       <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
-      <div class="prenote">{pre_note}</div>
-      {ut_notice}
     </section>'''
 
     if active == "UP":
@@ -4323,7 +4312,7 @@ def live_dashboard():
     ut_warning = active in ("UP", "DOWN") and ut.get("ut_short") in ("UP", "DOWN") and ut["ut_short"] != active
     weakness_html = (
         '<div class="weakness-inline" role="status">⚠ ' +
-        html.escape(f"{active} PERDIENDO FUERZA · UT BOT 1M" if ut_warning else round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
+        html.escape(f"{active} PERDIENDO FUERZA" if ut_warning else round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
         '</div>'
         if (ut_warning or round_signal.get("reversal")) and active in ("UP", "DOWN") else ""
     )
