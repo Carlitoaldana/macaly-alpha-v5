@@ -2392,7 +2392,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     elif (now - ut_closed_at).total_seconds() > 900 - seconds_left:
         ut_closed = None
     micro.update(ut_live=ut_live, ut_closed=ut_closed, ut_short=ut_short)
-    if micro.get("route") == "GIRO TEMPRANO" and micro["candidate"] and micro["candidate"] != ut_closed:
+    ut_direction = ut_live or ut_closed
+    if micro.get("route") == "GIRO TEMPRANO" and micro["candidate"] and micro["candidate"] != ut_direction:
         micro.update(candidate=None, reason="GIRO · ESPERANDO CONFIRMACIÓN")
     candidate = micro["candidate"]
     quality = "MICROESTRUCTURA · " + micro["reason"]
@@ -2903,7 +2904,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_close_ofi_ut_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_close_ofi_ut_v2"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
