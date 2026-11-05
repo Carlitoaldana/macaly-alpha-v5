@@ -1090,11 +1090,8 @@ def load_round_state(ticker):
 def _write_state_to_connection(conn, state):
     row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (state['ticker'],)).fetchone()
     saved = json.loads(row[0]) if row else {}
-    round_open = pd.to_datetime(state.get("first_signal_round_open"), utc=True, errors="coerce")
-    saved_first = pd.to_datetime(saved.get("first_signal_time"), utc=True, errors="coerce")
-    if (saved.get('first_direction') in ('UP','DOWN')
-            and (pd.isna(round_open) or (saved.get("ut_round_policy") == 1
-                 and not pd.isna(saved_first) and saved_first >= round_open))):
+    # El ticker identifica la ronda y su primera señal ya guardada.
+    if saved.get('first_direction') in ('UP','DOWN'):
         for key in ('first_direction','first_signal_time','first_signal_seconds',
                     'first_signal_price'):
             value = saved.get(key)
@@ -2545,12 +2542,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     state.update(pending_direction=None, pending_count=0, pending_since=None,
                  pending_last_at=None, pending_price_source=None)
     if not pd.isna(round_open):
-        state["first_signal_round_open"] = round_open.isoformat()
-        first_time = pd.to_datetime(state.get("first_signal_time"), utc=True, errors="coerce")
-        if (state.get("ut_round_policy") != 1 or pd.isna(first_time)
-                or not round_open <= first_time < end or first_time > now_ts):
-            state.update(first_direction=None, first_signal_time=None,
-                         first_signal_seconds=None, first_signal_price=None)
         if state.get("ut_round_policy") != 1:
             state.update(active_direction=None, active_since=None, exit_plan=None, ut_round_policy=1)
 
