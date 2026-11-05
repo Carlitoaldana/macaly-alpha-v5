@@ -2073,10 +2073,10 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 
-def _microstructure_decision(whale, seconds_left, distance, atr):
+def _microstructure_decision(whale, seconds_left):
     """Independent first-entry engine: aggressive trades + resting liquidity.
 
-    El flujo de 30 s y el libro eligen el lado. El target filtra rondas alejadas.
+    El flujo de 30 s y el libro eligen el lado.
     A snapshot is only an experimental directional hypothesis, not calibrated odds.
     """
     result = {"candidate": None, "reason": "ESPERANDO MICROESTRUCTURA",
@@ -2086,16 +2086,6 @@ def _microstructure_decision(whale, seconds_left, distance, atr):
         result["reason"] = "FUERA DE VENTANA DE ENTRADA"
         return result
     checks["time"] = True
-    if distance is None or not np.isfinite(distance) or not np.isfinite(atr) or atr <= 0:
-        result["reason"] = "SIN DISTANCIA AL TARGET O VOLATILIDAD"
-        return result
-    # Filtro experimental basado en ATR de un minuto y tiempo restante.
-    target_range = atr * math.sqrt(float(seconds_left) / 60)
-    checks["target_range"] = target_range
-    checks["target"] = abs(distance) <= target_range
-    if not checks["target"]:
-        result["reason"] = "TARGET FUERA DEL RANGO ESTIMADO"
-        return result
     if not isinstance(whale, dict):
         result["reason"] = "SIN OPERACIONES RECIENTES"
         return result
@@ -2245,7 +2235,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         "price_ema9_atr":(price-float(l1["ema9"]))/atr,
         "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
         "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    micro = _microstructure_decision(whale, seconds_left, distance, atr)
+    micro = _microstructure_decision(whale, seconds_left)
     candidate = micro["candidate"]
     quality = "MICROESTRUCTURA · " + micro["reason"]
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
@@ -2754,7 +2744,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_target_info"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -4175,7 +4165,7 @@ def live_dashboard():
     flow30 = engine.get("trade_imbalance")
     book = engine.get("book_imbalance")
     volume = checks.get("volume")
-    target_range = checks.get("target_range")
+    target_distance = _plan_number(sig.get("distance"))
     pending = (state or {}).get("pending_count", 0)
     candidate = engine.get("candidate")
     confirmed = candidate in ("UP", "DOWN") and candidate == active
@@ -4188,7 +4178,9 @@ def live_dashboard():
 
     rows = [
         ("TIEMPO DE RONDA", checks.get("time", False), f"{seconds_left}s restantes" if seconds_left is not None else "Sin reloj"),
-        ("BTC / TARGET", checks.get("target"), f"${abs(sig['distance']):,.0f} / rango ${target_range:,.0f}" if target_range is not None else "—"),
+        ("BTC / TARGET", None, (f"${abs(target_distance):,.0f} "
+                               f"{'arriba' if target_distance > 0 else 'abajo' if target_distance < 0 else 'en el target'} · Informativo"
+                               if target_distance is not None else "—")),
         ("VOLUMEN 30S", None, (f"${volume:,.0f} · {'Bajo · ' if volume < 500_000 else ''}Informativo"
                                if volume is not None else "—")),
         ("PRESIÓN 30S", checks.get("flow"), flow_label(flow30, "22 %")),
