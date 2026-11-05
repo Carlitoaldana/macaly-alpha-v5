@@ -2535,11 +2535,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     _reset_withdrawal(state)
     state.update(pending_direction=None, pending_count=0, pending_since=None,
                  pending_last_at=None, pending_price_source=None)
-    first_direction = state.get("first_direction")
-    if market and seconds_left is not None and seconds_left > 0 and first_direction in ("UP", "DOWN"):
-        state.update(active_direction=first_direction, active_since=state.get("first_signal_time"))
-        return
-
     event_at = pd.to_datetime(((signal or {}).get("ut_signal") or {}).get("closed_at"),
                               utc=True, errors="coerce")
     if (not market or not close_time or seconds_left is None or not 180 < seconds_left <= 720
