@@ -10,6 +10,7 @@ import json
 import threading
 import time
 import copy
+import os
 import random
 from email.utils import parsedate_to_datetime
 
@@ -2392,11 +2393,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     elif (now - ut_closed_at).total_seconds() > 900 - seconds_left:
         ut_closed = None
     micro.update(ut_live=ut_live, ut_closed=ut_closed, ut_short=ut_short)
-    ut_direction = ut_live or ut_closed
-    if micro.get("route") == "GIRO TEMPRANO" and micro["candidate"] and micro["candidate"] != ut_direction:
-        micro.update(candidate=None, reason="GIRO · ESPERANDO CONFIRMACIÓN")
-    candidate = micro["candidate"]
-    quality = "MICROESTRUCTURA · " + micro["reason"]
+    candidate = None
+    quality = "SIN CONFIRMACIÓN"
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
                     "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
@@ -2413,7 +2411,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
 def build_presignal(sig, seconds_left):
     """PRESEÑAL INDEPENDIENTE Y REACTIVA.
 
-    No cambia la señal oficial. Usa la lectura ACTUAL y, a medida que se acerca
+    Usa la lectura ACTUAL y, a medida que se acerca
     el cierre, reduce el peso de señales lentas (3M/5M) y aumenta el peso de la
     posición actual frente al target. Así puede girar UP/DOWN sin quedarse
     pegada a una tendencia vieja.
@@ -2656,119 +2654,31 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """Confirmación compartida por la pantalla y el registrador de fondo.
-
-    La primera señal queda inmutable. Un cambio UP/DOWN posterior también
-    necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
-    la activa se reevalúa con EMA y distancia al target.
-    """
-    # The microstructure engine has its own independent entry checks.
-    # Legacy EMA/price-travel crosscheck would turn anticipation into reaction.
-    if signal and isinstance(signal.get("microstructure_internal"), dict):
-        state["opening_conflict"] = None
+    """Publica la última alerta externa emitida durante la ronda activa."""
+    state["opening_conflict"] = None
+    end = pd.to_datetime((market or {}).get("close_time"), utc=True, errors="coerce")
+    event = (signal or {}).get("external_signal") or {}
+    fired = pd.to_datetime(event.get("fired_at"), utc=True, errors="coerce")
+    if pd.isna(end) or pd.isna(fired) or not end - pd.Timedelta(minutes=15) <= fired <= pd.Timestamp(now) < end:
+        candidate = None
     else:
-        candidate = _round_opening_crosscheck(state, candidate, signal, now)
-    # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
-    closed = seconds_left is not None and seconds_left <= 0
-    close_time = (market or {}).get("close_time")
-    if close_time:
-        end = pd.to_datetime(close_time, utc=True, errors="coerce")
-        if pd.isna(end):
-            candidate = None
-        else:
-            actual_left = (end - pd.Timestamp(now)).total_seconds()
-            seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
-            closed = seconds_left <= 0
-    if closed:
-        _reset_withdrawal(state)
-        for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
-                    "active_direction", "active_since"):
-            state[key] = None
-        state["pending_count"] = 0
-        return
-    if signal is not None and signal.get("data_valid") is False:
-        _reset_withdrawal(state)
-        # Una interrupción no demuestra neutralidad ni permite confirmar.
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        if seconds_left is not None and seconds_left <= 0:
-            state["active_direction"] = None
-            state["active_since"] = None
-        return
-    source = signal.get("price_source") if signal else None
-    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
-        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
-            # Tres lecturas deben pertenecer a una misma referencia de precio.
-            state["pending_direction"] = None
-            state["pending_count"] = 0
-            state["pending_since"] = None
-            state["pending_last_at"] = None
-        state["pending_price_source"] = source
-    if candidate not in ("UP", "DOWN"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        _review_active_retention(state, signal, seconds_left, now)
-        return
+        actual_left = (end - pd.Timestamp(now)).total_seconds()
+        seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
 
     _reset_withdrawal(state)
-    if candidate == state.get("active_direction"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    state.update(pending_direction=None, pending_count=0, pending_since=None,
+                 pending_last_at=None, pending_price_source=None)
+    if (not market or seconds_left is None or seconds_left <= 0
+            or not signal or signal.get("data_valid") is False
+            or candidate not in ("UP", "DOWN")):
+        state.update(active_direction=None, active_since=None)
         return
-
-    last = state.get("pending_last_at")
-    if isinstance(last, str):
-        try:
-            last = datetime.fromisoformat(last)
-        except ValueError:
-            last = None
-    since = state.get("pending_since")
-    if isinstance(since, str):
-        try:
-            since = datetime.fromisoformat(since)
-        except ValueError:
-            since = None
-
-    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
-                              or (now - last).total_seconds() < 0)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        last = since = None
-    if state.get("pending_direction") != candidate:
-        state["pending_direction"] = candidate
-        state["pending_count"] = 1
-        state["pending_since"] = now.isoformat()
-        state["pending_last_at"] = now.isoformat()
-        return
-
-    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] = int(state.get("pending_count", 0)) + 1
-        state["pending_last_at"] = now.isoformat()
-
-    elapsed = (now - since).total_seconds() if since else 0
-    readings_required = SIGNAL_CONFIRM_READINGS + int(state.get("active_direction") in ("UP", "DOWN"))
-    if (state["pending_count"] >= readings_required
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (readings_required - 1)):
-        state["active_direction"] = candidate
-        state["active_since"] = now
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    if state.get("active_direction") != candidate:
+        state.update(active_direction=candidate, active_since=now)
+    if state.get("first_direction") is None:
+        state.update(first_direction=candidate, first_signal_time=now,
+                     first_signal_seconds=seconds_left,
+                     first_signal_price=get_yes_ask(market) if candidate == "UP" else get_no_ask(market))
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -2830,7 +2740,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     state["last_score"] = score
     score_change = score - previous_score
 
-    # El cerebro propone; tres lecturas espaciadas confirman la señal.
+    # La señal oficial usa la alerta externa de la ronda.
     candidate = sig.get("candidate")
     if restored_from_disk and candidate not in ("UP", "DOWN"):
         # No se mantiene una señal antigua ante una lectura neutral actual.
@@ -2904,7 +2814,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_close_ofi_ut_v2"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_close_ofi_ut_webhook_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -4205,7 +4115,7 @@ def live_dashboard():
     # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
     # las probabilidades oficiales.
     ut = sig.get("microstructure_internal") or {}
-    pre = build_presignal(sig, seconds_left)
+    pre = sig.get("presignal") or build_presignal(sig, seconds_left)
     pre_direction = pre["direction"]
     pre_percent = pre["percent"]
 
@@ -4703,6 +4613,31 @@ def _apply_ai_signal_gate(sig):
     return sig
 
 
+_EXTERNAL_SIGNAL = {}
+_EXTERNAL_SIGNAL_LOCK = threading.Lock()
+
+
+def _read_external_signal():
+    base = os.environ.get("TV_SIGNAL_URL", "").rstrip("/")
+    token = os.environ.get("TV_READ_TOKEN", "")
+    if not base.startswith("https://") or not token:
+        return {}
+    with _EXTERNAL_SIGNAL_LOCK:
+        stamp = time.monotonic()
+        if stamp - _EXTERNAL_SIGNAL.get("checked", -10) >= 1:
+            _EXTERNAL_SIGNAL["checked"] = stamp
+            try:
+                response = requests.get(base + "/signal", headers={"Authorization": "Bearer " + token},
+                                        timeout=1.5, allow_redirects=False)
+                response.raise_for_status()
+                event = response.json()
+                if isinstance(event, dict):
+                    _EXTERNAL_SIGNAL["event"] = event
+            except (requests.RequestException, ValueError):
+                pass
+        return _EXTERNAL_SIGNAL.get("event", {})
+
+
 def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
     _TRACE_CONTEXT.build_id = None
     _TRACE_CONTEXT.build_payload = None
@@ -4711,6 +4646,15 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
                  "settlement_points": getattr(_PRICE_OBSERVATIONS, "kalshi_points", ())}
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
+    pre = build_presignal(sig, seconds_left)
+    sig["presignal"] = pre
+    event = _read_external_signal() if seconds_left is not None and 0 < seconds_left <= 900 else {}
+    sig["external_signal"] = event
+    direction = event.get("direction")
+    if direction in ("UP", "DOWN"):
+        sig["candidate"] = direction
+        sig["quality"] = sig["entry_route_internal"] = "SEÑAL DIRECTA"
+
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
         payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
