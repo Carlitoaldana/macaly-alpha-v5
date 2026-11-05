@@ -10,7 +10,6 @@ import json
 import threading
 import time
 import copy
-import os
 import random
 from email.utils import parsedate_to_datetime
 
@@ -1680,38 +1679,6 @@ def get_btc_data():
     return _fetch_current_btc_candles()
 
 
-def _sample_order_flow(flow_state):
-    """OFI aproximado con cambios entre lecturas del mejor bid y ask."""
-    try:
-        response = requests.get(
-            "https://api.exchange.coinbase.com/products/BTC-USD/book",
-            params={"level": 1}, timeout=1.5,
-            headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
-        )
-        response.raise_for_status()
-        book = response.json()
-        bid, bid_size = map(float, book["bids"][0][:2])
-        ask, ask_size = map(float, book["asks"][0][:2])
-        sequence = int(book["sequence"])
-        if not all(math.isfinite(x) and x > 0 for x in (bid, ask, bid_size, ask_size)) or bid >= ask:
-            return None
-    except (requests.RequestException, KeyError, IndexError, TypeError, ValueError):
-        return None
-    stamp = time.monotonic()
-    previous = flow_state.get("engine_book_snapshot")
-    if previous and stamp - previous[0] <= 10:
-        if sequence <= previous[1]:
-            return None
-        _, _, old_bid, old_bid_size, old_ask, old_ask_size = previous
-        change = ((bid_size if bid >= old_bid else 0) - (old_bid_size if bid <= old_bid else 0)
-                  - (ask_size if ask <= old_ask else 0) + (old_ask_size if ask >= old_ask else 0))
-        depth = bid_size + ask_size + old_bid_size + old_ask_size
-    else:
-        change = depth = 0
-    flow_state["engine_book_snapshot"] = (stamp, sequence, bid, bid_size, ask, ask_size)
-    return change / depth if depth else None
-
-
 def get_coinbase_whale_flow(flow_state=None):
     """Lee presión agresiva de Coinbase en ventanas 10s/30s/60s y conserva alertas breves."""
     response = requests.get(
@@ -1809,7 +1776,6 @@ def get_coinbase_whale_flow(flow_state=None):
     return {
         "trade_price_move": move,
         "trade_price_path": price_path,
-        "order_flow_change": _sample_order_flow(flow_state),
         "detected": alert is not None, "alert": alert,
         "live_buy": b10, "live_sell": s10, "live_total": t10,
         "imbalance": i10, "buy30": b30, "sell30": s30,
@@ -2130,100 +2096,6 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 
-def _microstructure_decision(whale, seconds_left, distance, atr):
-    """Proyecta el precio respecto del target con un impulso que pierde fuerza."""
-    result = {"candidate": None, "reason": "SIN OPERACIONES RECIENTES", "checks": {}}
-    checks = result["checks"]
-    if seconds_left is None or not 0 < float(seconds_left) <= 900:
-        result["reason"] = "FUERA DE VENTANA DE ENTRADA"
-        return result
-    checks["time"] = True
-    if not isinstance(whale, dict):
-        return result
-    buy, sell, buy30, sell30 = (_plan_number(whale.get(key))
-                                for key in ("live_buy", "live_sell", "buy30", "sell30"))
-    if buy30 is not None and sell30 is not None:
-        checks["volume"] = buy30 + sell30
-    if buy is None or sell is None or min(buy, sell) < 0 or buy + sell <= 0:
-        return result
-    flow = (buy - sell) / (buy + sell)
-    result["trade_imbalance"] = flow
-    checks["flow"] = flow != 0
-    move = _plan_number(whale.get("trade_price_move"))
-    result["price_move"] = move
-    checks["price_move"] = flow * move > 0 if move is not None else None
-    distance, atr = _plan_number(distance), _plan_number(atr)
-    if distance is None or atr is None or atr <= 0:
-        result["reason"] = "FALTA TARGET O VOLATILIDAD"
-        return result
-    if move is None:
-        result["reason"] = "FALTAN PRECIOS DE OPERACIONES RECIENTES"
-        return result
-
-    # Atenúa movimientos pequeños frente al rango típico de cinco segundos.
-    noise = atr * math.sqrt(5 / 60)
-    speed = (move / 5) * abs(move) / (abs(move) + noise)
-    # El impulso observado se disipa en la escala de la ventana de presión.
-    effective_time = -10 * math.expm1(-float(seconds_left) / 10)
-    drift = speed * abs(flow) * effective_time if checks["price_move"] else 0.0
-    order_flow = _plan_number(whale.get("order_flow_change"))
-    result["order_flow_change"] = order_flow
-    if order_flow is not None:
-        drift *= 1 + order_flow * (1 if flow > 0 else -1)
-
-    # Proyecta el promedio de la ventana de liquidación de 60 s.
-    # Cada segundo observado de Kalshi reemplaza su valor proyectado.
-    close_at = time.time() + float(seconds_left)
-    points = whale.get("settlement_points") or ()
-    spot = _plan_number(whale.get("settlement_spot"))
-    observed = {}
-    if spot is not None:
-        for stamp, value in sorted(points):
-            slot = int(stamp - (close_at - 60))
-            if close_at - 60 <= stamp < close_at:
-                observed[slot] = value - spot
-    offsets = []
-    for slot in range(60):
-        ahead = max(0.0, float(seconds_left) - 60 + slot + .5)
-        fraction = -math.expm1(-ahead / 10) / (-math.expm1(-float(seconds_left) / 10))
-        offsets.append(observed.get(slot, drift * fraction))
-    projected = distance + sum(offsets) / 60
-    result["observed_close_seconds"] = len(observed)
-    closing_side = "UP" if projected > 0 else "DOWN" if projected < 0 else None
-    result.update(projected_distance=projected, closing_side=closing_side)
-    impulse_side = "UP" if flow > 0 else "DOWN" if flow < 0 else None
-    checks["closing"] = closing_side == impulse_side if closing_side and impulse_side else None
-    path = whale.get("trade_price_path") or ()
-    if len(path) >= 3:
-        advance = path[-1] - path[0]
-        travel = sum(abs(end - start) for start, end in zip(path, path[1:]))
-        efficiency = advance / travel if travel else 0.0
-        result["efficiency"] = efficiency
-        checks["advance"] = efficiency * (1 if flow > 0 else -1) >= .60 and flow != 0
-    prior_buy = buy30 - buy if buy30 is not None else None
-    prior_sell = sell30 - sell if sell30 is not None else None
-    if prior_buy is not None and prior_sell is not None and min(prior_buy, prior_sell) >= 0 and prior_buy + prior_sell > 0:
-        prior_flow = (prior_buy - prior_sell) / (prior_buy + prior_sell)
-        result["prior_flow"] = prior_flow
-        if prior_flow * flow < 0:
-            result["route"] = "GIRO TEMPRANO"
-        elif prior_flow * flow > 0:
-            result["route"] = "CONTINUACIÓN"
-
-    if not checks["price_move"]:
-        result["reason"] = "PRECIO Y PRESION SIN ACUERDO"
-    elif not result.get("route"):
-        result["reason"] = "SIN CONTEXTO DE PRESION ANTERIOR"
-    elif not checks.get("advance"):
-        result["reason"] = "EL PRECIO NO AVANZA CON CLARIDAD"
-    elif not checks["closing"]:
-        result["reason"] = "EL IMPULSO NO RESPALDA ESE LADO AL CIERRE"
-    else:
-        result["candidate"] = closing_side
-        result["reason"] = result["route"] + " · RESPALDO AL CIERRE"
-    return result
-
-
 def _entry_route_checks(sig, seconds_left):
     """Evaluate both sides from the same evidence; shared by engine and UI."""
     required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
@@ -2315,12 +2187,14 @@ def _ut_bot_events(df, minutes, now):
                                            close=("close", "last"), count=("close", "size")))
     bars = bars.loc[(bars["count"] == minutes) | ((bars.index == current) & (bars["count"] > 0))]
     provisional = confirmed = None
-    atr = stop = previous = None
+    atr = stop = previous = previous_stamp = None
     seed = []
     for stamp, bar in bars.iterrows():
         end = stamp + interval
         if stamp != current and end > received:
             continue
+        if stamp == current and previous_stamp != stamp - interval:
+            break
         close = float(bar.close)
         true_range = float(bar.high - bar.low)
         if previous is not None:
@@ -2329,6 +2203,7 @@ def _ut_bot_events(df, minutes, now):
             seed.append(true_range)
             if len(seed) < 10:
                 previous = close
+                previous_stamp = stamp
                 continue
             atr = sum(seed) / 10
         else:
@@ -2346,11 +2221,12 @@ def _ut_bot_events(df, minutes, now):
                     "DOWN" if previous >= stop and close < next_stop else None)
             if stamp == current:
                 provisional = side
-            elif end == current:
+            elif side is not None:
                 confirmed = side
             stop = next_stop
         previous = close
-    return provisional, confirmed, current
+        previous_stamp = stamp
+    return provisional, confirmed
 
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
@@ -2378,21 +2254,10 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         flow_context["valid"] = (flow_side in ("UP","DOWN") and
             float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
             float(whale.get("flow_strength") or 0)>=.20)
-    route_input = {"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
-        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
-        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
-        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
-        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
-        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    micro = _microstructure_decision(whale, seconds_left, distance, atr)
     now = pd.Timestamp.now(tz="UTC")
-    ut_live, ut_closed, ut_closed_at = _ut_bot_events(df, 3, now)
-    ut_short, _, _ = _ut_bot_events(df, 1, now)
-    if seconds_left is None or not 0 < seconds_left <= 900:
-        ut_closed = None
-    elif (now - ut_closed_at).total_seconds() > 900 - seconds_left:
-        ut_closed = None
-    micro.update(ut_live=ut_live, ut_closed=ut_closed, ut_short=ut_short)
+    ut_live, ut_closed = _ut_bot_events(df, 3, now)
+    ut_short, _ = _ut_bot_events(df, 1, now)
+    ut = {"direction": ut_live or ut_closed, "ut_short": ut_short}
     candidate = None
     quality = "SIN CONFIRMACIÓN"
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
@@ -2405,7 +2270,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"microstructure_internal":micro,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"ut_signal":ut,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
@@ -2654,16 +2519,16 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """Publica la última alerta externa emitida durante la ronda activa."""
+    """Publica la dirección vigente del indicador en una ronda válida."""
     state["opening_conflict"] = None
-    end = pd.to_datetime((market or {}).get("close_time"), utc=True, errors="coerce")
-    event = (signal or {}).get("external_signal") or {}
-    fired = pd.to_datetime(event.get("fired_at"), utc=True, errors="coerce")
-    if pd.isna(end) or pd.isna(fired) or not end - pd.Timedelta(minutes=15) <= fired <= pd.Timestamp(now) < end:
-        candidate = None
-    else:
-        actual_left = (end - pd.Timestamp(now)).total_seconds()
-        seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
+    close_time = (market or {}).get("close_time")
+    if close_time:
+        end = pd.to_datetime(close_time, utc=True, errors="coerce")
+        if pd.isna(end):
+            candidate = None
+        else:
+            actual_left = (end - pd.Timestamp(now)).total_seconds()
+            seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
 
     _reset_withdrawal(state)
     state.update(pending_direction=None, pending_count=0, pending_since=None,
@@ -2740,7 +2605,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     state["last_score"] = score
     score_change = score - previous_score
 
-    # La señal oficial usa la alerta externa de la ronda.
+    # La señal oficial usa la dirección vigente del indicador.
     candidate = sig.get("candidate")
     if restored_from_disk and candidate not in ("UP", "DOWN"):
         # No se mantiene una señal antigua ante una lectura neutral actual.
@@ -2814,7 +2679,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_close_ofi_ut_webhook_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -4114,7 +3979,7 @@ def live_dashboard():
 
     # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
     # las probabilidades oficiales.
-    ut = sig.get("microstructure_internal") or {}
+    ut = sig.get("ut_signal") or {}
     pre = sig.get("presignal") or build_presignal(sig, seconds_left)
     pre_direction = pre["direction"]
     pre_percent = pre["percent"]
@@ -4613,45 +4478,15 @@ def _apply_ai_signal_gate(sig):
     return sig
 
 
-_EXTERNAL_SIGNAL = {}
-_EXTERNAL_SIGNAL_LOCK = threading.Lock()
-
-
-def _read_external_signal():
-    base = os.environ.get("TV_SIGNAL_URL", "").rstrip("/")
-    token = os.environ.get("TV_READ_TOKEN", "")
-    if not base.startswith("https://") or not token:
-        return {}
-    with _EXTERNAL_SIGNAL_LOCK:
-        stamp = time.monotonic()
-        if stamp - _EXTERNAL_SIGNAL.get("checked", -10) >= 1:
-            _EXTERNAL_SIGNAL["checked"] = stamp
-            try:
-                response = requests.get(base + "/signal", headers={"Authorization": "Bearer " + token},
-                                        timeout=1.5, allow_redirects=False)
-                response.raise_for_status()
-                event = response.json()
-                if isinstance(event, dict):
-                    _EXTERNAL_SIGNAL["event"] = event
-            except (requests.RequestException, ValueError):
-                pass
-        return _EXTERNAL_SIGNAL.get("event", {})
-
-
 def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
     _TRACE_CONTEXT.build_id = None
     _TRACE_CONTEXT.build_payload = None
-    if isinstance(whale, dict) and price_source == "KALSHI LIVE":
-        whale = {**whale, "settlement_spot": live_price,
-                 "settlement_points": getattr(_PRICE_OBSERVATIONS, "kalshi_points", ())}
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
     pre = build_presignal(sig, seconds_left)
     sig["presignal"] = pre
-    event = _read_external_signal() if seconds_left is not None and 0 < seconds_left <= 900 else {}
-    sig["external_signal"] = event
-    direction = event.get("direction")
-    if direction in ("UP", "DOWN"):
+    direction = sig["ut_signal"]["direction"]
+    if seconds_left is not None and 0 < seconds_left <= 900 and target is not None and direction:
         sig["candidate"] = direction
         sig["quality"] = sig["entry_route_internal"] = "SEÑAL DIRECTA"
 
