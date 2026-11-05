@@ -1091,12 +1091,12 @@ def _write_state_to_connection(conn, state):
     row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (state['ticker'],)).fetchone()
     saved = json.loads(row[0]) if row else {}
     round_open = pd.to_datetime(state.get("first_signal_round_open"), utc=True, errors="coerce")
-    saved_event = pd.to_datetime(saved.get("first_signal_ut_at"), utc=True, errors="coerce")
+    saved_first = pd.to_datetime(saved.get("first_signal_time"), utc=True, errors="coerce")
     if (saved.get('first_direction') in ('UP','DOWN')
             and (pd.isna(round_open) or (saved.get("ut_round_policy") == 1
-                 and not pd.isna(saved_event) and saved_event > round_open))):
+                 and not pd.isna(saved_first) and saved_first >= round_open))):
         for key in ('first_direction','first_signal_time','first_signal_seconds',
-                    'first_signal_price','first_signal_ut_at'):
+                    'first_signal_price'):
             value = saved.get(key)
             if key == 'first_signal_time' and isinstance(value, str) and value:
                 value = datetime.fromisoformat(value)
@@ -2546,11 +2546,11 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                  pending_last_at=None, pending_price_source=None)
     if not pd.isna(round_open):
         state["first_signal_round_open"] = round_open.isoformat()
-        first_event = pd.to_datetime(state.get("first_signal_ut_at"), utc=True, errors="coerce")
-        if (state.get("ut_round_policy") != 1 or pd.isna(first_event)
-                or not round_open < first_event < end or first_event > now_ts):
+        first_time = pd.to_datetime(state.get("first_signal_time"), utc=True, errors="coerce")
+        if (state.get("ut_round_policy") != 1 or pd.isna(first_time)
+                or not round_open <= first_time < end or first_time > now_ts):
             state.update(first_direction=None, first_signal_time=None,
-                         first_signal_seconds=None, first_signal_price=None, first_signal_ut_at=None)
+                         first_signal_seconds=None, first_signal_price=None)
         if state.get("ut_round_policy") != 1:
             state.update(active_direction=None, active_since=None, exit_plan=None, ut_round_policy=1)
 
@@ -2573,36 +2573,31 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if side not in ("UP", "DOWN") or pd.isna(saved_at) or saved_at > now_ts:
         return
 
-    # A flip at the boundary belongs to the opening direction, not the alert log.
-    if saved_at <= round_open:
-        if state.get("active_direction") != side:
-            state.update(active_direction=side, active_since=now)
-        return
-
     active = state.get("active_direction")
-    if active is None and state.get("ut_prior_side") in ("UP", "DOWN"):
-        active = state["ut_prior_side"]
+    if saved_at <= round_open:
+        # The current UT side is the opening signal for this round.
+        active = side
+    elif active != side:
+        if active is None:
+            active = state.get("ut_prior_side")
+        price = _plan_number(signal.get("price"))
+        target = _plan_number(get_target_from_market(market))
+        if price is not None and target is not None:
+            sign = 1 if side == "UP" else -1
+            gap = sign * (target - price)
+            # Use the latest closed two-minute move, scaled to the remaining time.
+            move = _plan_number(ut.get("closed_move"))
+            if gap <= 0 or (move is not None and sign * move * seconds_left / 120 >= gap):
+                active = side
+
+    if active not in ("UP", "DOWN"):
+        return
+    if state.get("active_direction") != active:
         state.update(active_direction=active, active_since=now)
-    if active == side:
-        return
-
-    price = _plan_number(signal.get("price"))
-    target = _plan_number(get_target_from_market(market))
-    if price is None or target is None:
-        return
-    sign = 1 if side == "UP" else -1
-    gap = sign * (target - price)
-    # Use the latest closed two-minute move, scaled to the remaining time.
-    move = _plan_number(ut.get("closed_move"))
-    if gap > 0 and (move is None or sign * move * seconds_left / 120 < gap):
-        return
-
-    state.update(active_direction=side, active_since=now)
     if state.get("first_direction") is None:
-        state.update(first_direction=side, first_signal_time=now,
-                     first_signal_ut_at=saved_at.isoformat(),
+        state.update(first_direction=active, first_signal_time=now,
                      first_signal_seconds=seconds_left,
-                     first_signal_price=get_yes_ask(market) if side == "UP" else get_no_ask(market))
+                     first_signal_price=get_yes_ask(market) if active == "UP" else get_no_ask(market))
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
