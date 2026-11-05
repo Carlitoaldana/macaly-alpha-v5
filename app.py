@@ -1093,7 +1093,8 @@ def _write_state_to_connection(conn, state):
     round_open = pd.to_datetime(state.get("first_signal_round_open"), utc=True, errors="coerce")
     saved_event = pd.to_datetime(saved.get("first_signal_ut_at"), utc=True, errors="coerce")
     if (saved.get('first_direction') in ('UP','DOWN')
-            and (pd.isna(round_open) or (not pd.isna(saved_event) and saved_event >= round_open + pd.Timedelta(minutes=2)))):
+            and (pd.isna(round_open) or (saved.get("ut_round_policy") == 1
+                 and not pd.isna(saved_event) and saved_event > round_open))):
         for key in ('first_direction','first_signal_time','first_signal_seconds',
                     'first_signal_price','first_signal_ut_at'):
             value = saved.get(key)
@@ -2190,7 +2191,7 @@ def _ut_bot_events(df, minutes, now):
             .resample(f"{minutes}min").agg(high=("high", "max"), low=("low", "min"),
                                            close=("close", "last"), count=("close", "size")))
     bars = bars.loc[(bars["count"] == minutes) | ((bars.index == current) & (bars["count"] > 0))]
-    provisional = confirmed = confirmed_at = None
+    provisional = confirmed = confirmed_at = prior_side = closed_move = None
     atr = stop = previous = previous_stamp = None
     seed = []
     for stamp, bar in bars.iterrows():
@@ -2225,13 +2226,18 @@ def _ut_bot_events(df, minutes, now):
                     "DOWN" if previous >= stop and close < next_stop else None)
             if stamp == current:
                 provisional = side
-            elif side is not None:
-                confirmed = side
-                confirmed_at = end
+            else:
+                if previous_stamp == stamp - interval:
+                    closed_move = close - previous
+                else:
+                    closed_move = None
+                if side is not None and side != confirmed:
+                    prior_side, confirmed = confirmed, side
+                    confirmed_at = end
             stop = next_stop
         previous = close
         previous_stamp = stamp
-    return provisional, confirmed, confirmed_at
+    return provisional, confirmed, confirmed_at, prior_side, closed_move
 
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
@@ -2260,9 +2266,10 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
             float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
             float(whale.get("flow_strength") or 0)>=.20)
     now = pd.Timestamp.now(tz="UTC")
-    _, ut_closed, ut_closed_at = _ut_bot_events(df, 2, now)
-    ut_short, _, _ = _ut_bot_events(df, 1, now)
-    ut = {"direction": ut_closed, "ut_short": ut_short,
+    _, ut_closed, ut_closed_at, prior_side, closed_move = _ut_bot_events(df, 2, now)
+    ut_short, _, _, _, _ = _ut_bot_events(df, 1, now)
+    ut = {"direction": ut_closed, "ut_short": ut_short, "prior_side": prior_side,
+          "closed_move": closed_move,
           "closed_at": ut_closed_at.isoformat() if ut_closed_at is not None else None}
     candidate = None
     quality = "SIN CONFIRMACIÓN"
@@ -2527,44 +2534,75 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
     """Publica la dirección vigente del indicador en una ronda válida."""
     state["opening_conflict"] = None
-    close_time = (market or {}).get("close_time")
-    if close_time:
-        end = pd.to_datetime(close_time, utc=True, errors="coerce")
-        if pd.isna(end):
-            candidate = None
-        else:
-            actual_left = (end - pd.Timestamp(now)).total_seconds()
-            seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
+    market = market or {}
+    now_ts = pd.Timestamp(now)
+    end = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+    round_open = pd.to_datetime(market.get("open_time"), utc=True, errors="coerce")
+    if pd.isna(round_open) and not pd.isna(end):
+        round_open = end - pd.Timedelta(minutes=15)
 
     _reset_withdrawal(state)
     state.update(pending_direction=None, pending_count=0, pending_since=None,
                  pending_last_at=None, pending_price_source=None)
-    event_at = pd.to_datetime(((signal or {}).get("ut_signal") or {}).get("closed_at"),
-                              utc=True, errors="coerce")
-    round_open = pd.to_datetime((market or {}).get("open_time"), utc=True, errors="coerce")
-    if pd.isna(round_open) and close_time and not pd.isna(end):
-        round_open = end - pd.Timedelta(minutes=15)
-    first_eligible_close = round_open + pd.Timedelta(minutes=2)
     if not pd.isna(round_open):
         state["first_signal_round_open"] = round_open.isoformat()
         first_event = pd.to_datetime(state.get("first_signal_ut_at"), utc=True, errors="coerce")
-        if pd.isna(first_event) or not first_eligible_close <= first_event <= pd.Timestamp(now):
+        if (state.get("ut_round_policy") != 1 or pd.isna(first_event)
+                or not round_open < first_event < end or first_event > now_ts):
             state.update(first_direction=None, first_signal_time=None,
                          first_signal_seconds=None, first_signal_price=None, first_signal_ut_at=None)
+        if state.get("ut_round_policy") != 1:
+            state.update(active_direction=None, active_since=None, exit_plan=None, ut_round_policy=1)
 
-    if (not market or not close_time or seconds_left is None or not 0 < seconds_left <= 900
-            or not signal or signal.get("data_valid") is False or pd.isna(event_at)
-            or not end - pd.Timedelta(minutes=15) < event_at <= pd.Timestamp(now)
-            or candidate not in ("UP", "DOWN")):
-        state.update(active_direction=None, active_since=None)
+    signal = signal or {}
+    if (pd.isna(round_open) or pd.isna(end) or not round_open <= now_ts < end
+            or signal.get("data_valid") is False):
         return
-    if state.get("active_direction") != candidate:
-        state.update(active_direction=candidate, active_since=now)
-    if state.get("first_direction") is None and event_at >= first_eligible_close:
-        state.update(first_direction=candidate, first_signal_time=now,
-                     first_signal_ut_at=event_at.isoformat(),
+    seconds_left = (end - now_ts).total_seconds()
+
+    # Keep the last confirmed UT flip separate from the displayed Kalshi side.
+    ut = signal.get("ut_signal") or {}
+    event_at = pd.to_datetime(ut.get("closed_at"), utc=True, errors="coerce")
+    saved_at = pd.to_datetime(state.get("ut_flip_at"), utc=True, errors="coerce")
+    if (candidate in ("UP", "DOWN") and not pd.isna(event_at) and event_at <= now_ts
+            and (pd.isna(saved_at) or event_at > saved_at)):
+        state.update(ut_flip_at=event_at.isoformat(), ut_side=candidate,
+                     ut_prior_side=ut.get("prior_side") or state.get("ut_side"))
+        saved_at = event_at
+    side = state.get("ut_side")
+    if side not in ("UP", "DOWN") or pd.isna(saved_at) or saved_at > now_ts:
+        return
+
+    # A flip at the boundary belongs to the opening direction, not the alert log.
+    if saved_at <= round_open:
+        if state.get("active_direction") != side:
+            state.update(active_direction=side, active_since=now)
+        return
+
+    active = state.get("active_direction")
+    if active is None and state.get("ut_prior_side") in ("UP", "DOWN"):
+        active = state["ut_prior_side"]
+        state.update(active_direction=active, active_since=now)
+    if active == side:
+        return
+
+    price = _plan_number(signal.get("price"))
+    target = _plan_number(get_target_from_market(market))
+    if price is None or target is None:
+        return
+    sign = 1 if side == "UP" else -1
+    gap = sign * (target - price)
+    # Use the latest closed two-minute move, scaled to the remaining time.
+    move = _plan_number(ut.get("closed_move"))
+    if gap > 0 and (move is None or sign * move * seconds_left / 120 < gap):
+        return
+
+    state.update(active_direction=side, active_since=now)
+    if state.get("first_direction") is None:
+        state.update(first_direction=side, first_signal_time=now,
+                     first_signal_ut_at=saved_at.isoformat(),
                      first_signal_seconds=seconds_left,
-                     first_signal_price=get_yes_ask(market) if candidate == "UP" else get_no_ask(market))
+                     first_signal_price=get_yes_ask(market) if side == "UP" else get_no_ask(market))
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -2700,7 +2738,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
