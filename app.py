@@ -2302,6 +2302,56 @@ def _entry_route_checks(sig, seconds_left):
     return {"valid":True,"sides":sides,"noise_ok":noise_ok}
 
 
+def _ut_bot_events(df, minutes, now):
+    """UT Bot sobre cierres OHLC, sensibilidad 1 y ATR Wilder de 10 velas."""
+    interval = pd.Timedelta(minutes=minutes)
+    received = pd.to_datetime(df.attrs.get("received_at"), utc=True, errors="coerce")
+    if pd.isna(received):
+        received = now
+    current = now.floor(f"{minutes}min")
+    bars = (df.loc[df["time"] <= now.floor("min")].set_index("time")
+            .resample(f"{minutes}min").agg(high=("high", "max"), low=("low", "min"),
+                                           close=("close", "last"), count=("close", "size")))
+    bars = bars.loc[(bars["count"] == minutes) | ((bars.index == current) & (bars["count"] > 0))]
+    provisional = confirmed = None
+    atr = stop = previous = None
+    seed = []
+    for stamp, bar in bars.iterrows():
+        end = stamp + interval
+        if stamp != current and end > received:
+            continue
+        close = float(bar.close)
+        true_range = float(bar.high - bar.low)
+        if previous is not None:
+            true_range = max(true_range, abs(bar.high - previous), abs(bar.low - previous))
+        if atr is None:
+            seed.append(true_range)
+            if len(seed) < 10:
+                previous = close
+                continue
+            atr = sum(seed) / 10
+        else:
+            atr = (9 * atr + true_range) / 10
+        if stop is None:
+            stop = close - atr
+        else:
+            if close > stop and previous > stop:
+                next_stop = max(stop, close - atr)
+            elif close < stop and previous < stop:
+                next_stop = min(stop, close + atr)
+            else:
+                next_stop = close - atr if close > stop else close + atr
+            side = ("UP" if previous <= stop and close > next_stop else
+                    "DOWN" if previous >= stop and close < next_stop else None)
+            if stamp == current:
+                provisional = side
+            elif end == current:
+                confirmed = side
+            stop = next_stop
+        previous = close
+    return provisional, confirmed, current
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -2334,6 +2384,16 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
         "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
     micro = _microstructure_decision(whale, seconds_left, distance, atr)
+    now = pd.Timestamp.now(tz="UTC")
+    ut_live, ut_closed, ut_closed_at = _ut_bot_events(df, 3, now)
+    ut_short, _, _ = _ut_bot_events(df, 1, now)
+    if seconds_left is None or not 0 < seconds_left <= 900:
+        ut_live = ut_closed = ut_short = None
+    elif (now - ut_closed_at).total_seconds() > 900 - seconds_left:
+        ut_closed = None
+    micro.update(ut_live=ut_live, ut_closed=ut_closed, ut_short=ut_short)
+    if micro.get("route") == "GIRO TEMPRANO" and micro["candidate"] and micro["candidate"] != ut_closed:
+        micro.update(candidate=None, reason="GIRO · ESPERANDO UT BOT 3M AL CIERRE")
     candidate = micro["candidate"]
     quality = "MICROESTRUCTURA · " + micro["reason"]
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
@@ -2843,7 +2903,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_close_ofi_routes_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_close_ofi_ut_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -4143,9 +4203,9 @@ def live_dashboard():
 
     # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
     # las probabilidades oficiales.
-    pre = build_presignal(sig, seconds_left)
-    pre_direction = pre["direction"]
-    pre_percent = pre["percent"]
+    ut = sig.get("microstructure_internal") or {}
+    pre_direction = ut.get("ut_live")
+    pre_percent = "—"
 
     if pre_direction == "UP":
         pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
@@ -4160,13 +4220,13 @@ def live_dashboard():
         pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
         pre_label = "NEUTRAL"
 
-    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
+    pre_note = ("Cruce provisional en la vela abierta de 3 minutos."
+                if pre_direction else "Esperando un cruce en la vela de 3 minutos.")
     pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
-      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
-      <div class="prebar"><b style="width:{pre_percent}%"></b></div>
+      <div class="prehead"><span class="pretitle">PRESEÑAL · UT BOT 3M</span><span class="prebadge">{pre_badge}</span></div>
+      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}</span></div>
       <div class="prenote">{pre_note}</div>
     </section>'''
 
@@ -4253,11 +4313,12 @@ def live_dashboard():
     </div>'''
 
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
+    ut_warning = active in ("UP", "DOWN") and ut.get("ut_short") in ("UP", "DOWN") and ut["ut_short"] != active
     weakness_html = (
         '<div class="weakness-inline" role="status">⚠ ' +
-        html.escape(round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
+        html.escape(f"{active} PERDIENDO FUERZA · UT BOT 1M" if ut_warning else round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
         '</div>'
-        if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
+        if (ut_warning or round_signal.get("reversal")) and active in ("UP", "DOWN") else ""
     )
 
     reader_html = f'''
