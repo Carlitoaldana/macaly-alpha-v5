@@ -1839,7 +1839,7 @@ def get_event_ticker_from_market(market):
     return "-".join(parts[:-1]) if len(parts) >= 2 else None
 
 
-def extract_kalshi_btc_price(data):
+def extract_kalshi_btc_price(data, closing_tape=None):
     if not isinstance(data, dict):
         return None
 
@@ -1862,14 +1862,17 @@ def extract_kalshi_btc_price(data):
     if timed_points:
         stamp, _, value = max(timed_points)
         try:
-            return _valid_live_observation(value, pd.to_datetime(stamp, unit="s", utc=True), "KALSHI LIVE")
+            price = _valid_live_observation(value, pd.to_datetime(stamp, unit="s", utc=True), "KALSHI LIVE")
+            if closing_tape is not None:
+                closing_tape.ingest("KALSHI LIVE", ((t, p) for t, _, p in timed_points))
+            return price
         except (ValueError, TypeError, OverflowError):
             return None
     # Un precio sin fecha verificable no se anuncia como live.
     return None
 
 
-def get_kalshi_live_btc(market):
+def get_kalshi_live_btc(market, closing_tape=None):
     event_ticker = get_event_ticker_from_market(market)
     if not event_ticker:
         raise ValueError("La ronda no entregó event_ticker.")
@@ -1877,7 +1880,7 @@ def get_kalshi_live_btc(market):
         "/live_data/events/" + str(event_ticker),
         params={"range": "15min"}, ttl=2.0, timeout=6)
     # Siempre se valida la fecha original, incluso al compartir una respuesta.
-    price = extract_kalshi_btc_price(data)
+    price = extract_kalshi_btc_price(data, closing_tape)
     if price is None:
         raise ValueError("Kalshi live respondió sin precio BTC válido.")
     return float(price)
@@ -2767,11 +2770,11 @@ def _background_get_btc_data():
 def _background_get_market():
     return get_kalshi_btc_market()
 
-def _background_get_live_price(market):
+def _background_get_live_price(market, closing_tape=None):
     _BACKGROUND_PRICE_SOURCE.value = None
     try:
         if market:
-            price = get_kalshi_live_btc(market)
+            price = get_kalshi_live_btc(market, closing_tape)
             _BACKGROUND_PRICE_SOURCE.value = "KALSHI LIVE"
             return float(price)
     except Exception:
@@ -2884,7 +2887,7 @@ def _background_history_loop(stop_event=None, closing_tape=None):
                 active_state = restored or new_round_state(ticker, get_seconds_remaining(market))
             seconds_left = get_seconds_remaining(market)
             target = get_target_from_market(market)
-            live_price = _background_get_live_price(market)
+            live_price = _background_get_live_price(market, closing_tape)
             if closing_tape is not None:
                 closing_tape.record(live_price, getattr(_BACKGROUND_PRICE_SOURCE, "value", None))
             btc_df = _background_get_btc_data()
@@ -3074,34 +3077,28 @@ class ClosingPriceTape:
         stamp = getattr(_PRICE_OBSERVATIONS, "values", {}).get(source)
         if stamp is None or price is None or not math.isfinite(price) or price <= 0:
             return
+        self.ingest(source, ((stamp, price),))
+
+    def ingest(self, source, points):
         now = time.time()
-        if not -5 <= now - stamp <= LIVE_PRICE_MAX_AGE:
-            return
         with self.lock:
             samples = self.by_source.setdefault(source, {})
             for old in list(samples):
                 if old < now - 90:
                     del samples[old]
-            samples[stamp] = price
+            samples.update((t, p) for t, p in points if -5 <= now - t <= 90)
 
     def reading(self, source):
-        stamp = getattr(_PRICE_OBSERVATIONS, "values", {}).get(source)
-        if stamp is None:
-            return {}
-        age = max(0.0, time.time() - stamp)
-        if age > 6:
-            return {}
+        now = time.time()
         with self.lock:
             samples = sorted((t, p) for t, p in self.by_source.get(source, {}).items()
-                             if stamp - 30 - SIGNAL_CONFIRM_INTERVAL <= t <= stamp)
-        if not samples or samples[-1][0] != stamp:
+                             if -5 <= now - t <= 90)
+        if not samples:
             return {}
-
-        # Usa el tramo continuo más reciente. Una pausa no borra otras fuentes.
-        for i in range(len(samples) - 1, 0, -1):
-            if samples[i][0] - samples[i - 1][0] > SIGNAL_CONFIRM_MAX_GAP:
-                samples = samples[i:]
-                break
+        stamp = samples[-1][0]
+        age = max(0.0, now - stamp)
+        if age > LIVE_PRICE_MAX_AGE:
+            return {}
 
         current = samples[-1][1]
         reading = {"age": age, "price": current}
@@ -3110,6 +3107,9 @@ class ClosingPriceTape:
             if earlier and stamp - window - earlier[-1][0] <= SIGNAL_CONFIRM_INTERVAL:
                 reading[f"change_{window}s"] = current - earlier[-1][1]
 
+        recent = [point for point in samples if stamp - point[0] <= 30]
+        if len(recent) >= 4 and stamp - recent[0][0] >= 5:
+            samples = recent
         if len(samples) < 4 or stamp - samples[0][0] < 5:
             return reading
         times, prices = map(np.asarray, zip(*samples))
@@ -3162,7 +3162,7 @@ def closing_reader(target, seconds_left, micro, whale):
     percent = 100 * (1 - tail)
     label = f"{percent:.1f}%" if percent < 99.95 else ">99.9%"
     return {
-        "percent": percent, "label": label, "direction": direction, "headline": direction,
+        "percent": percent, "label": label, "direction": direction, "headline": f"{direction} · {micro['source']}",
         "color": "#00dfb5" if direction == "UP" else "#e64b4b",
         "border": "rgba(0,223,181,.48)" if direction == "UP" else "rgba(230,75,75,.48)",
         "bg": ("linear-gradient(135deg,rgba(4,86,43,.46),rgba(7,36,25,.78))"
@@ -3923,12 +3923,15 @@ def live_dashboard():
             float(btc_df.iloc[-1]["close"]) if btc_ok else None
         )
 
+    closing_tape = closing_price_tape()
+    if coinbase_live_ok:
+        closing_tape.record(coinbase_live_price, "COINBASE")
     kalshi_live_price = None
     kalshi_live_ok = False
 
     if market:
         try:
-            kalshi_live_price = get_kalshi_live_btc(market)
+            kalshi_live_price = get_kalshi_live_btc(market, closing_tape)
             kalshi_live_ok = True
         except Exception as error:
             kalshi_live_error = str(error)
@@ -3993,9 +3996,13 @@ def live_dashboard():
     # Cinta live de segundos para el Lector de Cierre.
     update_micro_tape(ticker, live_btc_price, source)
     micro = micro_reading()
-    closing_tape = closing_price_tape()
-    closing_tape.record(live_btc_price, source)
-    closing_micro = closing_tape.reading(source) if live_btc_price is not None else {}
+    closing_micro = closing_tape.reading("KALSHI LIVE")
+    coinbase_micro = closing_tape.reading("COINBASE")
+    if ("speed" not in closing_micro or closing_micro["volatility"] <= 0
+            or closing_micro["age"] > 6):
+        if "speed" in coinbase_micro and coinbase_micro["volatility"] > 0:
+            closing_micro = {**coinbase_micro, "source": "COINBASE"}
+    closing_micro.setdefault("source", "KALSHI LIVE")
     # El reloj general redondea hacia abajo. El lector conserva la fracción final.
     try:
         closing_time = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
