@@ -1090,8 +1090,12 @@ def load_round_state(ticker):
 def _write_state_to_connection(conn, state):
     row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (state['ticker'],)).fetchone()
     saved = json.loads(row[0]) if row else {}
-    if saved.get('first_direction') in ('UP','DOWN'):
-        for key in ('first_direction','first_signal_time','first_signal_seconds','first_signal_price'):
+    round_open = pd.to_datetime(state.get("first_signal_round_open"), utc=True, errors="coerce")
+    saved_event = pd.to_datetime(saved.get("first_signal_ut_at"), utc=True, errors="coerce")
+    if (saved.get('first_direction') in ('UP','DOWN')
+            and (pd.isna(round_open) or (not pd.isna(saved_event) and saved_event >= round_open + pd.Timedelta(minutes=2)))):
+        for key in ('first_direction','first_signal_time','first_signal_seconds',
+                    'first_signal_price','first_signal_ut_at'):
             value = saved.get(key)
             if key == 'first_signal_time' and isinstance(value, str) and value:
                 value = datetime.fromisoformat(value)
@@ -2537,6 +2541,17 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                  pending_last_at=None, pending_price_source=None)
     event_at = pd.to_datetime(((signal or {}).get("ut_signal") or {}).get("closed_at"),
                               utc=True, errors="coerce")
+    round_open = pd.to_datetime((market or {}).get("open_time"), utc=True, errors="coerce")
+    if pd.isna(round_open) and close_time and not pd.isna(end):
+        round_open = end - pd.Timedelta(minutes=15)
+    first_eligible_close = round_open + pd.Timedelta(minutes=2)
+    if not pd.isna(round_open):
+        state["first_signal_round_open"] = round_open.isoformat()
+        first_event = pd.to_datetime(state.get("first_signal_ut_at"), utc=True, errors="coerce")
+        if pd.isna(first_event) or not first_eligible_close <= first_event <= pd.Timestamp(now):
+            state.update(first_direction=None, first_signal_time=None,
+                         first_signal_seconds=None, first_signal_price=None, first_signal_ut_at=None)
+
     if (not market or not close_time or seconds_left is None or not 0 < seconds_left <= 900
             or not signal or signal.get("data_valid") is False or pd.isna(event_at)
             or not end - pd.Timedelta(minutes=15) < event_at <= pd.Timestamp(now)
@@ -2545,8 +2560,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         return
     if state.get("active_direction") != candidate:
         state.update(active_direction=candidate, active_since=now)
-    if state.get("first_direction") is None:
+    if state.get("first_direction") is None and event_at >= first_eligible_close:
         state.update(first_direction=candidate, first_signal_time=now,
+                     first_signal_ut_at=event_at.isoformat(),
                      first_signal_seconds=seconds_left,
                      first_signal_price=get_yes_ask(market) if candidate == "UP" else get_no_ask(market))
 
