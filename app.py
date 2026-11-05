@@ -2186,7 +2186,7 @@ def _ut_bot_events(df, minutes, now):
             .resample(f"{minutes}min").agg(high=("high", "max"), low=("low", "min"),
                                            close=("close", "last"), count=("close", "size")))
     bars = bars.loc[(bars["count"] == minutes) | ((bars.index == current) & (bars["count"] > 0))]
-    provisional = confirmed = None
+    provisional = confirmed = confirmed_at = None
     atr = stop = previous = previous_stamp = None
     seed = []
     for stamp, bar in bars.iterrows():
@@ -2223,10 +2223,11 @@ def _ut_bot_events(df, minutes, now):
                 provisional = side
             elif side is not None:
                 confirmed = side
+                confirmed_at = end
             stop = next_stop
         previous = close
         previous_stamp = stamp
-    return provisional, confirmed
+    return provisional, confirmed, confirmed_at
 
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
@@ -2255,9 +2256,10 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
             float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
             float(whale.get("flow_strength") or 0)>=.20)
     now = pd.Timestamp.now(tz="UTC")
-    ut_live, ut_closed = _ut_bot_events(df, 3, now)
-    ut_short, _ = _ut_bot_events(df, 1, now)
-    ut = {"direction": ut_live or ut_closed, "ut_short": ut_short}
+    _, ut_closed, ut_closed_at = _ut_bot_events(df, 2, now)
+    ut_short, _, _ = _ut_bot_events(df, 1, now)
+    ut = {"direction": ut_closed, "ut_short": ut_short,
+          "closed_at": ut_closed_at.isoformat() if ut_closed_at is not None else None}
     candidate = None
     quality = "SIN CONFIRMACIÓN"
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
@@ -2533,8 +2535,16 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     _reset_withdrawal(state)
     state.update(pending_direction=None, pending_count=0, pending_since=None,
                  pending_last_at=None, pending_price_source=None)
-    if (not market or seconds_left is None or seconds_left <= 0
-            or not signal or signal.get("data_valid") is False
+    first_direction = state.get("first_direction")
+    if market and seconds_left is not None and seconds_left > 0 and first_direction in ("UP", "DOWN"):
+        state.update(active_direction=first_direction, active_since=state.get("first_signal_time"))
+        return
+
+    event_at = pd.to_datetime(((signal or {}).get("ut_signal") or {}).get("closed_at"),
+                              utc=True, errors="coerce")
+    if (not market or not close_time or seconds_left is None or not 180 < seconds_left <= 720
+            or not signal or signal.get("data_valid") is False or pd.isna(event_at)
+            or not end - pd.Timedelta(seconds=720) <= event_at < end - pd.Timedelta(seconds=180)
             or candidate not in ("UP", "DOWN")):
         state.update(active_direction=None, active_since=None)
         return
