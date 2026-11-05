@@ -2105,8 +2105,8 @@ def _microstructure_decision(whale, seconds_left, distance, atr):
         if not all(np.isfinite(x) and x >= 0 for x in (buy, sell)):
             return result
         checks["volume"] = buy + sell
-        if buy + sell < 500_000:
-            result["reason"] = "POCAS OPERACIONES PARA EVALUAR"
+        if buy + sell == 0:
+            result["reason"] = "SIN VOLUMEN PARA MEDIR PRESION"
             return result
         flow30 = (buy - sell) / (buy + sell)
         result["trade_imbalance"] = round(flow30, 4)
@@ -2754,7 +2754,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -4189,7 +4189,8 @@ def live_dashboard():
     rows = [
         ("TIEMPO DE RONDA", checks.get("time", False), f"{seconds_left}s restantes" if seconds_left is not None else "Sin reloj"),
         ("BTC / TARGET", checks.get("target"), f"${abs(sig['distance']):,.0f} / rango ${target_range:,.0f}" if target_range is not None else "—"),
-        ("VOLUMEN 30S", volume >= 500_000 if volume is not None else None, f"${volume:,.0f} / mín. $500,000" if volume is not None else "—"),
+        ("VOLUMEN 30S", None, (f"${volume:,.0f} · {'Bajo · ' if volume < 500_000 else ''}Informativo"
+                               if volume is not None else "—")),
         ("PRESIÓN 30S", checks.get("flow"), flow_label(flow30, "22 %")),
         ("LIBRO DE ÓRDENES", checks.get("book"), flow_label(book, "15 %")),
         ("CONFIRMACIÓN", True if confirmed else None,
