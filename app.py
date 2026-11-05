@@ -4204,8 +4204,14 @@ def live_dashboard():
     # PRESEÑAL independiente: permanece visible toda la ronda y NO copia
     # las probabilidades oficiales.
     ut = sig.get("microstructure_internal") or {}
-    pre_direction = ut.get("ut_live")
-    pre_percent = "—"
+    ut_direction = ut.get("ut_live")
+    ut_notice = (
+        f'<div class="prenote">UT BOT 3M · POSIBLE {ut_direction} · VELA ABIERTA</div>'
+        if ut_direction in ("UP", "DOWN") else ""
+    )
+    pre = build_presignal(sig, seconds_left)
+    pre_direction = pre["direction"]
+    pre_percent = pre["percent"]
 
     if pre_direction == "UP":
         pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
@@ -4220,14 +4226,15 @@ def live_dashboard():
         pre_note = "Sin inclinación temprana suficiente. La preseñal sigue observando."
         pre_label = "NEUTRAL"
 
-    pre_note = ("Cruce provisional en la vela abierta de 3 minutos."
-                if pre_direction else "Esperando un cruce en la vela de 3 minutos.")
+    pre_note += " Porcentaje de apoyo, no probabilidad de acierto."
     pre_badge = "COINCIDE CON LA SEÑAL" if active in ("UP", "DOWN") and pre_direction == active else "DIFIERE DE LA SEÑAL" if active in ("UP", "DOWN") and pre_direction in ("UP", "DOWN") else "OBSERVANDO"
 
     pre_html = f'''<section class="presignal" style="--precolor:{pre_color};--prebg:{pre_bg};--preglow:{pre_glow}">
-      <div class="prehead"><span class="pretitle">PRESEÑAL · UT BOT 3M</span><span class="prebadge">{pre_badge}</span></div>
-      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}</span></div>
+      <div class="prehead"><span class="pretitle">PRESEÑAL · PRESIÓN ACTUAL</span><span class="prebadge">{pre_badge}</span></div>
+      <div class="premain"><span class="predirection">{pre_label}</span><span class="prepercent">{pre_percent}%</span></div>
+      <div class="prebar"><b style="width:{pre_percent}%"></b></div>
       <div class="prenote">{pre_note}</div>
+      {ut_notice}
     </section>'''
 
     if active == "UP":
