@@ -4011,13 +4011,23 @@ def live_dashboard():
         distance_text = f"${abs(distance):,.0f}"
         distance_sub = f"{abs(distance_pct):.2f}%"
         distance_color = "#00dfb5" if distance > 0 else "#e64b4b" if distance < 0 else "#94a3b8"
-    first_signal = (state.get("first_direction") if state else None) or "--"
-    first_time = "--"
-    if state and state.get("first_signal_time"):
-        signal_dt = state["first_signal_time"]
-        if signal_dt.tzinfo is None:
-            signal_dt = signal_dt.replace(tzinfo=timezone.utc)
-        first_time = signal_dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p")
+    first_signal, first_time = "--", "--"
+    first_display = st.session_state.get("first_signal_display")
+    if first_display is not None and first_display[0] != ticker:
+        st.session_state.pop("first_signal_display")
+        first_display = None
+    if first_display is None and state and state.get("ticker") == ticker:
+        side = state.get("first_direction")
+        signal_dt = state.get("first_signal_time")
+        if side in ("UP", "DOWN") and signal_dt is not None:
+            if signal_dt.tzinfo is None:
+                signal_dt = signal_dt.replace(tzinfo=timezone.utc)
+            clock = signal_dt.astimezone(ZoneInfo("America/New_York")).strftime("%-I:%M %p")
+            first_display = (ticker, side, clock)
+            st.session_state["first_signal_display"] = first_display
+    if first_display is not None:
+        _, first_signal, first_time = first_display
+    first_color = {"UP": "#00dfb5", "DOWN": "#e64b4b"}.get(first_signal, "#38bdf8")
 
     # Etiqueta visual en español; el motor conserva internamente BULL/BEAR.
     ema_display = "ALCISTA" if sig.get("ema") == "BULL" else "BAJISTA" if sig.get("ema") == "BEAR" else sig.get("ema", "N/A")
@@ -4242,7 +4252,7 @@ def live_dashboard():
   <section class="rcard tech">
     <div class="techhead"><span>DETALLES TÉCNICOS</span><span>⌃</span></div>
     <div class="techrow">
-      <div><small>1ª SEÑAL</small><b style="color:var(--accent)">{first_signal}</b><i>{first_time}</i></div>
+      <div><small>1ª SEÑAL</small><b style="color:{first_color}">{first_signal}</b><i>{first_time}</i></div>
       <div><small>KALSHI · PRECIO</small><b>{f"{round_signal['entry_price'] * 100:.0f}¢" if round_signal['entry_price'] is not None else "—"}</b><i>{round_signal["entry_quality"]}</i></div>
       <div><small>EMA</small><b class="{ema_class}">{ema_display}</b><i>9 / 21</i></div>
       <div><small>RSI</small><b class="{rsi_class}">{sig["rsi"]:.0f}</b><i>14</i></div>
