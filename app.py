@@ -1679,6 +1679,38 @@ def get_btc_data():
     return _fetch_current_btc_candles()
 
 
+def _sample_order_flow(flow_state):
+    """OFI aproximado con cambios entre lecturas del mejor bid y ask."""
+    try:
+        response = requests.get(
+            "https://api.exchange.coinbase.com/products/BTC-USD/book",
+            params={"level": 1}, timeout=1.5,
+            headers={"User-Agent": "MacalyAlphaBot/4.6.1"},
+        )
+        response.raise_for_status()
+        book = response.json()
+        bid, bid_size = map(float, book["bids"][0][:2])
+        ask, ask_size = map(float, book["asks"][0][:2])
+        sequence = int(book["sequence"])
+        if not all(math.isfinite(x) and x > 0 for x in (bid, ask, bid_size, ask_size)) or bid >= ask:
+            return None
+    except (requests.RequestException, KeyError, IndexError, TypeError, ValueError):
+        return None
+    stamp = time.monotonic()
+    previous = flow_state.get("engine_book_snapshot")
+    if previous and stamp - previous[0] <= 10:
+        if sequence <= previous[1]:
+            return None
+        _, _, old_bid, old_bid_size, old_ask, old_ask_size = previous
+        change = ((bid_size if bid >= old_bid else 0) - (old_bid_size if bid <= old_bid else 0)
+                  - (ask_size if ask <= old_ask else 0) + (old_ask_size if ask >= old_ask else 0))
+        depth = bid_size + ask_size + old_bid_size + old_ask_size
+    else:
+        change = depth = 0
+    flow_state["engine_book_snapshot"] = (stamp, sequence, bid, bid_size, ask, ask_size)
+    return change / depth if depth else None
+
+
 def get_coinbase_whale_flow(flow_state=None):
     """Lee presión agresiva de Coinbase en ventanas 10s/30s/60s y conserva alertas breves."""
     response = requests.get(
@@ -1762,8 +1794,21 @@ def get_coinbase_whale_flow(flow_state=None):
 
     recent_price, previous_price = traded_price(0, 5), traded_price(5, 10)
     move = recent_price - previous_price if recent_price is not None and previous_price is not None else None
+    # Usa el último precio ejecutado de cada segundo para medir avance frente a ruido.
+    recent_prices = {}
+    for trade in tape:
+        age = now - trade["t"]
+        size = trade.get("size", 0)
+        if 0 <= age < 10 and size > 0:
+            second = int(trade["t"])
+            if second not in recent_prices or trade["t"] > recent_prices[second][0]:
+                recent_prices[second] = (trade["t"], trade["notional"] / size)
+    price_path = [price for _, price in sorted(recent_prices.values())]
+
     return {
         "trade_price_move": move,
+        "trade_price_path": price_path,
+        "order_flow_change": _sample_order_flow(flow_state),
         "detected": alert is not None, "alert": alert,
         "live_buy": b10, "live_sell": s10, "live_total": t10,
         "imbalance": i10, "buy30": b30, "sell30": s30,
@@ -1871,7 +1916,9 @@ def extract_kalshi_btc_price(data):
     if timed_points:
         stamp, _, value = max(timed_points)
         try:
-            return _valid_live_observation(value, pd.to_datetime(stamp, unit="s", utc=True), "KALSHI LIVE")
+            price = _valid_live_observation(value, pd.to_datetime(stamp, unit="s", utc=True), "KALSHI LIVE")
+            _PRICE_OBSERVATIONS.kalshi_points = [(t, p) for t, _, p in timed_points if stamp - 90 <= t <= stamp]
+            return price
         except (ValueError, TypeError, OverflowError):
             return None
     # Un precio sin fecha verificable no se anuncia como live.
@@ -2082,8 +2129,8 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 
-def _microstructure_decision(whale, seconds_left):
-    """Busca presión ejecutada reciente respaldada por el precio negociado."""
+def _microstructure_decision(whale, seconds_left, distance, atr):
+    """Proyecta el precio respecto del target con un impulso que pierde fuerza."""
     result = {"candidate": None, "reason": "SIN OPERACIONES RECIENTES", "checks": {}}
     checks = result["checks"]
     if seconds_left is None or not 0 < float(seconds_left) <= 900:
@@ -2104,15 +2151,75 @@ def _microstructure_decision(whale, seconds_left):
     move = _plan_number(whale.get("trade_price_move"))
     result["price_move"] = move
     checks["price_move"] = flow * move > 0 if move is not None else None
-    if not checks["flow"]:
-        result["reason"] = "PRESION EJECUTADA NEUTRAL"
-    elif move is None:
+    distance, atr = _plan_number(distance), _plan_number(atr)
+    if distance is None or atr is None or atr <= 0:
+        result["reason"] = "FALTA TARGET O VOLATILIDAD"
+        return result
+    if move is None:
         result["reason"] = "FALTAN PRECIOS DE OPERACIONES RECIENTES"
-    elif not checks["price_move"]:
-        result["reason"] = "EL PRECIO TODAVIA NO ACOMPAÑA LA PRESION"
+        return result
+
+    # Atenúa movimientos pequeños frente al rango típico de cinco segundos.
+    noise = atr * math.sqrt(5 / 60)
+    speed = (move / 5) * abs(move) / (abs(move) + noise)
+    # El impulso observado se disipa en la escala de la ventana de presión.
+    effective_time = -10 * math.expm1(-float(seconds_left) / 10)
+    drift = speed * abs(flow) * effective_time if checks["price_move"] else 0.0
+    order_flow = _plan_number(whale.get("order_flow_change"))
+    result["order_flow_change"] = order_flow
+    if order_flow is not None:
+        drift *= 1 + order_flow * (1 if flow > 0 else -1)
+
+    # Proyecta el promedio de la ventana de liquidación de 60 s.
+    # Cada segundo observado de Kalshi reemplaza su valor proyectado.
+    close_at = time.time() + float(seconds_left)
+    points = whale.get("settlement_points") or ()
+    spot = _plan_number(whale.get("settlement_spot"))
+    observed = {}
+    if spot is not None:
+        for stamp, value in sorted(points):
+            slot = int(stamp - (close_at - 60))
+            if close_at - 60 <= stamp < close_at:
+                observed[slot] = value - spot
+    offsets = []
+    for slot in range(60):
+        ahead = max(0.0, float(seconds_left) - 60 + slot + .5)
+        fraction = -math.expm1(-ahead / 10) / (-math.expm1(-float(seconds_left) / 10))
+        offsets.append(observed.get(slot, drift * fraction))
+    projected = distance + sum(offsets) / 60
+    result["observed_close_seconds"] = len(observed)
+    closing_side = "UP" if projected > 0 else "DOWN" if projected < 0 else None
+    result.update(projected_distance=projected, closing_side=closing_side)
+    impulse_side = "UP" if flow > 0 else "DOWN" if flow < 0 else None
+    checks["closing"] = closing_side == impulse_side if closing_side and impulse_side else None
+    path = whale.get("trade_price_path") or ()
+    if len(path) >= 3:
+        advance = path[-1] - path[0]
+        travel = sum(abs(end - start) for start, end in zip(path, path[1:]))
+        efficiency = advance / travel if travel else 0.0
+        result["efficiency"] = efficiency
+        checks["advance"] = efficiency * (1 if flow > 0 else -1) >= .60 and flow != 0
+    prior_buy = buy30 - buy if buy30 is not None else None
+    prior_sell = sell30 - sell if sell30 is not None else None
+    if prior_buy is not None and prior_sell is not None and min(prior_buy, prior_sell) >= 0 and prior_buy + prior_sell > 0:
+        prior_flow = (prior_buy - prior_sell) / (prior_buy + prior_sell)
+        result["prior_flow"] = prior_flow
+        if prior_flow * flow < 0:
+            result["route"] = "GIRO TEMPRANO"
+        elif prior_flow * flow > 0:
+            result["route"] = "CONTINUACIÓN"
+
+    if not checks["price_move"]:
+        result["reason"] = "PRECIO Y PRESION SIN ACUERDO"
+    elif not result.get("route"):
+        result["reason"] = "SIN CONTEXTO DE PRESION ANTERIOR"
+    elif not checks.get("advance"):
+        result["reason"] = "EL PRECIO NO AVANZA CON CLARIDAD"
+    elif not checks["closing"]:
+        result["reason"] = "EL IMPULSO NO RESPALDA ESE LADO AL CIERRE"
     else:
-        result["candidate"] = "UP" if flow > 0 else "DOWN"
-        result["reason"] = "PRESION Y PRECIO NEGOCIADO COINCIDEN"
+        result["candidate"] = closing_side
+        result["reason"] = result["route"] + " · RESPALDO AL CIERRE"
     return result
 
 
@@ -2226,7 +2333,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         "price_ema9_atr":(price-float(l1["ema9"]))/atr,
         "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
         "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    micro = _microstructure_decision(whale, seconds_left)
+    micro = _microstructure_decision(whale, seconds_left, distance, atr)
     candidate = micro["candidate"]
     quality = "MICROESTRUCTURA · " + micro["reason"]
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
@@ -2359,7 +2466,7 @@ def _retention_assessment(state, signal):
     side = state.get("active_direction")
     micro = (signal or {}).get("microstructure_internal") or {}
     if micro and side in ("UP", "DOWN"):
-        current = micro.get("candidate")
+        current = micro.get("candidate") or micro.get("closing_side")
         if current == side:
             return 2, 0
         if current in ("UP", "DOWN") and current != side:
@@ -2736,7 +2843,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_trade_price_close_ofi_routes_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -4153,48 +4260,6 @@ def live_dashboard():
         if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
     )
 
-    engine = sig.get("microstructure_internal") or {}
-    checks = engine.get("checks", {})
-    flow10 = engine.get("trade_imbalance")
-    price_move = engine.get("price_move")
-    volume = checks.get("volume")
-    target_distance = _plan_number(sig.get("distance"))
-    pending = (state or {}).get("pending_count", 0)
-    candidate = engine.get("candidate")
-    confirmed = candidate in ("UP", "DOWN") and candidate == active
-    needed = SIGNAL_CONFIRM_READINGS + int(active in ("UP", "DOWN") and candidate != active)
-
-    def direction_label(value):
-        return "UP" if value > 0 else "DOWN" if value < 0 else "NEUTRAL"
-
-    def flow_label(value):
-        return f"{direction_label(value)} {abs(value):.1%}" if value is not None else "—"
-
-    rows = [
-        ("TIEMPO DE RONDA", checks.get("time", False), f"{seconds_left}s restantes" if seconds_left is not None else "Sin reloj"),
-        ("BTC / TARGET", None, (f"${abs(target_distance):,.0f} "
-                               f"{'arriba' if target_distance > 0 else 'abajo' if target_distance < 0 else 'en el target'} · Informativo"
-                               if target_distance is not None else "—")),
-        ("VOLUMEN 30S", None, (f"${volume:,.0f} · {'Bajo · ' if volume < 500_000 else ''}Informativo"
-                               if volume is not None else "—")),
-        ("PRESIÓN 10S", checks.get("flow"), flow_label(flow10)),
-        ("PRECIO NEGOCIADO 5S / 5S", checks.get("price_move"), f"${price_move:+.2f}" if price_move is not None else "—"),
-        ("CONFIRMACIÓN", True if confirmed else None,
-         f"{candidate} · Confirmada" if confirmed else
-         f"{candidate} · {pending}/{needed}" if candidate else "Sin candidatura"),
-    ]
-    diagnostic_rows = "".join(
-        f'<div class="jc-engine-check"><span>{html.escape(label)}</span>'
-        f'<b style="color:{("#42efcb" if passed else "#ff627e" if passed is False else "#94a3b8")}">'
-        f'{html.escape(detail)} {"✓" if passed else "✕" if passed is False else "·"}</b></div>'
-        for label, passed, detail in rows
-    )
-    reason = engine.get("reason", "SIN DATOS DEL MOTOR")
-    diagnostic_html = (
-        '<section class="jc-engine-checks"><strong>CONFIRMACIÓN DEL CEREBRO</strong>'
-        + diagnostic_rows + f'<small>{html.escape(reason)}</small></section>'
-    )
-
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>{"● ACTIVO" if reader_active else "● LEYENDO"}</em></div>
@@ -4248,9 +4313,6 @@ def live_dashboard():
 .refapp .jcclose .finalnote {{display:none!important}}
 .refapp .jcclose .analysistext span {{display:none!important}}
 @media(max-width:380px){{.refapp .jcclose-main{{grid-template-columns:minmax(0,1fr) 80px}}.refapp .jcclose-dial{{width:78px;height:78px}}.refapp .jcclose-dial span{{font-size:19px}}.refapp .jcclose-signal{{height:72px}}}}
- .jc-engine-checks{{padding:14px;border:1px solid #314354;border-radius:18px;background:#08151e;margin:12px 0;color:#e6eef5}}
- .jc-engine-check{{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:8px 0;padding:10px;border:1px solid #273646;border-radius:12px;background:#0e1925;font-size:12px}}
- .jc-engine-check b{{text-align:right}} .jc-engine-checks small{{color:#a7b8c7}}
 </style>
 <div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
   <!-- El fondo ya incluye logo, título, mercado y engranaje. -->
@@ -4266,7 +4328,6 @@ def live_dashboard():
   {weakness_html}
 
   {pre_html}
-  {diagnostic_html}
 
   <div class="rgrid">
     <div class="rcard keycard">
@@ -4587,6 +4648,9 @@ def _apply_ai_signal_gate(sig):
 def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
     _TRACE_CONTEXT.build_id = None
     _TRACE_CONTEXT.build_payload = None
+    if isinstance(whale, dict) and price_source == "KALSHI LIVE":
+        whale = {**whale, "settlement_spot": live_price,
+                 "settlement_points": getattr(_PRICE_OBSERVATIONS, "kalshi_points", ())}
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
     try:
