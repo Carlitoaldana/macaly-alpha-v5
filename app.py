@@ -2537,9 +2537,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                  pending_last_at=None, pending_price_source=None)
     event_at = pd.to_datetime(((signal or {}).get("ut_signal") or {}).get("closed_at"),
                               utc=True, errors="coerce")
-    if (not market or not close_time or seconds_left is None or not 180 < seconds_left <= 720
+    if (not market or not close_time or seconds_left is None or not 0 < seconds_left <= 900
             or not signal or signal.get("data_valid") is False or pd.isna(event_at)
-            or not end - pd.Timedelta(seconds=720) <= event_at < end - pd.Timedelta(seconds=180)
+            or not end - pd.Timedelta(minutes=15) < event_at <= pd.Timestamp(now)
             or candidate not in ("UP", "DOWN")):
         state.update(active_direction=None, active_since=None)
         return
