@@ -2081,14 +2081,19 @@ def _microstructure_decision(whale, seconds_left, distance, atr):
     """
     result = {"candidate": None, "reason": "ESPERANDO MICROESTRUCTURA",
               "book_imbalance": None, "trade_imbalance": None}
+    checks = result["checks"] = {}
     if seconds_left is None or not 0 < float(seconds_left) <= 900:
         result["reason"] = "FUERA DE VENTANA DE ENTRADA"
         return result
+    checks["time"] = True
     if distance is None or not np.isfinite(distance) or not np.isfinite(atr) or atr <= 0:
         result["reason"] = "SIN DISTANCIA AL TARGET O VOLATILIDAD"
         return result
     # Filtro experimental basado en ATR de un minuto y tiempo restante.
-    if abs(distance) > atr * math.sqrt(float(seconds_left) / 60):
+    target_range = atr * math.sqrt(float(seconds_left) / 60)
+    checks["target_range"] = target_range
+    checks["target"] = abs(distance) <= target_range
+    if not checks["target"]:
         result["reason"] = "TARGET FUERA DEL RANGO ESTIMADO"
         return result
     if not isinstance(whale, dict):
@@ -2099,6 +2104,7 @@ def _microstructure_decision(whale, seconds_left, distance, atr):
         sell = float(whale.get("sell30") or 0)
         if not all(np.isfinite(x) and x >= 0 for x in (buy, sell)):
             return result
+        checks["volume"] = buy + sell
         if buy + sell < 500_000:
             result["reason"] = "POCAS OPERACIONES PARA EVALUAR"
             return result
@@ -2108,7 +2114,8 @@ def _microstructure_decision(whale, seconds_left, distance, atr):
         sell60 = _plan_number(whale.get("sell60"))
         if buy60 is not None and sell60 is not None and min(buy60, sell60) >= 0 and buy60 + sell60 > 0:
             result["trade_imbalance_60s"] = round((buy60 - sell60) / (buy60 + sell60), 4)
-        if abs(flow30) < .22:
+        checks["flow"] = abs(flow30) >= .22
+        if not checks["flow"]:
             result["reason"] = "FLUJO DE 30S SIN PRESION SUFICIENTE"
             return result
         book = get_coinbase_order_book()
@@ -2117,7 +2124,8 @@ def _microstructure_decision(whale, seconds_left, distance, atr):
             return result
         result["book_imbalance"] = round(imbalance, 4)
         # Book and executed trades must independently agree.
-        if abs(imbalance) < .15 or imbalance*flow30 <= 0:
+        checks["book"] = abs(imbalance) >= .15 and imbalance * flow30 > 0
+        if not checks["book"]:
             result["reason"] = "LIBRO Y OPERACIONES NO COINCIDEN"
             return result
         result["candidate"] = "UP" if flow30 > 0 else "DOWN"
@@ -4162,6 +4170,44 @@ def live_dashboard():
         if round_signal.get("reversal") and active in ("UP", "DOWN") else ""
     )
 
+    engine = sig.get("microstructure_internal") or {}
+    checks = engine.get("checks", {})
+    flow30 = engine.get("trade_imbalance")
+    book = engine.get("book_imbalance")
+    volume = checks.get("volume")
+    target_range = checks.get("target_range")
+    pending = (state or {}).get("pending_count", 0)
+    candidate = engine.get("candidate")
+    confirmed = candidate in ("UP", "DOWN") and candidate == active
+
+    def direction_label(value):
+        return "UP" if value > 0 else "DOWN" if value < 0 else "NEUTRAL"
+
+    def flow_label(value, minimum):
+        return f"{direction_label(value)} {abs(value):.1%} / mín. {minimum}" if value is not None else "—"
+
+    rows = [
+        ("TIEMPO DE RONDA", checks.get("time", False), f"{seconds_left}s restantes" if seconds_left is not None else "Sin reloj"),
+        ("BTC / TARGET", checks.get("target"), f"${abs(sig['distance']):,.0f} / rango ${target_range:,.0f}" if target_range is not None else "—"),
+        ("VOLUMEN 30S", volume >= 500_000 if volume is not None else None, f"${volume:,.0f} / mín. $500,000" if volume is not None else "—"),
+        ("PRESIÓN 30S", checks.get("flow"), flow_label(flow30, "22 %")),
+        ("LIBRO DE ÓRDENES", checks.get("book"), flow_label(book, "15 %")),
+        ("CONFIRMACIÓN", True if confirmed else None,
+         f"{candidate} · {SIGNAL_CONFIRM_READINGS}/{SIGNAL_CONFIRM_READINGS}" if confirmed else
+         f"{candidate} · {pending}/{SIGNAL_CONFIRM_READINGS}" if candidate else "Sin candidatura"),
+    ]
+    diagnostic_rows = "".join(
+        f'<div class="jc-engine-check"><span>{html.escape(label)}</span>'
+        f'<b style="color:{("#42efcb" if passed else "#ff627e" if passed is False else "#94a3b8")}">'
+        f'{html.escape(detail)} {"✓" if passed else "✕" if passed is False else "·"}</b></div>'
+        for label, passed, detail in rows
+    )
+    reason = engine.get("reason", "SIN DATOS DEL MOTOR")
+    diagnostic_html = (
+        '<section class="jc-engine-checks"><strong>CONFIRMACIÓN DEL CEREBRO</strong>'
+        + diagnostic_rows + f'<small>{html.escape(reason)}</small></section>'
+    )
+
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>{"● ACTIVO" if reader_active else "● LEYENDO"}</em></div>
@@ -4215,6 +4261,9 @@ def live_dashboard():
 .refapp .jcclose .finalnote {{display:none!important}}
 .refapp .jcclose .analysistext span {{display:none!important}}
 @media(max-width:380px){{.refapp .jcclose-main{{grid-template-columns:minmax(0,1fr) 80px}}.refapp .jcclose-dial{{width:78px;height:78px}}.refapp .jcclose-dial span{{font-size:19px}}.refapp .jcclose-signal{{height:72px}}}}
+ .jc-engine-checks{{padding:14px;border:1px solid #314354;border-radius:18px;background:#08151e;margin:12px 0;color:#e6eef5}}
+ .jc-engine-check{{display:flex;justify-content:space-between;align-items:center;gap:10px;margin:8px 0;padding:10px;border:1px solid #273646;border-radius:12px;background:#0e1925;font-size:12px}}
+ .jc-engine-check b{{text-align:right}} .jc-engine-checks small{{color:#a7b8c7}}
 </style>
 <div class="refapp dir-{active.lower() if active in ("UP","DOWN") else "wait"}" style="--accent:{accent};--glow:{glow};--soft:{soft};">
   <!-- El fondo ya incluye logo, título, mercado y engranaje. -->
@@ -4230,6 +4279,7 @@ def live_dashboard():
   {weakness_html}
 
   {pre_html}
+  {diagnostic_html}
 
   <div class="rgrid">
     <div class="rcard keycard">
