@@ -2081,7 +2081,7 @@ def _microstructure_decision(whale, seconds_left):
     """
     result = {"candidate": None, "reason": "ESPERANDO MICROESTRUCTURA",
               "book_imbalance": None, "trade_imbalance": None}
-    if seconds_left is None or not 180 < float(seconds_left) < 720:
+    if seconds_left is None or not 0 < float(seconds_left) <= 900:
         result["reason"] = "FUERA DE VENTANA DE ENTRADA"
         return result
     if not isinstance(whale, dict):
@@ -2552,6 +2552,24 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
 
     _reset_withdrawal(state)
     if candidate == state.get("active_direction"):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        return
+
+    # Reversión anticipada: si el motor independiente ya detectó presión
+    # ejecutada y liquidez concordantes en dirección opuesta, actualizar
+    # la señal activa sin esperar a que el precio cruce el target.
+    # La primera señal histórica se conserva para evaluar el desempeño.
+    micro = (signal or {}).get("microstructure_internal")
+    if (state.get("active_direction") in ("UP", "DOWN")
+            and candidate != state.get("active_direction")
+            and isinstance(micro, dict)
+            and micro.get("candidate") == candidate
+            and micro.get("reason") == "PRESION DE OPERACIONES Y LIQUIDEZ COINCIDENTE"):
+        state["active_direction"] = candidate
+        state["active_since"] = now
         state["pending_direction"] = None
         state["pending_count"] = 0
         state["pending_since"] = None
