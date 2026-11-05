@@ -2073,6 +2073,53 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "recent_atr": round(recent, 3)}
 
 
+def _microstructure_decision(whale, seconds_left):
+    """Independent first-entry engine: aggressive trades + resting liquidity.
+
+    No RSI/EMA/MACD, target-distance, or price displacement used to choose side.
+    A snapshot is only an experimental directional hypothesis, not calibrated odds.
+    """
+    result = {"candidate": None, "reason": "ESPERANDO MICROESTRUCTURA",
+              "book_imbalance": None, "trade_imbalance": None}
+    if seconds_left is None or not 180 < float(seconds_left) < 720:
+        result["reason"] = "FUERA DE VENTANA DE ENTRADA"
+        return result
+    if not isinstance(whale, dict):
+        result["reason"] = "SIN OPERACIONES RECIENTES"
+        return result
+    try:
+        buy = float(whale.get("buy30") or 0)
+        sell = float(whale.get("sell30") or 0)
+        buy60 = float(whale.get("buy60") or 0)
+        sell60 = float(whale.get("sell60") or 0)
+        if not all(np.isfinite(x) and x >= 0 for x in (buy, sell, buy60, sell60)):
+            return result
+        if buy + sell < 500_000 or buy60 + sell60 < 750_000:
+            result["reason"] = "POCAS OPERACIONES PARA EVALUAR"
+            return result
+        flow30 = (buy-sell)/(buy+sell)
+        flow60 = (buy60-sell60)/(buy60+sell60)
+        result["trade_imbalance"] = round(flow30, 4)
+        # One-sided activity must persist beyond a single 10-second burst.
+        if abs(flow30) < .22 or abs(flow60) < .12 or flow30*flow60 <= 0:
+            result["reason"] = "FLUJO SIN PRESION SOSTENIDA"
+            return result
+        book = get_coinbase_order_book()
+        imbalance = float(book.get("imbalance"))
+        if not np.isfinite(imbalance):
+            return result
+        result["book_imbalance"] = round(imbalance, 4)
+        # Book and executed trades must independently agree.
+        if abs(imbalance) < .15 or imbalance*flow30 <= 0:
+            result["reason"] = "LIBRO Y OPERACIONES NO COINCIDEN"
+            return result
+        result["candidate"] = "UP" if flow30 > 0 else "DOWN"
+        result["reason"] = "PRESION DE OPERACIONES Y LIQUIDEZ COINCIDENTE"
+    except (ValueError, TypeError, KeyError, requests.RequestException):
+        result["reason"] = "LIBRO NO DISPONIBLE"
+    return result
+
+
 def _entry_route_checks(sig, seconds_left):
     """Evaluate both sides from the same evidence; shared by engine and UI."""
     required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
@@ -2145,17 +2192,6 @@ def _entry_route_checks(sig, seconds_left):
                              and (all(ok for _,ok in current) or d3==side or d5==side))
         sides[side] = []
         for name,checks in routes:
-            # Una alineación heredada de 3m/5m no basta para confirmar
-            # la siguiente ronda: exigir evidencia reciente independiente.
-            # Se aplica simétricamente a UP/DOWN, sin espera fija.
-            if d3 == side and d5 == side:
-                recent_atr = _plan_number(impulse.get("recent_atr"))
-                efficiency = _plan_number(impulse.get("efficiency"))
-                live_fresh = (reliable and recent_atr is not None
-                              and efficiency is not None
-                              and recent_atr * sign >= .08
-                              and efficiency >= .35)
-                checks = checks + [("Movimiento reciente confirma tendencia alineada", live_fresh)]
             checks = checks+[("Fuera de la zona de ruido",noise_ok),
                             ("Distancia al target y tiempo respaldan la dirección",target_ok)]
             sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
@@ -2194,12 +2230,9 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         "price_ema9_atr":(price-float(l1["ema9"]))/atr,
         "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
         "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    route_view = _entry_route_checks(route_input, seconds_left)
-    eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
-                for side in ("UP","DOWN")}
-    choices = [side for side in ("UP","DOWN") if eligible[side]]
-    candidate = choices[0] if len(choices)==1 else None
-    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
+    micro = _microstructure_decision(whale, seconds_left)
+    candidate = micro["candidate"]
+    quality = "MICROESTRUCTURA · " + micro["reason"]
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
                     "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
@@ -2210,7 +2243,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"microstructure_internal":micro,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
@@ -2328,6 +2361,14 @@ def entry_quality(price, seconds_left):
 def _retention_assessment(state, signal):
     """Separate affirmative, opposite and unknown evidence for an active side."""
     side = state.get("active_direction")
+    micro = (signal or {}).get("microstructure_internal") or {}
+    if micro and side in ("UP", "DOWN"):
+        current = micro.get("candidate")
+        if current == side:
+            return 2, 0
+        if current in ("UP", "DOWN") and current != side:
+            return 0, 2
+        return 0, 0
     if side not in ("UP", "DOWN") or not signal or signal.get("data_valid") is False:
         return 0, 0
     sign = 1 if side == "UP" else -1
@@ -2457,7 +2498,12 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
     la activa se reevalúa con EMA y distancia al target.
     """
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    # The microstructure engine has its own independent entry checks.
+    # Legacy EMA/price-travel crosscheck would turn anticipation into reaction.
+    if signal and isinstance(signal.get("microstructure_internal"), dict):
+        state["opening_conflict"] = None
+    else:
+        candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
@@ -2822,8 +2868,13 @@ def _background_history_loop(stop_event=None):
             target = get_target_from_market(market)
             live_price = _background_get_live_price(market)
             btc_df = _background_get_btc_data()
+            try:
+                background_whale = get_coinbase_whale_flow()
+            except Exception:
+                background_whale = None
             sig = build_signal(btc_df, target, seconds_left, live_price,
-                               getattr(_BACKGROUND_PRICE_SOURCE, "value", None))
+                               getattr(_BACKGROUND_PRICE_SOURCE, "value", None),
+                               whale=background_whale)
             if stop_event and stop_event.is_set():
                 break
             active_state = _background_update_state(active_state, sig, market, seconds_left)
