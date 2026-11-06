@@ -2568,7 +2568,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     active = state.get("active_direction")
     if state.get("first_direction") is None:
         received_at = pd.to_datetime(ut.get("received_at"), utc=True, errors="coerce")
-        if (now_ts < round_open + pd.Timedelta(seconds=6)
+        if (now_ts < round_open + pd.Timedelta(seconds=NEW_ROUND_WAIT)
                 or pd.isna(received_at) or not round_open <= received_at <= now_ts
                 or candidate != side or event_at != saved_at):
             return
