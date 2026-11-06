@@ -2263,9 +2263,10 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
             float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
             float(whale.get("flow_strength") or 0)>=.20)
     now = pd.Timestamp.now(tz="UTC")
-    _, ut_closed, ut_closed_at, prior_side, closed_move = _ut_bot_events(df, 2, now)
+    ut_open, ut_closed, ut_closed_at, prior_side, closed_move = _ut_bot_events(df, 2, now)
     ut_short, _, _, _, _ = _ut_bot_events(df, 1, now)
     ut = {"direction": ut_closed, "ut_short": ut_short, "prior_side": prior_side,
+          "open_side": ut_open, "received_at": df.attrs.get("received_at"),
           "closed_move": closed_move,
           "closed_at": ut_closed_at.isoformat() if ut_closed_at is not None else None}
     candidate = None
@@ -2565,8 +2566,17 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         return
 
     active = state.get("active_direction")
-    if saved_at <= round_open:
-        # The current UT side is the opening signal for this round.
+    if state.get("first_direction") is None:
+        received_at = pd.to_datetime(ut.get("received_at"), utc=True, errors="coerce")
+        if (now_ts < round_open + pd.Timedelta(seconds=6)
+                or pd.isna(received_at) or not round_open <= received_at <= now_ts
+                or candidate != side or event_at != saved_at):
+            return
+        # An opposite open candle pauses the first signal until the UT resolves it.
+        if ut.get("open_side") in ("UP", "DOWN") and ut["open_side"] != side:
+            return
+        active = side
+    elif saved_at <= round_open:
         active = side
     elif active != side:
         if active is None:
@@ -2724,7 +2734,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
