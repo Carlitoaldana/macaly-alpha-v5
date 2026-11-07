@@ -3707,8 +3707,21 @@ for(const [key,label] of Object.entries({ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',v
 // The surrounding cards, signals, toolbars, Python payload and market calculations remain unchanged.
 let lwChart=null, candleSeries=null, volumeSeries=null, overlays={}, levelLines=[], rsiChart=null, rsiSeries=null;
 let applyingData=false, syncing=false;
-let scrollFrame=0;
+let scrollFrame=0, resumeLive=true;
 const seriesCache=new WeakMap();
+function syncRsiRange(){
+ if(!lwChart||!rsiChart||syncing||!toggles.rsi)return;
+ const range=lwChart.timeScale().getVisibleLogicalRange();
+ if(!range)return;
+ syncing=true;
+ try{rsiChart.timeScale().setVisibleLogicalRange(range)}finally{syncing=false;}
+}
+function requestLatestChart(){
+ if(document.hidden)return;
+ resumeLive=true;
+ window.parent.postMessage({kind:'alpha-chart-ready'},'*');
+ redrawData(true);
+}
 function stopSmoothScroll(){
  if(scrollFrame)cancelAnimationFrame(scrollFrame);
  scrollFrame=0;
@@ -3722,7 +3735,7 @@ function smoothRange(target,duration=420){
   const progress=Math.min(1,(now-began)/duration);
   const eased=progress*progress*(3-2*progress);
   applyingData=true;
-  try{scale.setVisibleLogicalRange({from:start.from+(target.from-start.from)*eased,to:start.to+(target.to-start.to)*eased})}
+  try{scale.setVisibleLogicalRange({from:start.from+(target.from-start.from)*eased,to:start.to+(target.to-start.to)*eased});syncRsiRange()}
   finally{applyingData=false;}
   if(progress<1)scrollFrame=requestAnimationFrame(frame);
   else{scrollFrame=0;persistView();}
@@ -3745,8 +3758,9 @@ function syncSeries(series,rows,reset=false){
 const candleOptions={upColor:'#00dfb5',downColor:'#e64b4b',borderUpColor:'#00dfb5',borderDownColor:'#e64b4b',wickUpColor:'#00dfb5',wickDownColor:'#e64b4b'};
 function chartRows(data){return (data.rows||[]).filter(r=>Number.isFinite(r.t)&&[r.open,r.high,r.low,r.close].every(Number.isFinite))
  .map(r=>({time:r.t,open:r.open,high:r.high,low:r.low,close:r.close}));}
-function seriesRows(key){return (D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r[key]))
- .map(r=>({time:r.t,value:r[key]}));}
+function seriesRows(key){return (D.rows||[]).filter(r=>Number.isFinite(r.t))
+ .map(r=>Number.isFinite(r[key])?{time:r.t,value:r[key]}:{time:r.t});}
+
 function refreshToggles(){
  for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(!!toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
  const last=D.rows?.[D.rows.length-1];
@@ -3760,7 +3774,7 @@ function initChart(){
   width:$('canvas').clientWidth,height:$('canvas').clientHeight,
   layout:{background:{type:L.ColorType.Solid,color:'#06121a'},textColor:'#b9c8d9',fontFamily:'Inter,system-ui,sans-serif',fontSize:11},
   grid:{vertLines:{color:'#142b3a'},horzLines:{color:'#142b3a'}},
-  rightPriceScale:{borderColor:'#34546c',scaleMargins:{top:.12,bottom:.17}},
+  rightPriceScale:{borderColor:'#34546c',minimumWidth:88,scaleMargins:{top:.12,bottom:.17}},
   timeScale:{borderColor:'#34546c',rightOffset:2,barSpacing:11,minBarSpacing:3,timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false,shiftVisibleRangeOnNewBar:false},
   crosshair:{mode:L.CrosshairMode.Normal,vertLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'},horzLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'}},
   kineticScroll:{touch:true,mouse:true},
@@ -3775,7 +3789,7 @@ function initChart(){
   width:$('rsi-pane').clientWidth,height:110,
   layout:{background:{type:L.ColorType.Solid,color:'#06121a'},textColor:'#b9c8d9',fontSize:10},
   grid:{vertLines:{color:'#142b3a'},horzLines:{color:'#142b3a'}},
-  rightPriceScale:{borderColor:'#34546c'},timeScale:{visible:false,borderColor:'#34546c'},
+  rightPriceScale:{borderColor:'#34546c',minimumWidth:88},timeScale:{visible:false,borderColor:'#34546c',shiftVisibleRangeOnNewBar:false},
   handleScroll:false,handleScale:false,crosshair:{mode:L.CrosshairMode.Normal}
  });
  rsiSeries=rsiChart.addLineSeries({color:colors.rsi,lineWidth:2,priceLineVisible:false,lastValueVisible:true});
@@ -3784,7 +3798,7 @@ function initChart(){
  // Keep RSI time aligned with the BTC chart when panning/zooming.
  lwChart.timeScale().subscribeVisibleLogicalRangeChange(range=>{
   if(!range||syncing)return;
-  syncing=true;try{rsiChart.timeScale().setVisibleLogicalRange(range)}catch(_){}syncing=false;
+  syncRsiRange();
   if(!applyingData&&!scrollFrame)persistView();
  });
  lwChart.subscribeCrosshairMove(param=>{
@@ -3793,7 +3807,7 @@ function initChart(){
   const date=new Date(Number(param.time)*1000).toLocaleString('en-US',{timeZone:'America/New_York'});
   $('tooltip').textContent=date+' · O '+fmt(r.open)+' H '+fmt(r.high)+' L '+fmt(r.low)+' C '+fmt(r.close);
  });
- const resize=()=>{if(!lwChart)return;lwChart.applyOptions({width:$('canvas').clientWidth,height:$('canvas').clientHeight});rsiChart.applyOptions({width:$('rsi-pane').clientWidth,height:110})};
+ const resize=()=>{if(!lwChart)return;lwChart.applyOptions({width:$('canvas').clientWidth,height:$('canvas').clientHeight});if(toggles.rsi)rsiChart.applyOptions({width:$('canvas').clientWidth,height:110});syncRsiRange()};
  if(window.ResizeObserver){new ResizeObserver(resize).observe($('canvas'));new ResizeObserver(resize).observe($('rsi-pane'))}else window.addEventListener('resize',resize);
  return true;
 }
@@ -3804,7 +3818,7 @@ function persistView(){
  const n=D.rows.length;visible=Math.max(12,Math.round(range.to-range.from));offset=Math.max(0,Math.round((n-1)-range.to));persist();
 }
 function redrawData(preserve=true){
- refreshToggles();if(!initChart())return;
+ refreshToggles();$('rsi-pane').style.display=toggles.rsi?'block':'none';if(!initChart())return;
  stopSmoothScroll();
  applyingData=true;
  let oldRange=preserve?lwChart.timeScale().getVisibleLogicalRange():null;
@@ -3821,13 +3835,19 @@ function redrawData(preserve=true){
  syncSeries(volumeSeries,(D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r.volume)).map(r=>({time:r.t,value:r.volume,color:r.close>=r.open?'#00dfb573':'#e64b4b73'})),!preserve);
  volumeSeries.applyOptions({visible:!!toggles.volume});
  syncSeries(rsiSeries,seriesRows('rsi'),!preserve);
- $('rsi-pane').style.display=toggles.rsi?'block':'none';
+ if(toggles.rsi)rsiChart.applyOptions({width:$('canvas').clientWidth,height:110});
  for(const l of levelLines)candleSeries.removePriceLine(l);levelLines=[];
  for(const [value,label,color] of [[D.target,'TARGET','#f1c46b'],[D.support,'SUPPORT','#00dfb5'],[D.resistance,'RESISTANCE','#e64b4b']]){
   if(Number.isFinite(value))levelLines.push(candleSeries.createPriceLine({price:value,color,lineWidth:1,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:label}));
  }
  try{
-  if(oldRange&&preserve){
+  if(resumeLive){
+   const width=oldRange?oldRange.to-oldRange.from:(saved.visible||Math.min(35,newN));
+   const end=newN+1.5;
+   resumeLive=false;
+   if(oldRange)smoothRange({from:end-width,to:end});
+   else lwChart.timeScale().setVisibleLogicalRange({from:end-width,to:end});
+  }else if(oldRange&&preserve){
    // Remap the camera if the provider removed old candles from its window.
    const mapped={from:oldRange.from+anchorShift,to:oldRange.to+anchorShift};
    lwChart.timeScale().setVisibleLogicalRange(mapped);
@@ -3840,6 +3860,7 @@ function redrawData(preserve=true){
    lwChart.timeScale().setVisibleLogicalRange({from:newN-count-0.5,to:newN+1.5});
   }
  }catch(_) {lwChart.timeScale().fitContent()}
+ syncRsiRange();
  applyingData=false;
 }
 function draw(){redrawData(true)}
@@ -3861,7 +3882,13 @@ window.addEventListener('message',function(event){
  // Native data update never rebuilds the canvas; gestures and scroll are preserved.
  redrawData(true);
 });
+document.addEventListener('visibilitychange',()=>{if(document.hidden)stopSmoothScroll();else requestLatestChart()});
+window.addEventListener('pageshow',requestLatestChart);
+window.addEventListener('message',event=>{
+ if(event.data?.kind==='alpha-chart-resume')requestLatestChart();
+});
 draw();
+window.parent.postMessage({kind:'alpha-chart-ready'},'*');
 </script></html>'''
 
 
@@ -5085,6 +5112,22 @@ else:
             'window.__alphaNextChart=payload;'
             'if(frame.contentWindow)frame.contentWindow.postMessage({kind:"alpha-chart-update",payload:payload},"*");'
             '};'
+            'if(window.__alphaChartResumeCleanup)window.__alphaChartResumeCleanup();'
+            'const replayChart=function(event){'
+            'if(event&&event.type==="message"&&(event.source!==frame.contentWindow||event.data?.kind!=="alpha-chart-ready"))return;'
+            'if(document.hidden)return;'
+            'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
+            '};'
+            'const resumeChart=function(){if(document.hidden)return;'
+            'if(frame.contentWindow)frame.contentWindow.postMessage({kind:"alpha-chart-resume"},"*");'
+            'replayChart();};'
+            'window.addEventListener("message",replayChart);'
+            'document.addEventListener("visibilitychange",resumeChart);'
+            'window.addEventListener("pageshow",resumeChart);'
+            'window.__alphaChartResumeCleanup=function(){'
+            'window.removeEventListener("message",replayChart);'
+            'document.removeEventListener("visibilitychange",resumeChart);'
+            'window.removeEventListener("pageshow",resumeChart);};'
             'function fitChartHeight(){try{'
             'const panel=frame.contentDocument&&frame.contentDocument.querySelector(".panel");'
             'if(!panel)return;const pixels=Math.max(360,Math.ceil(panel.getBoundingClientRect().bottom+8));'
