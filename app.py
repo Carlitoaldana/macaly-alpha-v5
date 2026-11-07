@@ -2478,53 +2478,68 @@ def _review_active_retention(state, signal, seconds_left, now):
         _reset_withdrawal(state)
 
 
-def _round_opening_crosscheck(state, candidate, signal, now):
-    """Require fresh directional evidence before the first entry of this ticker.
+def _round_opening_crosscheck(state, candidate, signal, now, market):
+    """Confirm the first signal with distinct live observations of this round.
 
-    Old candles remain context, never sufficient evidence for an opening entry.
-    Each live feed has a separate short tape. Later reversals are unrestricted.
+    The rolling window is evidence, not a timer that automatically releases a
+    signal. Source timestamps prevent cached prices from counting twice.
     """
-    if state.get("first_direction") in ("UP", "DOWN"):
-        state["opening_conflict"] = None
-        return candidate
     def wait(reason):
         state["opening_conflict"] = reason
         return None
-    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
-        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
-    if not signal or signal.get("data_valid") is False:
-        return wait("Esperando datos actuales para la primera señal")
-    price = _plan_number(signal.get("price"))
-    atr = _plan_number(signal.get("atr"))
+    start = pd.to_datetime(market.get("open_time"), utc=True, errors="coerce")
+    end = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+    if pd.isna(start) and not pd.isna(end):
+        start = end - pd.Timedelta(minutes=15)
     source = signal.get("price_source")
-    if (price is None or price <= 0 or atr is None or atr <= 0
-            or source not in ("COINBASE", "KALSHI LIVE")):
-        return wait("Esperando precio en vivo para la primera señal")
-    stamp = now.timestamp()
-    tapes = state.setdefault("opening_live_tapes", {})
-    tape = tapes.get(source, [])
-    if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
+    target = _plan_number(get_target_from_market(market))
+    key = [str(start), str(end), source, target, candidate]
+    if state.get("opening_market_key") != key:
+        state.update(opening_market_key=key, opening_market_samples=[])
+    price = _plan_number(signal.get("price"))
+    observed = getattr(_PRICE_OBSERVATIONS, "values", {}).get(source)
+    stamp = pd.Timestamp(now).timestamp()
+    if (pd.isna(start) or pd.isna(end) or target is None or price is None
+            or price <= 0 or candidate not in ("UP", "DOWN")
+            or signal.get("data_valid") is False or observed is None):
+        state["opening_market_samples"] = []
+        return wait("Esperando lecturas nuevas del mercado")
+    observed = float(observed)
+    if not np.isfinite(observed) or not start.timestamp() <= observed <= stamp:
+        state["opening_market_samples"] = []
+        return wait("Esperando precio de esta ronda")
+    if stamp-observed > SIGNAL_CONFIRM_MAX_GAP:
+        state["opening_market_samples"] = []
+        return wait("Esperando precio actualizado")
+    tape = state.get("opening_market_samples") or []
+    if tape and (observed < tape[-1][0] or observed-tape[-1][0] > SIGNAL_CONFIRM_MAX_GAP):
         tape = []
-    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
-    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
-        tape.append([stamp, price])
-    tapes[source] = tape
-    if candidate not in ("UP", "DOWN"):
-        return wait("Analizando fuerza actual antes de la primera señal")
-    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
-        return wait("Observando movimiento actual antes de la primera señal")
-    prices = [float(x[1]) for x in tape]
+    tape = [x for x in tape if 0 <= stamp-x[0] <= 16]
+    if not tape or observed-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
+        tape = tape + [[observed, price]]
+    state["opening_market_samples"] = tape
+    if len(tape) < 4 or tape[-1][0]-tape[0][0] < 6:
+        return wait("Analizando lecturas nuevas de esta ronda")
+    prices = [x[1] for x in tape]
     sign = 1 if candidate == "UP" else -1
-    split = len(prices)//2
-    net = sign*(prices[-1]-prices[0])
+    steps = [sign*(b-a) for a,b in zip(prices, prices[1:])]
+    travel = sum(abs(x) for x in steps)
+    net = sum(steps)
+    split = len(tape)//2
     recent = sign*(prices[-1]-prices[split])
-    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
-    efficiency = net/max(travel, 1e-8)
-    minimum = max(2.0, .10*atr)
-    latest = sign*(prices[-1]-prices[-2])
-    if (net < minimum or recent < .5*minimum or efficiency < .60
-            or latest < -.25*minimum):
-        return wait("Sin fuerza actual suficiente para " + candidate)
+    if (travel <= 0 or net/travel < .60 or recent <= 0
+            or sum(x > 0 for x in steps)/len(steps) < .60 or steps[-1] < 0):
+        return wait("Movimiento sin respaldo suficiente para " + candidate)
+    # Repeated target crossings indicate indecision rather than confirmation.
+    sides = [1 if p > target else -1 for p in prices if p != target]
+    if sum(a != b for a,b in zip(sides, sides[1:])) > 1:
+        return wait("Precio indeciso alrededor del target")
+    gap = sign*(target-price)
+    velocity = min(net/(tape[-1][0]-tape[0][0]),
+                   recent/(tape[-1][0]-tape[split][0]))
+    remaining = end.timestamp()-stamp
+    if gap > 0 and velocity*remaining < gap:
+        return wait("Movimiento insuficiente frente al target")
     state["opening_conflict"] = None
     return candidate
 
@@ -2549,6 +2564,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     signal = signal or {}
     if (pd.isna(round_open) or pd.isna(end) or not round_open <= now_ts < end
             or signal.get("data_valid") is False):
+        if state.get("first_direction") is None:
+            state["opening_market_samples"] = []
         return
     seconds_left = (end - now_ts).total_seconds()
 
@@ -2568,6 +2585,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
 
     active = state.get("active_direction")
     if state.get("first_direction") is None:
+        confirmed = _round_opening_crosscheck(state, candidate, signal, now, market)
+        if confirmed != side:
+            return
         received_at = pd.to_datetime(ut.get("received_at"), utc=True, errors="coerce")
         if (now_ts < round_open + pd.Timedelta(seconds=NEW_ROUND_WAIT)
                 or pd.isna(received_at) or not round_open <= received_at <= now_ts
@@ -2738,7 +2758,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_v1_recheck_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_recheck_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
