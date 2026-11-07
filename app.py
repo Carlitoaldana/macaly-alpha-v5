@@ -3707,6 +3707,41 @@ for(const [key,label] of Object.entries({ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',v
 // The surrounding cards, signals, toolbars, Python payload and market calculations remain unchanged.
 let lwChart=null, candleSeries=null, volumeSeries=null, overlays={}, levelLines=[], rsiChart=null, rsiSeries=null;
 let applyingData=false, syncing=false;
+let scrollFrame=0;
+const seriesCache=new WeakMap();
+function stopSmoothScroll(){
+ if(scrollFrame)cancelAnimationFrame(scrollFrame);
+ scrollFrame=0;
+}
+function smoothRange(target,duration=420){
+ stopSmoothScroll();
+ const scale=lwChart.timeScale(),start=scale.getVisibleLogicalRange();
+ if(!start){scale.setVisibleLogicalRange(target);return;}
+ const began=performance.now();
+ function frame(now){
+  const progress=Math.min(1,(now-began)/duration);
+  const eased=progress*progress*(3-2*progress);
+  applyingData=true;
+  try{scale.setVisibleLogicalRange({from:start.from+(target.from-start.from)*eased,to:start.to+(target.to-start.to)*eased})}
+  finally{applyingData=false;}
+  if(progress<1)scrollFrame=requestAnimationFrame(frame);
+  else{scrollFrame=0;persistView();}
+ }
+ scrollFrame=requestAnimationFrame(frame);
+}
+function syncSeries(series,rows,reset=false){
+ const previous=seriesCache.get(series);
+ // Update the live candle in place; reload only when historical data changed.
+ const compatible=!reset&&previous&&previous.length&&rows.length>=previous.length&&
+  previous.slice(0,-1).every((row,i)=>JSON.stringify(row)===JSON.stringify(rows[i]))&&
+  rows[previous.length-1]?.time===previous[previous.length-1].time;
+ if(compatible){
+  for(let i=previous.length-1;i<rows.length;i++){
+   if(JSON.stringify(previous[i])!==JSON.stringify(rows[i]))series.update(rows[i]);
+  }
+ }else series.setData(rows);
+ seriesCache.set(series,rows);
+}
 const candleOptions={upColor:'#00dfb5',downColor:'#e64b4b',borderUpColor:'#00dfb5',borderDownColor:'#e64b4b',wickUpColor:'#00dfb5',wickDownColor:'#e64b4b'};
 function chartRows(data){return (data.rows||[]).filter(r=>Number.isFinite(r.t)&&[r.open,r.high,r.low,r.close].every(Number.isFinite))
  .map(r=>({time:r.t,open:r.open,high:r.high,low:r.low,close:r.close}));}
@@ -3726,7 +3761,7 @@ function initChart(){
   layout:{background:{type:L.ColorType.Solid,color:'#06121a'},textColor:'#b9c8d9',fontFamily:'Inter,system-ui,sans-serif',fontSize:11},
   grid:{vertLines:{color:'#142b3a'},horzLines:{color:'#142b3a'}},
   rightPriceScale:{borderColor:'#34546c',scaleMargins:{top:.12,bottom:.17}},
-  timeScale:{borderColor:'#34546c',rightOffset:2,barSpacing:11,minBarSpacing:3,timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false},
+  timeScale:{borderColor:'#34546c',rightOffset:2,barSpacing:11,minBarSpacing:3,timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false,shiftVisibleRangeOnNewBar:false},
   crosshair:{mode:L.CrosshairMode.Normal,vertLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'},horzLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'}},
   kineticScroll:{touch:true,mouse:true},
   handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:true},
@@ -3744,11 +3779,13 @@ function initChart(){
   handleScroll:false,handleScale:false,crosshair:{mode:L.CrosshairMode.Normal}
  });
  rsiSeries=rsiChart.addLineSeries({color:colors.rsi,lineWidth:2,priceLineVisible:false,lastValueVisible:true});
+ // A drag or wheel gesture immediately takes control from auto-scrolling.
+ for(const event of ['pointerdown','touchstart','wheel'])$('canvas').addEventListener(event,stopSmoothScroll,{passive:true});
  // Keep RSI time aligned with the BTC chart when panning/zooming.
  lwChart.timeScale().subscribeVisibleLogicalRangeChange(range=>{
   if(!range||syncing)return;
   syncing=true;try{rsiChart.timeScale().setVisibleLogicalRange(range)}catch(_){}syncing=false;
-  if(!applyingData)persistView();
+  if(!applyingData&&!scrollFrame)persistView();
  });
  lwChart.subscribeCrosshairMove(param=>{
   if(!param||!param.time||!param.seriesData){return;}
@@ -3768,15 +3805,22 @@ function persistView(){
 }
 function redrawData(preserve=true){
  refreshToggles();if(!initChart())return;
+ stopSmoothScroll();
  applyingData=true;
  let oldRange=preserve?lwChart.timeScale().getVisibleLogicalRange():null;
  const newC=chartRows(D),newN=newC.length;
  if(!newN){applyingData=false;return;}
- candleSeries.setData(newC);
- for(const k of ['ema9','ema21','vwap']){overlays[k].setData(seriesRows(k));overlays[k].applyOptions({visible:!!toggles[k]});}
- volumeSeries.setData((D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r.volume)).map(r=>({time:r.t,value:r.volume,color:r.close>=r.open?'#00dfb573':'#e64b4b73'})));
+ const previous=seriesCache.get(candleSeries)||[];
+ const oldN=previous.length,oldLast=oldN?previous[oldN-1].time:null;
+ const anchorIndex=oldLast==null?-1:newC.findIndex(row=>row.time===oldLast);
+ const anchorShift=anchorIndex<0?0:anchorIndex-(oldN-1);
+ const appended=anchorIndex<0?0:newN-1-anchorIndex;
+ const following=oldRange&&oldN&&oldRange.to>=oldN-1-.5;
+ syncSeries(candleSeries,newC,!preserve);
+ for(const k of ['ema9','ema21','vwap']){syncSeries(overlays[k],seriesRows(k),!preserve);overlays[k].applyOptions({visible:!!toggles[k]});}
+ syncSeries(volumeSeries,(D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r.volume)).map(r=>({time:r.t,value:r.volume,color:r.close>=r.open?'#00dfb573':'#e64b4b73'})),!preserve);
  volumeSeries.applyOptions({visible:!!toggles.volume});
- rsiSeries.setData(seriesRows('rsi'));
+ syncSeries(rsiSeries,seriesRows('rsi'),!preserve);
  $('rsi-pane').style.display=toggles.rsi?'block':'none';
  for(const l of levelLines)candleSeries.removePriceLine(l);levelLines=[];
  for(const [value,label,color] of [[D.target,'TARGET','#f1c46b'],[D.support,'SUPPORT','#00dfb5'],[D.resistance,'RESISTANCE','#e64b4b']]){
@@ -3784,9 +3828,10 @@ function redrawData(preserve=true){
  }
  try{
   if(oldRange&&preserve){
-   // Preserve the user's camera even when a new candle arrives.
-   // Move one logical bar if old range was already anchored to the live edge.
-   lwChart.timeScale().setVisibleLogicalRange(oldRange);
+   // Remap the camera if the provider removed old candles from its window.
+   const mapped={from:oldRange.from+anchorShift,to:oldRange.to+anchorShift};
+   lwChart.timeScale().setVisibleLogicalRange(mapped);
+   if(following&&appended>0)smoothRange({from:mapped.from+appended,to:mapped.to+appended});
   }else if(saved.visible){
    lwChart.timeScale().setVisibleLogicalRange({from:Math.max(0,newN-saved.visible-saved.offset),to:newN-1-saved.offset});
   }else{
@@ -3798,11 +3843,11 @@ function redrawData(preserve=true){
  applyingData=false;
 }
 function draw(){redrawData(true)}
-$('zoomin').onclick=()=>{if(!lwChart)return;const t=lwChart.timeScale(),r=t.getVisibleLogicalRange();if(r){const m=(r.from+r.to)/2,w=(r.to-r.from)*.72;t.setVisibleLogicalRange({from:m-w/2,to:m+w/2})}};
-$('zoomout').onclick=()=>{if(!lwChart)return;const t=lwChart.timeScale(),r=t.getVisibleLogicalRange();if(r){const m=(r.from+r.to)/2,w=(r.to-r.from)*1.35;t.setVisibleLogicalRange({from:m-w/2,to:m+w/2})}};
-$('older').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToPosition(lwChart.timeScale().scrollPosition()+10,false)};
-$('newer').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToPosition(lwChart.timeScale().scrollPosition()-10,false)};
-$('reset').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToRealTime();persistView()};
+$('zoomin').onclick=()=>{if(!lwChart)return;const t=lwChart.timeScale(),r=t.getVisibleLogicalRange();if(r){const m=(r.from+r.to)/2,w=(r.to-r.from)*.72;smoothRange({from:m-w/2,to:m+w/2})}};
+$('zoomout').onclick=()=>{if(!lwChart)return;const t=lwChart.timeScale(),r=t.getVisibleLogicalRange();if(r){const m=(r.from+r.to)/2,w=(r.to-r.from)*1.35;smoothRange({from:m-w/2,to:m+w/2})}};
+$('older').onclick=()=>{if(!lwChart)return;const r=lwChart.timeScale().getVisibleLogicalRange();if(r)smoothRange({from:r.from-10,to:r.to-10})};
+$('newer').onclick=()=>{if(!lwChart)return;const r=lwChart.timeScale().getVisibleLogicalRange();if(r)smoothRange({from:r.from+10,to:r.to+10})};
+$('reset').onclick=()=>{if(!lwChart)return;const r=lwChart.timeScale().getVisibleLogicalRange(),n=chartRows(D).length;if(r&&n){const end=n+1.5;smoothRange({from:end-(r.to-r.from),to:end})}};
 // Controls call draw(), so toggles update the native series without a new chart element.
 window.addEventListener('message',function(event){
  if(!event.data||event.data.kind!=='alpha-chart-update')return;
