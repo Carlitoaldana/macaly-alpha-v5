@@ -2237,6 +2237,81 @@ def _ut_bot_events(df, minutes, now):
     return provisional, confirmed, confirmed_at, prior_side, closed_move
 
 
+def _strong_market_context(one, live_price, now=None):
+    """Mandatory entry evidence, measured on completed one-minute candles.
+
+    A relative-strength heuristic, not a prediction of the round outcome.
+    Neutrality never expires on a timer and cannot be bypassed by an old UT side.
+    """
+    blocked = {"allowed": False, "direction": None, "reason": "SIN DATOS ACTUALES"}
+    try:
+        now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+        now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+        x = one.copy().sort_values("time")
+        x["time"] = pd.to_datetime(x["time"], utc=True, errors="coerce")
+        x = x[x["time"] + pd.Timedelta(minutes=1) <= now].tail(26)
+        if len(x) != 26 or not x["time"].diff().iloc[1:].eq(pd.Timedelta(minutes=1)).all():
+            return blocked
+        a = x[["open", "high", "low", "close", "volume", "atr"]].astype(float).to_numpy()
+        if (not np.all(np.isfinite(a)) or np.any(a[:, :4] <= 0) or
+                np.any(a[:, 4] < 0) or np.any(a[:, 1] < a[:, 2]) or
+                np.any(a[:, 1] < np.maximum(a[:, 0], a[:, 3])) or
+                np.any(a[:, 2] > np.minimum(a[:, 0], a[:, 3])) or
+                (now-(x["time"].iloc[-1]+pd.Timedelta(minutes=1))).total_seconds() > 90):
+            return blocked
+        atr = float(np.median(a[-6:-1, 5]))
+        price = float(live_price)
+        if not np.isfinite(price) or price <= 0 or atr <= 0:
+            return blocked
+        moves = np.diff(a[:, 3]); recent = moves[-3:]; net = float(recent.sum())
+        sign = 1 if net > 0 else -1
+        side = "UP" if sign == 1 else "DOWN"
+        efficiency3 = abs(net)/max(float(np.abs(recent).sum()), 1e-12)
+        efficiency5 = abs(float(moves[-5:].sum()))/max(float(np.abs(moves[-5:]).sum()), 1e-12)
+        baseline_step = float(np.mean(np.abs(moves[:-5])))
+        recent_step = float(np.mean(np.abs(recent)))
+        pace = recent_step/max(baseline_step, 1e-12)
+        base_volume = float(np.mean(a[:-5, 4])); recent_volume = float(np.mean(a[-3:, 4]))
+        volume = recent_volume/base_volume if base_volume > 0 else 0.0
+        body_ratio = float(np.mean(np.abs(a[-3:, 3]-a[-3:, 0])/np.maximum(a[-3:, 1]-a[-3:, 2], 1e-12)))
+        strength = abs(net)/atr
+        coherent = (efficiency3 >= .75 and efficiency5 >= .60 and
+                    int(np.sum(recent*sign > 0)) >= 2)
+        strong = (strength >= 1.0 and pace >= .85 and body_ratio >= .40 and
+                  float(recent[-2:].sum())*sign >= .45*atr and recent[-1]*sign >= .10*atr)
+        activity = base_volume > 0 and recent_volume > 0 and volume >= .85
+        live_ok = sign*(price-a[-1, 3]) >= -.15*atr
+        allowed = bool(coherent and strong and activity and live_ok)
+        reason = ("IMPULSO FUERTE" if allowed else "MERCADO LENTO O INDECISO" if not coherent or not strong
+                  else "VOLUMEN INSUFICIENTE" if not activity else "IMPULSO PERDIENDO CONTINUIDAD")
+        return {"allowed": allowed, "direction": side if allowed else None, "reason": reason,
+                "evaluated_at": now.timestamp(), "atr": atr, "strength_atr": strength,
+                "efficiency3": efficiency3, "efficiency5": efficiency5,
+                "pace": pace, "volume_ratio": volume, "body_ratio": body_ratio,
+                "last_closed_price": float(a[-1, 3])}
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+        return blocked
+
+
+def _market_entry_allowed(signal, side, now=None):
+    """Shared by generator and confirmer; absent/stale evidence blocks entries."""
+    signal = signal or {}
+    gate = signal.get("market_entry_gate") or {}
+    stamp = _plan_number(gate.get("evaluated_at"))
+    current = pd.Timestamp.now(tz="UTC").timestamp() if now is None else pd.Timestamp(now).timestamp()
+    return (signal.get("data_valid") is not False and side in ("UP", "DOWN") and
+            gate.get("allowed") is True and gate.get("direction") == side and
+            stamp is not None and 0 <= current-stamp <= SIGNAL_CONFIRM_MAX_GAP)
+
+
+def _pause_market_signal(state, reason):
+    # Preserve the first real signal and its outcome; pause only the live arrow.
+    state.update(active_direction=None, active_since=None, pending_direction=None,
+                 pending_count=0, pending_since=None, pending_last_at=None,
+                 pending_price_source=None, opening_market_samples=[],
+                 market_wait_reason=reason, opening_conflict=reason)
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -2255,6 +2330,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
     trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
     impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
+    market_gate = _strong_market_context(one, price)
     # Evaluate all routes for both directions before choosing any candidate.
     flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
     flow_context = {"direction":flow_side, "valid":False}
@@ -2281,7 +2357,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"ut_signal":ut,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"market_entry_gate":market_gate,"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"ut_signal":ut,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
@@ -2562,10 +2638,22 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state.update(active_direction=None, active_since=None, exit_plan=None, ut_round_policy=1)
 
     signal = signal or {}
+    gate = signal.get("market_entry_gate") or {}
+    gate_side = gate.get("direction")
+    if not _market_entry_allowed(signal, gate_side, now):
+        _pause_market_signal(state, gate.get("reason") or "SIN DATOS ACTUALES")
+        return
+    observed = getattr(_PRICE_OBSERVATIONS, "values", {}).get(signal.get("price_source"))
+    if (signal.get("price_source") not in ("COINBASE", "KALSHI LIVE") or observed is None or
+            not np.isfinite(observed) or not 0 <= now_ts.timestamp()-observed <= SIGNAL_CONFIRM_MAX_GAP):
+        _pause_market_signal(state, "SIN PRECIO EN VIVO ACTUAL")
+        return
+    if state.get("active_direction") not in (None, gate_side):
+        _pause_market_signal(state, "REEVALUANDO DIRECCIÓN DEL IMPULSO")
+    state["market_wait_reason"] = None
     if (pd.isna(round_open) or pd.isna(end) or not round_open <= now_ts < end
             or signal.get("data_valid") is False):
-        if state.get("first_direction") is None:
-            state["opening_market_samples"] = []
+        _pause_market_signal(state, "SIN RONDA O DATOS ACTUALES")
         return
     seconds_left = (end - now_ts).total_seconds()
 
@@ -2581,12 +2669,14 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         saved_at = event_at
     side = state.get("ut_side")
     if side not in ("UP", "DOWN") or pd.isna(saved_at) or saved_at > now_ts:
+        _pause_market_signal(state, "SIN DIRECCIÓN CONFIRMADA")
         return
 
     active = state.get("active_direction")
     if state.get("first_direction") is None:
         confirmed = _round_opening_crosscheck(state, candidate, signal, now, market)
         if confirmed != side:
+            state.update(active_direction=None, active_since=None)
             return
         received_at = pd.to_datetime(ut.get("received_at"), utc=True, errors="coerce")
         if (now_ts < round_open + pd.Timedelta(seconds=NEW_ROUND_WAIT)
@@ -2615,8 +2705,14 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         elif active is None:
             active = fallback
 
-    if active not in ("UP", "DOWN"):
+    if not _market_entry_allowed(signal, active, now):
+        _pause_market_signal(state, "DIRECCIÓN SIN IMPULSO FUERTE")
         return
+    if state.get("active_direction") != active:
+        # Fresh observations are mandatory for re-entry and reversal as well.
+        if _round_opening_crosscheck(state, active, signal, now, market) != active:
+            state.update(active_direction=None, active_since=None)
+            return
     if state.get("active_direction") != active:
         state.update(active_direction=active, active_since=now)
     if state.get("first_direction") is None:
@@ -2758,7 +2854,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_recheck_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_strong_market_gate_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3080,6 +3176,12 @@ def closing_reader(sig, round_signal, seconds_left, micro):
         except (TypeError, ValueError, OverflowError):
             return None
 
+    if not (sig.get("market_entry_gate") or {}).get("allowed", False):
+        return {"percent": 0, "direction": None, "headline": "ESPERANDO",
+                "note": "Sin impulso fuerte y sostenido; señales bloqueadas.",
+                "micro": "ESPERANDO IMPULSO", "color": "#94a3b8",
+                "border": "rgba(148,163,184,.45)",
+                "bg": "linear-gradient(135deg,rgba(30,41,59,.45),rgba(9,23,34,.72))"}
     seconds = finite(seconds_left)
     distance = finite(sig.get("distance"))
     price = finite(sig.get("price"))
@@ -4050,7 +4152,8 @@ def live_dashboard():
     micro = micro_reading()
     # El panel permanece visible; solo la predicción se activa en los últimos 90 segundos.
     # La cinta de precios y las métricas continúan actualizándose durante toda la ronda.
-    reader_active = seconds_left is not None and 0 < seconds_left <= 90
+    reader_active = (seconds_left is not None and 0 < seconds_left <= 90
+                     and (sig.get("market_entry_gate") or {}).get("allowed", False))
     reader = closing_reader(sig, round_signal, seconds_left, micro)
     if not btc_ok:
         reader = {**reader, "percent":0, "headline":"SIN DATOS ACTUALES",
@@ -4269,6 +4372,17 @@ def live_dashboard():
 
 '''
 
+    gate = sig.get("market_entry_gate") or {}
+    market_blocked = not gate.get("allowed", False)
+    market_alert = ""
+    if market_blocked:
+        label = ("DATOS INSUFICIENTES · SIN SEÑAL" if gate.get("reason") == "SIN DATOS ACTUALES"
+                 else "MERCADO LENTO O INDECISO · SIN SEÑAL")
+        market_alert = ('<div class="market-pause-alert" role="status" aria-live="polite" '
+                        'style="margin:8px 0 12px;padding:11px 10px;border:1px solid #f1c46b;'
+                        'border-radius:12px;background:#392c10;color:#ffe29a;text-align:center;'
+                        'font-size:12px;font-weight:800;line-height:1.5">⚠ ' + label +
+                        '<br><span style="font-weight:500">Esperando impulso fuerte y sostenido</span></div>')
     panel_html = f"""
 <style>
 /* app 31: conserve el encabezado dibujado en el fondo; solo un logo y titulo. */
@@ -4319,6 +4433,7 @@ def live_dashboard():
     <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
   </section>
 
+  {market_alert}
   {weakness_html}
 
   {pre_html}
@@ -4647,9 +4762,14 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     pre = build_presignal(sig, seconds_left)
     sig["presignal"] = pre
     direction = sig["ut_signal"]["direction"]
-    if seconds_left is not None and 0 < seconds_left <= 900 and target is not None and direction:
+    if (seconds_left is not None and 0 < seconds_left <= 900 and target is not None
+            and _market_entry_allowed(sig, direction)):
         sig["candidate"] = direction
         sig["quality"] = sig["entry_route_internal"] = "SEÑAL DIRECTA"
+
+    if not _market_entry_allowed(sig, direction):
+        sig["candidate"] = None
+        sig["quality"] = sig["entry_route_internal"] = "ESPERANDO · " + sig["market_entry_gate"]["reason"]
 
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
@@ -4664,6 +4784,9 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
+    if not _market_entry_allowed(signal, state.get("active_direction"), now):
+        gate = (signal or {}).get("market_entry_gate") or {}
+        _pause_market_signal(state, state.get("market_wait_reason") or gate.get("reason") or "SIN IMPULSO FUERTE")
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
     if not isinstance(state.get("exit_plan"), dict) and state.get("first_direction") in ("UP", "DOWN"):
         state["exit_plan"] = make_exit_plan(state, signal, seconds_left, now)
