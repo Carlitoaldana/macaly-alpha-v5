@@ -2237,58 +2237,94 @@ def _ut_bot_events(df, minutes, now):
     return provisional, confirmed, confirmed_at, prior_side, closed_move
 
 
-def _strong_market_context(one, live_price, now=None):
-    """Mandatory entry evidence, measured on completed one-minute candles.
+def _market_window_evidence(a):
+    """Closed-candle evidence: stricter activation, gentler continuation."""
+    atr = float(np.median(a[-6:-1, 5]))
+    if not np.all(np.isfinite(a)) or atr <= 0:
+        return None
+    moves = np.diff(a[:, 3]); recent = moves[-3:]; net = float(recent.sum())
+    sign = 1 if net > 0 else -1
+    efficiency3 = abs(net)/max(float(np.abs(recent).sum()), 1e-12)
+    efficiency5 = abs(float(moves[-5:].sum()))/max(float(np.abs(moves[-5:]).sum()), 1e-12)
+    pace = float(np.mean(np.abs(recent)))/max(float(np.mean(np.abs(moves[:-5]))), 1e-12)
+    base_volume = float(np.mean(a[:-5, 4])); recent_volume = float(np.mean(a[-3:, 4]))
+    volume = recent_volume/base_volume if base_volume > 0 else 0.0
+    body_ratio = float(np.mean(np.abs(a[-3:, 3]-a[-3:, 0])/np.maximum(a[-3:, 1]-a[-3:, 2], 1e-12)))
+    strength = abs(net)/atr
+    coherent = efficiency3 >= .75 and efficiency5 >= .60 and int(np.sum(recent*sign > 0)) >= 2
+    strong = (strength >= 1.0 and pace >= .85 and body_ratio >= .40 and
+              float(recent[-2:].sum())*sign >= .45*atr and recent[-1]*sign >= .10*atr)
+    activity = base_volume > 0 and recent_volume > 0 and volume >= .85
+    # A normal pullback need not meet the original activation thresholds again.
+    # Sustained flat/choppy/low-volume evidence still shuts the regime down.
+    continuing = (strength >= .40 and efficiency3 >= .35 and efficiency5 >= .25
+                  and pace >= .40 and volume >= .50 and recent_volume > 0)
+    return {"strong_entry": bool(coherent and strong and activity),
+            "continuing": bool(continuing), "direction": "UP" if sign == 1 else "DOWN",
+            "net": net, "atr": atr, "strength_atr": strength,
+            "efficiency3": efficiency3, "efficiency5": efficiency5,
+            "pace": pace, "volume_ratio": volume, "body_ratio": body_ratio}
 
-    A relative-strength heuristic, not a prediction of the round outcome.
-    Neutrality never expires on a timer and cannot be bypassed by an old UT side.
+
+def _strong_market_context(one, live_price, now=None):
+    """Replay observed closed candles, independent of refreshes and round changes.
+
+    Strong evidence activates immediately. Three consecutive completed one-minute
+    evaluations without continuation deactivate. Repeated ticks never count as
+    additional weak candles. Re-entry always needs strong evidence again.
+    This is a market-regime heuristic, not a calibrated forecast.
     """
     blocked = {"allowed": False, "direction": None, "reason": "SIN DATOS ACTUALES"}
     try:
         now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
         now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
-        x = one.copy().sort_values("time")
+        x = one.copy()
         x["time"] = pd.to_datetime(x["time"], utc=True, errors="coerce")
-        x = x[x["time"] + pd.Timedelta(minutes=1) <= now].tail(26)
-        if len(x) != 26 or not x["time"].diff().iloc[1:].eq(pd.Timedelta(minutes=1)).all():
+        x = x.sort_values("time")
+        x = x[x["time"] + pd.Timedelta(minutes=1) <= now]
+        if len(x) < 26:
             return blocked
-        a = x[["open", "high", "low", "close", "volume", "atr"]].astype(float).to_numpy()
-        if (not np.all(np.isfinite(a)) or np.any(a[:, :4] <= 0) or
-                np.any(a[:, 4] < 0) or np.any(a[:, 1] < a[:, 2]) or
-                np.any(a[:, 1] < np.maximum(a[:, 0], a[:, 3])) or
-                np.any(a[:, 2] > np.minimum(a[:, 0], a[:, 3])) or
+        latest = x.tail(26)
+        if (not latest["time"].diff().iloc[1:].eq(pd.Timedelta(minutes=1)).all() or
                 (now-(x["time"].iloc[-1]+pd.Timedelta(minutes=1))).total_seconds() > 90):
             return blocked
-        atr = float(np.median(a[-6:-1, 5]))
+        a = x[["open", "high", "low", "close", "volume", "atr"]].astype(float).to_numpy()
+        valid = (np.all(np.isfinite(a), axis=1) & np.all(a[:, :4] > 0, axis=1) &
+                 (a[:, 4] >= 0) & (a[:, 1] >= a[:, 2]) &
+                 (a[:, 1] >= np.maximum(a[:, 0], a[:, 3])) &
+                 (a[:, 2] <= np.minimum(a[:, 0], a[:, 3])))
         price = float(live_price)
-        if not np.isfinite(price) or price <= 0 or atr <= 0:
+        if not valid[-26:].all() or not np.isfinite(price) or price <= 0:
             return blocked
-        moves = np.diff(a[:, 3]); recent = moves[-3:]; net = float(recent.sum())
-        sign = 1 if net > 0 else -1
-        side = "UP" if sign == 1 else "DOWN"
-        efficiency3 = abs(net)/max(float(np.abs(recent).sum()), 1e-12)
-        efficiency5 = abs(float(moves[-5:].sum()))/max(float(np.abs(moves[-5:]).sum()), 1e-12)
-        baseline_step = float(np.mean(np.abs(moves[:-5])))
-        recent_step = float(np.mean(np.abs(recent)))
-        pace = recent_step/max(baseline_step, 1e-12)
-        base_volume = float(np.mean(a[:-5, 4])); recent_volume = float(np.mean(a[-3:, 4]))
-        volume = recent_volume/base_volume if base_volume > 0 else 0.0
-        body_ratio = float(np.mean(np.abs(a[-3:, 3]-a[-3:, 0])/np.maximum(a[-3:, 1]-a[-3:, 2], 1e-12)))
-        strength = abs(net)/atr
-        coherent = (efficiency3 >= .75 and efficiency5 >= .60 and
-                    int(np.sum(recent*sign > 0)) >= 2)
-        strong = (strength >= 1.0 and pace >= .85 and body_ratio >= .40 and
-                  float(recent[-2:].sum())*sign >= .45*atr and recent[-1]*sign >= .10*atr)
-        activity = base_volume > 0 and recent_volume > 0 and volume >= .85
-        live_ok = sign*(price-a[-1, 3]) >= -.15*atr
-        allowed = bool(coherent and strong and activity and live_ok)
-        reason = ("IMPULSO FUERTE" if allowed else "MERCADO LENTO O INDECISO" if not coherent or not strong
-                  else "VOLUMEN INSUFICIENTE" if not activity else "IMPULSO PERDIENDO CONTINUIDAD")
-        return {"allowed": allowed, "direction": side if allowed else None, "reason": reason,
-                "evaluated_at": now.timestamp(), "atr": atr, "strength_atr": strength,
-                "efficiency3": efficiency3, "efficiency5": efficiency5,
-                "pace": pace, "volume_ratio": volume, "body_ratio": body_ratio,
-                "last_closed_price": float(a[-1, 3])}
+        active = False; weak = 0; side = None; evidence = None
+        stamps = x["time"].reset_index(drop=True)
+        for end in range(26, len(a)+1):
+            start = end-26
+            contiguous = stamps.iloc[start:end].diff().iloc[1:].eq(pd.Timedelta(minutes=1)).all()
+            evidence = _market_window_evidence(a[start:end]) if valid[start:end].all() and contiguous else None
+            if evidence is None:
+                active = False; weak = 0; side = None
+                continue
+            if evidence["strong_entry"]:
+                active = True; weak = 0
+            elif active:
+                weak = 0 if evidence["continuing"] else weak+1
+                if weak >= 3:
+                    active = False; side = None
+            if active and evidence["net"] != 0:
+                side = evidence["direction"]
+        if evidence is None:
+            return blocked
+        allowed = bool(active and side in ("UP", "DOWN"))
+        # Live retracements can defer a specific entry, but never blink the
+        # market-regime banner between closed-candle evaluations.
+        live_ok = bool(side and (1 if side == "UP" else -1)*(price-a[-1, 3]) >= -.15*evidence["atr"])
+        return {**evidence, "allowed": allowed, "direction": side if allowed else None,
+                "reason": ("IMPULSO FUERTE" if evidence["strong_entry"] else "MERCADO ACTIVO")
+                          if allowed else "MERCADO LENTO O INDECISO",
+                "evaluated_at": now.timestamp(), "live_entry_ok": live_ok,
+                "weak_closed_evaluations": weak, "last_closed_price": float(a[-1, 3]),
+                "last_closed_at": stamps.iloc[-1].isoformat()}
     except (KeyError, TypeError, ValueError, IndexError, OverflowError):
         return blocked
 
@@ -2300,7 +2336,8 @@ def _market_entry_allowed(signal, side, now=None):
     stamp = _plan_number(gate.get("evaluated_at"))
     current = pd.Timestamp.now(tz="UTC").timestamp() if now is None else pd.Timestamp(now).timestamp()
     return (signal.get("data_valid") is not False and side in ("UP", "DOWN") and
-            gate.get("allowed") is True and gate.get("direction") == side and
+            gate.get("allowed") is True and gate.get("live_entry_ok", True) is True and
+            gate.get("direction") == side and
             stamp is not None and 0 <= current-stamp <= SIGNAL_CONFIRM_MAX_GAP)
 
 
@@ -2854,7 +2891,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_strong_market_gate_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_strong_market_gate_v2_closed_candle_hysteresis"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
