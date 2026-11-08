@@ -2238,39 +2238,52 @@ def _ut_bot_events(df, minutes, now):
 
 
 def _market_window_evidence(a):
-    """Closed-candle evidence: stricter activation, gentler continuation."""
-    atr = float(np.median(a[-6:-1, 5]))
-    if not np.all(np.isfinite(a)) or atr <= 0:
+    """Measure activity without requiring a directional trend.
+
+    Only explicit compression of both price travel and candle ranges counts as
+    slow evidence. Direction changes and volume alone never close the gate.
+    Thresholds are relative to the observed volatility, not a fixed BTC distance.
+    """
+    if not np.all(np.isfinite(a)):
         return None
-    moves = np.diff(a[:, 3]); recent = moves[-3:]; net = float(recent.sum())
-    sign = 1 if net > 0 else -1
-    efficiency3 = abs(net)/max(float(np.abs(recent).sum()), 1e-12)
-    efficiency5 = abs(float(moves[-5:].sum()))/max(float(np.abs(moves[-5:]).sum()), 1e-12)
-    pace = float(np.mean(np.abs(recent)))/max(float(np.mean(np.abs(moves[:-5]))), 1e-12)
-    base_volume = float(np.mean(a[:-5, 4])); recent_volume = float(np.mean(a[-3:, 4]))
-    volume = recent_volume/base_volume if base_volume > 0 else 0.0
-    body_ratio = float(np.mean(np.abs(a[-3:, 3]-a[-3:, 0])/np.maximum(a[-3:, 1]-a[-3:, 2], 1e-12)))
-    strength = abs(net)/atr
-    coherent = efficiency3 >= .75 and efficiency5 >= .60 and int(np.sum(recent*sign > 0)) >= 2
-    strong = (strength >= 1.0 and pace >= .85 and body_ratio >= .40 and
-              float(recent[-2:].sum())*sign >= .45*atr and recent[-1]*sign >= .10*atr)
-    activity = base_volume > 0 and recent_volume > 0 and volume >= .85
-    # A normal pullback need not meet the original activation thresholds again.
-    # Sustained flat/choppy/low-volume evidence still shuts the regime down.
-    continuing = (strength >= .40 and efficiency3 >= .35 and efficiency5 >= .25
-                  and pace >= .40 and volume >= .50 and recent_volume > 0)
-    return {"strong_entry": bool(coherent and strong and activity),
-            "continuing": bool(continuing), "direction": "UP" if sign == 1 else "DOWN",
-            "net": net, "atr": atr, "strength_atr": strength,
+    atr = float(np.median(a[-6:-1, 5]))
+    if atr <= 0:
+        return None
+    moves = np.diff(a[:, 3])
+    recent = moves[-3:]
+    net = float(recent.sum())
+    ranges = a[:, 1] - a[:, 2]
+    # A price-relative floor prevents hours of tiny candles from becoming
+    # "active" merely because the rolling ATR has also shrunk to nearly zero.
+    reference = max(atr, float(np.median(ranges[:-6])),
+                    float(np.median(a[:, 3])) * .00005, 1e-12)
+    # Six completed minutes describe the regime; single candles do not toggle it.
+    travel = float(np.abs(moves[-6:]).sum()) / reference
+    mean_range = float(np.mean(ranges[-6:])) / reference
+    span = float(np.max(a[-6:, 1]) - np.min(a[-6:, 2])) / reference
+    slow = travel <= .90 and mean_range <= .40 and span <= .85
+    active = travel >= 1.80 and mean_range >= .55 and span >= 1.10
+    efficiency3 = abs(net) / max(float(np.abs(recent).sum()), 1e-12)
+    efficiency5 = abs(float(moves[-5:].sum())) / max(float(np.abs(moves[-5:]).sum()), 1e-12)
+    base_volume = float(np.mean(a[:-6, 4]))
+    volume = float(np.mean(a[-6:, 4])) / base_volume if base_volume > 0 else 0.0
+    return {"strong_entry": bool(active), "continuing": bool(not slow),
+            "slow_evidence": bool(slow),
+            "direction": "UP" if net >= 0 else "DOWN", "net": net,
+            "atr": atr, "strength_atr": abs(net)/atr,
             "efficiency3": efficiency3, "efficiency5": efficiency5,
-            "pace": pace, "volume_ratio": volume, "body_ratio": body_ratio}
+            "pace": travel/6, "volume_ratio": volume,
+            "body_ratio": float(np.mean(np.abs(a[-6:, 3]-a[-6:, 0]) /
+                                         np.maximum(ranges[-6:], 1e-12))),
+            "activity_travel": travel, "activity_range": mean_range,
+            "activity_span": span}
 
 
 def _strong_market_context(one, live_price, now=None):
     """Replay observed closed candles, independent of refreshes and round changes.
 
-    Strong evidence activates immediately. Three consecutive completed one-minute
-    evaluations without continuation deactivate. Repeated ticks never count as
+    Sustained activity activates the gate. Three consecutive completed one-minute
+    evaluations with explicit slow compression deactivate. Repeated ticks never count as
     additional weak candles. Re-entry always needs strong evidence again.
     This is a market-regime heuristic, not a calibrated forecast.
     """
@@ -2308,20 +2321,20 @@ def _strong_market_context(one, live_price, now=None):
             if evidence["strong_entry"]:
                 active = True; weak = 0
             elif active:
-                weak = 0 if evidence["continuing"] else weak+1
+                weak = weak+1 if evidence["slow_evidence"] else 0
                 if weak >= 3:
                     active = False; side = None
             if active and evidence["net"] != 0:
                 side = evidence["direction"]
         if evidence is None:
             return blocked
-        allowed = bool(active and side in ("UP", "DOWN"))
+        allowed = bool(active)
         # Live retracements can defer a specific entry, but never blink the
         # market-regime banner between closed-candle evaluations.
         live_ok = bool(side and (1 if side == "UP" else -1)*(price-a[-1, 3]) >= -.15*evidence["atr"])
         return {**evidence, "allowed": allowed, "direction": side if allowed else None,
                 "reason": ("IMPULSO FUERTE" if evidence["strong_entry"] else "MERCADO ACTIVO")
-                          if allowed else "MERCADO LENTO O INDECISO",
+                          if allowed else "MERCADO LENTO",
                 "evaluated_at": now.timestamp(), "live_entry_ok": live_ok,
                 "weak_closed_evaluations": weak, "last_closed_price": float(a[-1, 3]),
                 "last_closed_at": stamps.iloc[-1].isoformat()}
@@ -2889,7 +2902,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_strong_market_gate_v3_activity_separate_from_ut"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_strong_market_gate_v4_sustained_compression"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
