@@ -3834,50 +3834,26 @@ def signal_requirement_view(sig, seconds_left):
 
 
 def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
-    """One visual box for individual conditions; never changes confirmation."""
+    """Display the exact admission booleans for BOTH sides; no trading changes."""
     view = signal_requirement_view(sig, seconds_left)
-    state = round_signal.get('round_state') or {}
-    now = now or datetime.now(timezone.utc)
-    end = pd.to_datetime((market or {}).get('close_time'), utc=True, errors='coerce')
-    closed = seconds_left is not None and seconds_left <= 0
-    if not pd.isna(end):
-        closed = closed or end <= pd.Timestamp(now)
-    ready = view['valid'] and bool(state) and not closed and not pd.isna(end)
-    side = sig.get('candidate')
-    if side not in ('UP', 'DOWN'):
-        # La dirección histórica no decide qué requisitos se inspeccionan.
-        # Sin candidatura válida, mostrar el lado de mayor evidencia ACTUAL,
-        # sin convertirlo en señal oficial.
-        current_score = sig.get('final_score')
-        if current_score is not None:
-            try:
-                value = float(current_score)
-                if np.isfinite(value) and value != 0:
-                    side = 'UP' if value > 0 else 'DOWN'
-            except (TypeError, ValueError):
-                pass
-    if side not in ('UP', 'DOWN') and view['valid']:
-        side = max(('UP', 'DOWN'), key=lambda d: max(r['met']/r['total'] for r in view['sides'][d]))
-    checks = []
-    if view['valid'] and side in ('UP', 'DOWN'):
-        routes = view['sides'][side]
-        # Mostrar solo rutas de tendencia y entrada temprana.
-        complete = [r for r in routes if r['complete']]
-        route = complete[0] if complete else max(routes, key=lambda r: r['met']/r['total'])
-        checks = route['checks']
-    total = len(checks)
-    met = sum(bool(ok) for _, ok in checks) if ready else 0
-    # Cada nombre corresponde al mismo booleano que controla su barra.
-    bars = ''.join(
-        '<div class="sq-item"><i' + (' class="sq-on"' if ready and ok else '') +
-        ' title="' + html.escape(label, quote=True) + '"></i>' +
-        '<span>' + html.escape(label) + '</span></div>'
-        for label, ok in checks
-    )
-    label = 'REQUISITOS ' + side if side in ('UP','DOWN') else 'REQUISITOS DE LA SEÑAL'
-    note = 'RONDA TERMINADA' if closed else 'ESPERANDO DATOS' if not ready else 'Cada barra representa un requisito.'
-    number = str(met) + '<small>/' + str(total) + '</small>' if total else '—'
-    return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars .sq-item{flex:1;min-width:0;text-align:center}.sq-bars i{display:block;height:7px;width:100%;background:#1d3038;border-radius:9px}.sq-bars .sq-item span{display:block;margin-top:7px;font-size:9px;line-height:1.25;color:#a5b6be;overflow-wrap:anywhere}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
+    def esc(value):
+        return html.escape(str(value), quote=True)
+    style = '<style>.diag{margin:12px 0;padding:14px;border:1px solid #dfc58d;border-radius:14px;background:#081923;color:#eaf1f6}.diag h3{margin:0 0 10px;font-size:14px}.diag p{font-size:11px;line-height:1.5;color:#b6c3ce}.diag-side{margin-top:14px}.diag-row{padding:8px 0;border-bottom:1px solid #293b45;font-size:11px;line-height:1.45}.diag-state{font-weight:800}.diag-ok{color:#00d9b0}.diag-no{color:#ff646b}.diag-meter{height:6px;background:#273641;border-radius:8px;margin:8px 0;overflow:hidden}.diag-meter i{display:block;height:100%;background:#00d9b0}.diag-down .diag-meter i{background:#ff646b}.diag-values{font-size:10px;line-height:1.6;overflow-wrap:anywhere;color:#aabac4}</style>'
+    sections = []
+    if not view.get('valid'):
+        required = ('rsi','rsi3','rsi5','adx','vwap_atr','macd1','macd3','vol_ratio','mom3','mom5','target_atr','price_ema9_atr')
+        missing = [k for k in required if _plan_number(sig.get(k)) is None]
+        sections.append('<p>DATOS INSUFICIENTES: '+esc(', '.join(missing) or 'El motor marca los datos como no válidos')+'</p>')
+    else:
+        for side in ('UP','DOWN'):
+            route = view['sides'][side][0]
+            checks = route['checks']
+            blocked = [label for label, ok in checks if not ok]
+            rows = ''.join('<div class="diag-row"><span class="diag-state '+('diag-ok' if ok else 'diag-no')+'">'+('✓ CUMPLE' if ok else '✕ BLOQUEA')+'</span> · '+esc(label)+'</div>' for label,ok in checks)
+            summary = ('ÚLTIMO REQUISITO PENDIENTE: '+blocked[0]) if len(blocked)==1 else (str(len(blocked))+' requisitos bloquean ahora') if blocked else 'Todos los requisitos de entrada cumplidos'
+            sections.append('<div class="diag-side '+('diag-down' if side=='DOWN' else '')+'"><b>'+side+' · '+str(route['met'])+'/'+str(route['total'])+'</b><div class="diag-meter"><i style="width:'+str(100*route['met']/route['total'])+'%"></i></div><p>'+esc(summary)+'</p>'+rows+'</div>')
+    values = ' · '.join(esc(k)+': '+esc(round(float(sig[k]),4) if _plan_number(sig.get(k)) is not None else 'SIN DATO') for k in ('rsi','rsi3','rsi5','adx','vwap_atr','macd1','macd3','vol_ratio','mom3','mom5','target_atr','price_ema9_atr'))
+    return style+'<section class="diag"><h3>CONDICIONES DEL MOTOR · EN VIVO</h3><p>Estado actual de las condiciones reales de entrada. Se actualizan y pueden volver a dejar de cumplirse. No son probabilidades.</p>'+''.join(sections)+'<details><summary>Lecturas de los indicadores</summary><div class="diag-values">'+values+'</div></details><p>La confirmación final puede incluir controles adicionales de ronda. Este panel no desactiva filtros.</p></section>'
 
 
 
@@ -4299,6 +4275,8 @@ def live_dashboard():
   </section>
 
   {reader_html}
+
+  {render_signal_requirements(sig, round_signal, market, seconds_left)}
 
 
 
