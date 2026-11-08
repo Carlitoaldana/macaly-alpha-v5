@@ -2342,27 +2342,13 @@ def entry_quality(price, seconds_left):
 # =========================================================
 
 def _retention_assessment(state, signal):
-    """Separate affirmative, opposite and unknown evidence for an active side."""
+    """Use the same evidence families as entry/reversal decisions."""
     side = state.get("active_direction")
-    if side not in ("UP", "DOWN") or not signal or signal.get("data_valid") is False:
+    if side not in ("UP", "DOWN"):
         return 0, 0
-    sign = 1 if side == "UP" else -1
-    support = contrary = 0
-    ema = signal.get("ema")
-    if ema in ("BULL", "BEAR"):
-        if ema == ("BULL" if sign == 1 else "BEAR"):
-            support += 1
-        else:
-            contrary += 1
-    for name in ("mom5", "distance"):
-        value = _plan_number(signal.get(name))
-        if value is None:
-            continue
-        if value * sign > 0:
-            support += 1
-        elif value * sign < 0:
-            contrary += 1
-    return support, contrary
+    families = _direction_evidence(signal)
+    return (sum(v == side for v in families.values()),
+            sum(v != side for v in families.values()))
 
 
 def _retention_supported(state, signal, seconds_left):
@@ -2393,24 +2379,47 @@ def _review_active_retention(state, signal, seconds_left, now):
         state["retention_warning"] = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
 
 
-def _direction_consistent(candidate, signal):
-    """Prevent a new confirmation against the majority of available evidence.
-
-    Abstain if the EMA, momentum and target displacement disagree with the
-    proposed direction. Unknown values are not counted as votes.
-    """
-    if candidate not in ("UP", "DOWN") or not signal or signal.get("data_valid") is False:
-        return False
-    sign = 1 if candidate == "UP" else -1
-    votes = []
+def _direction_evidence(signal):
+    """Independent evidence families; price relative to target is NOT a trend vote."""
+    if not isinstance(signal, dict) or signal.get("data_valid") is False:
+        return {}
+    families = {}
     ema = signal.get("ema")
     if ema in ("BULL", "BEAR"):
-        votes.append(1 if ema == ("BULL" if sign == 1 else "BEAR") else -1)
-    for field in ("mom5", "distance"):
-        value = _plan_number(signal.get(field))
-        if value is not None and value != 0:
-            votes.append(1 if value * sign > 0 else -1)
-    return bool(votes) and sum(votes) > 0
+        families["trend"] = "UP" if ema == "BULL" else "DOWN"
+    # Short and medium trend belong to one family; disagreement abstains.
+    trends = [signal.get(k) for k in ("trend3", "trend5")]
+    trends = [v for v in trends if v in ("UP", "DOWN")]
+    if trends and len(set(trends)) == 1:
+        families["structure"] = trends[0]
+    rsi = _plan_number(signal.get("rsi"))
+    if rsi is not None and abs(rsi - 50) >= 3:
+        families["oscillator"] = "UP" if rsi > 50 else "DOWN"
+    momentum = [_plan_number(signal.get(k)) for k in ("mom3", "mom5")]
+    momentum = [v for v in momentum if v is not None and v != 0]
+    if momentum and all(v > 0 for v in momentum):
+        families["momentum"] = "UP"
+    elif momentum and all(v < 0 for v in momentum):
+        families["momentum"] = "DOWN"
+    return families
+
+
+def _direction_consistent(candidate, signal, active=None):
+    """Single policy for entry and reversal, using nonduplicated families.
+
+    Reversal requires stronger consensus than first entry; a transient
+    oscillation cannot override a previously confirmed signal.
+    """
+    if candidate not in ("UP", "DOWN"):
+        return False
+    families = _direction_evidence(signal)
+    if len(families) < 3:
+        return False
+    agree = sum(v == candidate for v in families.values())
+    oppose = len(families) - agree
+    if active in ("UP", "DOWN") and active != candidate:
+        return agree >= 3 and oppose == 0
+    return agree >= 3 and agree > oppose
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
@@ -2465,15 +2474,12 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """Confirmación compartida por la pantalla y el registrador de fondo.
-
-    La primera señal queda inmutable. Un cambio UP/DOWN posterior también
-    necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
-    la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
+    """One confirmation path for foreground and background. Neutral readings
+    cancel pending candidates, never erase a confirmed active direction.
     """
     # A candidate is not a confirmation when the available directional
     # evidence contradicts it. Keep the active signal while reassessing.
-    if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal):
+    if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
         candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
@@ -4537,12 +4543,13 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "multi_indicator_49":
-        state.update(signal_engine_revision="multi_indicator_49",
-                     active_direction=None, active_since=None,
-                     pending_direction=None, pending_count=0, pending_since=None,
-                     pending_last_at=None, pending_price_source=None,
-                     opening_gate_revision=None, opening_live_tapes={})
+    if state.get("signal_engine_revision") != "unified_evidence_v6":
+        # Migrate state without deleting the already confirmed direction.
+        state["signal_engine_revision"] = "unified_evidence_v6"
+        state.update(pending_direction=None, pending_count=0,
+                     pending_since=None, pending_last_at=None,
+                     pending_price_source=None)
+        state.setdefault("opening_live_tapes", {})
         _reset_withdrawal(state)
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
