@@ -2330,14 +2330,13 @@ def _strong_market_context(one, live_price, now=None):
 
 
 def _market_entry_allowed(signal, side, now=None):
-    """Shared by generator and confirmer; absent/stale evidence blocks entries."""
+    """Activity gate only; UT decides direction. Absent/stale evidence blocks entries."""
     signal = signal or {}
     gate = signal.get("market_entry_gate") or {}
     stamp = _plan_number(gate.get("evaluated_at"))
     current = pd.Timestamp.now(tz="UTC").timestamp() if now is None else pd.Timestamp(now).timestamp()
     return (signal.get("data_valid") is not False and side in ("UP", "DOWN") and
-            gate.get("allowed") is True and gate.get("live_entry_ok", True) is True and
-            gate.get("direction") == side and
+            gate.get("allowed") is True and
             stamp is not None and 0 <= current-stamp <= SIGNAL_CONFIRM_MAX_GAP)
 
 
@@ -2685,8 +2684,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             not np.isfinite(observed) or not 0 <= now_ts.timestamp()-observed <= SIGNAL_CONFIRM_MAX_GAP):
         _pause_market_signal(state, "SIN PRECIO EN VIVO ACTUAL")
         return
-    if state.get("active_direction") not in (None, gate_side):
-        _pause_market_signal(state, "REEVALUANDO DIRECCIÓN DEL IMPULSO")
     state["market_wait_reason"] = None
     if (pd.isna(round_open) or pd.isna(end) or not round_open <= now_ts < end
             or signal.get("data_valid") is False):
@@ -2748,7 +2745,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if state.get("active_direction") != active:
         # Fresh observations are mandatory for re-entry and reversal as well.
         if _round_opening_crosscheck(state, active, signal, now, market) != active:
-            state.update(active_direction=None, active_since=None)
+            # A prospective reversal must not erase the confirmed live signal.
+            # A blocked regime or invalid data still pauses it above.
             return
     if state.get("active_direction") != active:
         state.update(active_direction=active, active_since=now)
@@ -2891,7 +2889,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_strong_market_gate_v2_closed_candle_hysteresis"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_ut_direction_v2_opening_market_v2_strong_market_gate_v3_activity_separate_from_ut"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
