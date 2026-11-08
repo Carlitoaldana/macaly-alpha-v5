@@ -1242,8 +1242,14 @@ class Bot:
             self.stop_event.wait(2)
 
     def start_worker(self):
-        self.thread=threading.Thread(target=self.loop,name='alpha-real-worker',daemon=True)
-        self.thread.start()
+        # Reruns and concurrent sessions must share one worker per ledger.
+        with self.lock:
+            if self.thread is not None and self.thread.is_alive():
+                return
+            if self.stop_event.is_set():
+                return
+            self.thread=threading.Thread(target=self.loop,name='alpha-real-worker',daemon=True)
+            self.thread.start()
 
     def view(self):
         with self.lock:
@@ -2249,6 +2255,78 @@ def _refresh_runtime_bot(root, paper_mode):
     return root
 
 
+
+def _runtime_registry():
+    # This module survives Streamlit script reruns and cache invalidation.
+    import sys
+    candidate=types.ModuleType('_alpha_edge_runtime_ut58')
+    candidate.lock=threading.RLock()
+    candidate.bots={}
+    return sys.modules.setdefault(candidate.__name__,candidate)
+
+
+def _shared_runtime_bot(paper_mode):
+    db=Path(os.environ.get('ALPHA_DB',ROOT/'data'/'alpha.sqlite3'))
+    if paper_mode:
+        db=db.with_name(db.stem+'_paper_ut58'+db.suffix)
+    db=db.resolve()
+    key=str(db)
+    registry=_runtime_registry()
+    with registry.lock:
+        bot=registry.bots.get(key)
+        if bot is not None:
+            return _refresh_runtime_bot(bot,paper_mode)
+        # Recover a worker from the preceding script version in this process.
+        # Keep its ledger and file lock; never bypass a lock held elsewhere.
+        matches={}
+        for worker in threading.enumerate():
+            owner=getattr(getattr(worker,'_target',None),'__self__',None)
+            held=getattr(owner,'_process_lock',None)
+            if (owner is None or held is None or held.closed or
+                    type(owner).__name__ not in ('Bot','PaperBot')):
+                continue
+            if Path(held.name).resolve()==Path(key+'.lock'):
+                matches[id(owner)]=owner
+        if len(matches)>1:
+            raise RuntimeError('Hay motores antiguos duplicados. Reinicia la app una vez para cargar esta versión.')
+        if matches:
+            bot=next(iter(matches.values()))
+            workers=[t for t in threading.enumerate()
+                     if getattr(getattr(t,'_target',None),'__self__',None) is bot]
+            if len(workers)>1:
+                raise RuntimeError('Hay motores antiguos duplicados. Reinicia la app una vez para cargar esta versión.')
+            registry.bots[key]=bot
+            return _refresh_runtime_bot(bot,paper_mode)
+        db.parent.mkdir(parents=True,exist_ok=True)
+        held=open(key+'.lock','a+')
+        bot=None
+        try:
+            if os.name=='nt':
+                import msvcrt
+                held.seek(0);held.write('0');held.flush();held.seek(0)
+                msvcrt.locking(held.fileno(),msvcrt.LK_NBLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            bot=PaperBot(db) if paper_mode else Bot(db)
+            bot._process_lock=held
+            bot.start_worker()
+        except Exception:
+            if bot is not None:
+                bot.stop_event.set()
+                if bot.thread is not None:
+                    bot.thread.join(timeout=10)
+                if bot.thread is not None and bot.thread.is_alive():
+                    # Retain ownership if a worker has not stopped yet.
+                    registry.bots[key]=bot
+                    raise
+                bot.db.close()
+            held.close()
+            raise
+        registry.bots[key]=bot
+        return bot
+
+
 def streamlit_main():
     import streamlit as st
     import streamlit.components.v1 as components
@@ -2267,26 +2345,6 @@ def streamlit_main():
             else:st.error('Contraseña incorrecta.')
         st.stop()
 
-    @st.cache_resource
-    def shared_bot(paper_mode):
-        db=Path(os.environ.get('ALPHA_DB',ROOT/'data'/'alpha.sqlite3'))
-        if paper_mode:db=db.with_name(db.stem+'_paper_ut58'+db.suffix)
-        db.parent.mkdir(parents=True,exist_ok=True)
-        lock=open(str(db)+'.lock','a+')
-        try:
-            if os.name=='nt':
-                import msvcrt
-                lock.seek(0);lock.write('0');lock.flush();lock.seek(0)
-                msvcrt.locking(lock.fileno(),msvcrt.LK_NBLCK,1)
-            else:
-                import fcntl
-                fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        except OSError:
-            lock.close()
-            raise RuntimeError('Ya existe un proceso operando esta base. Reinicia el servicio y usa una instancia.')
-        bot=(PaperBot(db) if paper_mode else Bot(db));bot._process_lock=lock
-        bot.start_worker()
-        return bot
     if 'alpha_restore_mode' in st.session_state:
         st.session_state.alpha_paper_switch=st.session_state.pop('alpha_restore_mode')
     st.toggle('Dinero virtual · prueba temporal', value=True, key='alpha_paper_switch')
@@ -2305,7 +2363,11 @@ def streamlit_main():
                 st.session_state.alpha_restore_mode=previous_mode
                 st.rerun()
             st.stop()
-    bot=_refresh_runtime_bot(shared_bot(paper_mode), paper_mode)
+    try:
+        bot=_shared_runtime_bot(paper_mode)
+    except (OSError,RuntimeError):
+        st.error('El motor anterior sigue ocupando el historial. Reinicia la app una vez para cargar esta versión; no se iniciaron nuevas operaciones.')
+        st.stop()
     if previous is None or previous_mode != paper_mode:
         st.session_state.alpha_controller=Controller(bot)
         st.session_state.alpha_reply=None
