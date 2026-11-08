@@ -1147,7 +1147,7 @@ class Bot:
 
     def enter(self,market,book,side,remaining,signal=None):
         if not isinstance(self,(ConnectedBot,PaperBot)):
-            raise ValueError('Selecciona un entorno de operación.')
+            return 'Lectura activa · conecta una cuenta solo para operar en real.'
         s=self.settings
         if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
             return 'Entradas pausadas o posición en gestión.'
@@ -1945,7 +1945,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
 </form>
-<div class="notice">Las ganancias permanecen en el saldo de la prueba. La meta es acumulada y no vence a medianoche. Cambiar el capital inicia una prueba nueva conservando el historial anterior.</div>
+<div class="notice">La meta usa la ganancia acumulada. El historial se conserva al cambiar el capital.</div>
 </section>
 <section id="entradas" class="page hidden">
 <article class="panel">
@@ -2089,7 +2089,7 @@ function updateProfitRing(s,net,marked,fresh){
  $('#profitOrbitValue').style.strokeDashoffset=String(100-(progress||0));
 }
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!s.running||!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'REAL')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent=s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL';$('#start').disabled=!linked;$('#executionModeLabel').textContent='● '+(s.mode||'REAL');$('#executionFooter').textContent=s.mode||'ENTORNO REAL';$('#accountTypeLabel').textContent=s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar');for(const id of ['apiKey','privateKey','testApi'])$(id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'REAL')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent=s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL';$('#start').disabled=!linked;$('#executionModeLabel').textContent='● '+(s.mode||'REAL');$('#executionFooter').textContent=s.mode||'ENTORNO REAL';$('#accountTypeLabel').textContent=s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar');for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
@@ -2188,7 +2188,9 @@ class Controller:
         result['connection']=self.connection.copy()
         result['mode']='SIMULACIÓN' if isinstance(self.bot,PaperBot) else 'REAL'
         if not isinstance(self.bot,(ConnectedBot,PaperBot)):
-            result.update(status='SIN CONEXIÓN',running=False,positions=[],trades=[],events=[],rounds=[],signal=None,execution_mode=None,message='Conecta tu cuenta REAL de Kalshi.')
+            result.update(running=False,execution_mode=None)
+            if result.get('status') != 'SIN DATOS':
+                result['message']='Lectura activa · conecta una cuenta solo para operar en real.'
             result['totals']={k:0 for k in result['totals']}
             result['has_trades']=False
         return result
@@ -2232,6 +2234,21 @@ def _auto_connect_saved(controller,credentials):
             controller.connection={'message':message+' Se reintentará automáticamente en al menos 30 segundos.','state':'error'}
 
 
+
+def _refresh_runtime_bot(root, paper_mode):
+    """Rebind cached resources after Streamlit re-executes class definitions."""
+    with root.lock:
+        root.__class__=PaperBot if paper_mode else Bot
+        root.feed.__class__=MarketData
+        for linked in getattr(root,'connected_accounts',{}).values():
+            with linked.lock:
+                linked.__class__=ConnectedBot
+                linked.account.__class__=KalshiAccount
+                linked.feed.__class__=AccountMarketData
+    root.start_worker()
+    return root
+
+
 def streamlit_main():
     import streamlit as st
     import streamlit.components.v1 as components
@@ -2268,7 +2285,7 @@ def streamlit_main():
             lock.close()
             raise RuntimeError('Ya existe un proceso operando esta base. Reinicia el servicio y usa una instancia.')
         bot=(PaperBot(db) if paper_mode else Bot(db));bot._process_lock=lock
-        if paper_mode:bot.start_worker()
+        bot.start_worker()
         return bot
     if 'alpha_restore_mode' in st.session_state:
         st.session_state.alpha_paper_switch=st.session_state.pop('alpha_restore_mode')
@@ -2276,6 +2293,9 @@ def streamlit_main():
     paper_mode=st.session_state.alpha_paper_switch
     previous_mode=st.session_state.get('alpha_previous_mode')
     previous=st.session_state.get('alpha_controller')
+    if previous is not None and previous_mode is not None:
+        previous.__class__=Controller
+        _refresh_runtime_bot(previous.connection_root, previous_mode)
     if previous is not None and previous_mode is not None and previous_mode != paper_mode:
         with previous.bot.lock:
             busy_mode=previous.bot.running or bool(previous.bot.positions())
@@ -2285,16 +2305,17 @@ def streamlit_main():
                 st.session_state.alpha_restore_mode=previous_mode
                 st.rerun()
             st.stop()
-    bot=shared_bot(paper_mode)
+    bot=_refresh_runtime_bot(shared_bot(paper_mode), paper_mode)
     if previous is None or previous_mode != paper_mode:
         st.session_state.alpha_controller=Controller(bot)
         st.session_state.alpha_reply=None
     controller=st.session_state.alpha_controller
+    controller.__class__=Controller
     st.session_state.alpha_previous_mode=paper_mode
     if paper_mode:
-        st.info('SIMULACIÓN: saldo e historial virtuales separados. Datos de mercado reales. No envía compras ni ventas a Kalshi. Las comisiones son estimadas.')
+        st.caption('MODO PRUEBA · SALDO VIRTUAL')
     else:
-        st.warning('REAL: conecta tu cuenta y pulsa INICIAR REAL para operar. Apagar el switch no inicia compras.')
+        st.caption('MODO REAL · Lectura activa. Conecta e inicia para operar.')
     saved_credentials=_saved_kalshi_credentials(st.secrets)
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
