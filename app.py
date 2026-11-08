@@ -2379,38 +2379,38 @@ def _reset_withdrawal(state):
 
 
 def _review_active_retention(state, signal, seconds_left, now):
-    """Withdraw only after two opposite conditions persist in spaced readings.
+    """Report weakening without silently withdrawing a confirmed direction.
 
-    Neutral/missing evidence never counts as an opposite vote. This helper is
-    only for candidate=None; entry and reversal confirmation are unchanged.
+    Direction changes are handled by the same confirmation path as entries.
     """
     side = state.get("active_direction")
     if side not in ("UP", "DOWN"):
         _reset_withdrawal(state)
         return
     support, contrary = _retention_assessment(state, signal)
-    warning = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO" if support < 3 else None
-    if contrary < 2:
-        _reset_withdrawal(state)
-        state["retention_warning"] = warning
-        return
-    source = (signal or {}).get("price_source")
-    stamp = now.timestamp()
-    last = state.get("withdraw_last_at")
-    same = (state.get("withdraw_direction") == side and state.get("withdraw_source") == source
-            and last is not None and 0 <= stamp-last <= SIGNAL_CONFIRM_MAX_GAP)
-    if not same:
-        state.update(withdraw_direction=side, withdraw_source=source, withdraw_count=1,
-                     withdraw_since=stamp, withdraw_last_at=stamp)
-    elif stamp-last >= SIGNAL_CONFIRM_INTERVAL:
-        state["withdraw_count"] += 1
-        state["withdraw_last_at"] = stamp
-    state["retention_warning"] = warning
-    if (state["withdraw_count"] >= SIGNAL_CONFIRM_READINGS and
-            stamp-state["withdraw_since"] >= SIGNAL_CONFIRM_INTERVAL*(SIGNAL_CONFIRM_READINGS-1)):
-        # Mantener la señal hasta confirmación contraria o cierre de ronda.
-        _reset_withdrawal(state)
-        state["retention_warning"] = warning
+    _reset_withdrawal(state)
+    if contrary > support and contrary >= 2:
+        state["retention_warning"] = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
+
+
+def _direction_consistent(candidate, signal):
+    """Prevent a new confirmation against the majority of available evidence.
+
+    Abstain if the EMA, momentum and target displacement disagree with the
+    proposed direction. Unknown values are not counted as votes.
+    """
+    if candidate not in ("UP", "DOWN") or not signal or signal.get("data_valid") is False:
+        return False
+    sign = 1 if candidate == "UP" else -1
+    votes = []
+    ema = signal.get("ema")
+    if ema in ("BULL", "BEAR"):
+        votes.append(1 if ema == ("BULL" if sign == 1 else "BEAR") else -1)
+    for field in ("mom5", "distance"):
+        value = _plan_number(signal.get(field))
+        if value is not None and value != 0:
+            votes.append(1 if value * sign > 0 else -1)
+    return bool(votes) and sum(votes) > 0
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
@@ -2471,6 +2471,10 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     necesita confirmación. Una lectura neutral cancela la candidatura pendiente;
     la activa se conserva solo si mantiene EMA, mom5 y distancia favorables.
     """
+    # A candidate is not a confirmation when the available directional
+    # evidence contradicts it. Keep the active signal while reassessing.
+    if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal):
+        candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
@@ -2518,7 +2522,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         _review_active_retention(state, signal, seconds_left, now)
         return
 
-    _reset_withdrawal(state)
+    _review_active_retention(state, signal, seconds_left, now)
     if candidate == state.get("active_direction"):
         state["pending_direction"] = None
         state["pending_count"] = 0
