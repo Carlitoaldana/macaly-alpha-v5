@@ -3880,6 +3880,11 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
     return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars .sq-item{flex:1;min-width:0;text-align:center}.sq-bars i{display:block;height:7px;width:100%;background:#1d3038;border-radius:9px}.sq-bars .sq-item span{display:block;margin-top:7px;font-size:9px;line-height:1.25;color:#a5b6be;overflow-wrap:anywhere}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
 
 
+
+GOLD_TARGET_ICON = '<svg class="jc-metal-icon" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><defs>\n<linearGradient id="jc-target-metal" x1="10" y1="5" x2="52" y2="67" gradientUnits="userSpaceOnUse"><stop stop-color="#fffbd0"/><stop offset=".16" stop-color="#ffe984"/><stop offset=".38" stop-color="#e5b84e"/><stop offset=".56" stop-color="#ffdc62"/><stop offset=".79" stop-color="#bc700e"/><stop offset="1" stop-color="#f7b72b"/></linearGradient>\n<filter id="jc-target-metal-shadow" x="-25%" y="-25%" width="150%" height="160%"><feDropShadow dx="0" dy="1.4" stdDeviation=".65" flood-color="#9e530a" flood-opacity=".9"/><feDropShadow dx="0" dy="0" stdDeviation="1.2" flood-color="#ffd66e" flood-opacity=".32"/></filter>\n</defs><g filter="url(#jc-target-metal-shadow)"><circle cx="32" cy="35" r="24" fill="none" stroke="url(#jc-target-metal)" stroke-width="7" stroke-dasharray="132 19" transform="rotate(-37 32 35)"/>\n<circle cx="32" cy="35" r="13.5" fill="none" stroke="url(#jc-target-metal)" stroke-width="6.5" stroke-dasharray="69 16" transform="rotate(-37 32 35)"/>\n<circle cx="32" cy="35" r="4.7" fill="url(#jc-target-metal)"/>\n<path d="M33 34 55 12" fill="none" stroke="url(#jc-target-metal)" stroke-width="5.5" stroke-linecap="round"/>\n<path d="m51 13 2-9 5 6 7 2-8 5-4 6-2-7-7 1Z" fill="url(#jc-target-metal)"/>\n<path d="M12 22a24 24 0 0 1 33-8M21 28a13.5 13.5 0 0 1 16-6" fill="none" stroke="#fff6b7" stroke-width="1.3" stroke-linecap="round" opacity=".8"/></g></svg>'
+GOLD_TIMER_ICON = '<svg class="jc-metal-icon" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><defs>\n<linearGradient id="jc-timer-metal" x1="10" y1="5" x2="52" y2="67" gradientUnits="userSpaceOnUse"><stop stop-color="#fffbd0"/><stop offset=".16" stop-color="#ffe984"/><stop offset=".38" stop-color="#e5b84e"/><stop offset=".56" stop-color="#ffdc62"/><stop offset=".79" stop-color="#bc700e"/><stop offset="1" stop-color="#f7b72b"/></linearGradient>\n<filter id="jc-timer-metal-shadow" x="-25%" y="-25%" width="150%" height="160%"><feDropShadow dx="0" dy="1.4" stdDeviation=".65" flood-color="#9e530a" flood-opacity=".9"/><feDropShadow dx="0" dy="0" stdDeviation="1.2" flood-color="#ffd66e" flood-opacity=".32"/></filter>\n</defs><g filter="url(#jc-timer-metal-shadow)"><path d="M27 5h13v5H27zM31 10h5v7h-5z" fill="url(#jc-timer-metal)"/>\n<path d="m49 15 4-5 7 6-4 5z" fill="url(#jc-timer-metal)"/>\n<circle cx="33.5" cy="39" r="23" fill="none" stroke="url(#jc-timer-metal)" stroke-width="7"/>\n<path d="M33.5 39V22" fill="none" stroke="url(#jc-timer-metal)" stroke-width="4" stroke-linecap="round"/>\n<circle cx="33.5" cy="39" r="4.2" fill="url(#jc-timer-metal)"/>\n<path d="M33.5 20v3M33.5 55v3M14.5 39h3M49.5 39h3" stroke="#d59c31" stroke-width="1.7" stroke-linecap="round"/>\n<path d="M14 27a23 23 0 0 1 34-7" fill="none" stroke="#fff8ba" stroke-width="1.4" stroke-linecap="round" opacity=".9"/></g></svg>'
+GOLD_METRIC_CSS = '\n/* Scoped metallic details: only the two requested cards. */\n.refapp .rcard.jc-target-card,.refapp .rcard.jc-timer-card{\n position:relative;isolation:isolate;overflow:hidden;border:1.25px solid transparent!important;\n background:linear-gradient(145deg,#102337 0%,#04131e 45%,#041216 100%) padding-box,\n linear-gradient(123deg,#c68d36 0%,#fff5c9 18%,#647e96 43%,#8ca9b5 64%,#f7d06e 84%,#fff3cc 100%) border-box!important;\n box-shadow:inset 0 1px 1px rgba(255,250,215,.26),inset 0 -1px 2px rgba(96,202,217,.16),0 0 8px rgba(226,171,58,.12)!important;\n}\n.refapp .rcard.jc-timer-card{\n background:linear-gradient(145deg,#10283b 0%,#04131e 48%,#032222 100%) padding-box,\n linear-gradient(135deg,#fff8de 0%,#9cbacb 29%,#41687e 57%,#22d5d0 85%,#c4f4e9 100%) border-box!important;\n box-shadow:inset 0 1px 1px rgba(228,247,255,.32),inset 0 -1px 2px rgba(0,225,204,.24),0 0 8px rgba(1,211,200,.14)!important;\n}\n.refapp .jc-target-card:before,.refapp .jc-timer-card:before{\n content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;\n background:linear-gradient(131deg,transparent 0 9%,rgba(133,196,239,.20) 9.5% 15%,transparent 15.5% 22%,rgba(189,222,245,.045) 22.5% 26%,transparent 26.5%);\n}\n.refapp .jc-target-card:after{\n content:"";position:absolute;left:-2px;top:18%;height:58%;width:3px;border-radius:100%;pointer-events:none;\n background:#fff4b6;box-shadow:0 0 4px 1px #ffd55e,0 0 11px 2px rgba(255,180,31,.65);\n}\n.refapp .jc-metal-holder{flex:0 0 35px;width:35px;height:41px;display:grid;place-items:center;line-height:0}\n.refapp .jc-metal-icon{display:block;width:100%;height:auto;overflow:visible;filter:drop-shadow(0 0 2px rgba(249,192,57,.20))}\n.refapp .jc-target-card>.jc-metal-copy,.refapp .jc-timer-card>.timecontent{min-width:0;flex:1}\n.refapp .jc-timer-card .timebar{background:rgba(36,70,86,.65);box-shadow:inset 0 1px 2px rgba(0,0,0,.3)}\n.refapp .jc-timer-card .timebar b{box-shadow:0 0 6px rgba(0,235,190,.38)}\n@media(min-width:601px){.refapp .jc-metal-holder{flex-basis:39px;width:39px;height:43px}}\n'
+
 @st.fragment(run_every="2s")
 def live_dashboard():
     btc_error = ""
@@ -4208,6 +4213,7 @@ def live_dashboard():
 
     panel_html = f"""
 <style>
+{GOLD_METRIC_CSS}
 /* app 31: conserve el encabezado dibujado en el fondo; solo un logo y titulo. */
 .refapp .rhead.jc-bg-header {{
   display:block!important;visibility:visible!important;position:relative!important;
@@ -4266,17 +4272,17 @@ def live_dashboard():
       <div><div class="rlabel">BTC</div><div class="rvalue">${sig["price"]:,.0f}</div>
       <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
     </div>
-    <div class="rcard keycard">
-      <div class="bigicon targeticon">◎</div>
-      <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
+    <div class="rcard keycard jc-target-card">
+      <div class="jc-metal-holder">{GOLD_TARGET_ICON}</div>
+      <div class="jc-metal-copy"><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
     </div>
     <div class="rcard keycard">
       <div class="bars" style="--accent:{distance_color}"><b></b><b></b><b></b></div>
       <div><div class="rlabel">DISTANCIA AL TARGET</div><div class="rvalue" style="color:{distance_color}">{distance_text}</div>
       <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
     </div>
-    <div class="rcard keycard">
-      <div class="clock">◷</div>
+    <div class="rcard keycard jc-timer-card">
+      <div class="jc-metal-holder">{GOLD_TIMER_ICON}</div>
       <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
       <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
     </div>
