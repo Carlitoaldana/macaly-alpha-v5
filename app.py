@@ -2408,9 +2408,9 @@ def _review_active_retention(state, signal, seconds_left, now):
     state["retention_warning"] = warning
     if (state["withdraw_count"] >= SIGNAL_CONFIRM_READINGS and
             stamp-state["withdraw_since"] >= SIGNAL_CONFIRM_INTERVAL*(SIGNAL_CONFIRM_READINGS-1)):
-        state["active_direction"] = None
-        state["active_since"] = None
+        # Mantener la señal hasta confirmación contraria o cierre de ronda.
         _reset_withdrawal(state)
+        state["retention_warning"] = warning
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
