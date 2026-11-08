@@ -2179,6 +2179,74 @@ def _entry_route_checks(sig, seconds_left):
 
 
 
+def market_regime(df, now=None):
+    """Replay a Schmitt filter over closed 1m candles, independent of rounds.
+
+    Different block/release thresholds prevent a brief loss of impulse from
+    toggling entries. These are heuristic thresholds, not win probabilities.
+    Current, unfinished candles cannot toggle the regime.
+    """
+    waiting = {"blocked": True, "status": "REUNIENDO DATOS DEL MERCADO", "ready": False}
+    try:
+        x = df[["time", "open", "high", "low", "close"]].copy()
+        x["time"] = pd.to_datetime(x["time"], utc=True, errors="coerce")
+        stamp = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+        stamp = stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
+        x = x.dropna().sort_values("time").drop_duplicates("time", keep="last")
+        x = x[x["time"] < stamp.floor("min")].tail(240).reset_index(drop=True)
+        if len(x) < 40:
+            return waiting
+        numbers = x[["open", "high", "low", "close"]].to_numpy(dtype=float)
+        if not np.isfinite(numbers).all() or (numbers <= 0).any():
+            return waiting
+        gaps = x["time"].diff().dt.total_seconds()
+        # Do not join disconnected candle segments as if they were continuous.
+        breaks = np.flatnonzero(gaps.fillna(60).to_numpy() != 60)
+        if len(breaks):
+            x = x.iloc[int(breaks[-1]):].reset_index(drop=True)
+        if len(x) < 40:
+            return waiting
+        c, h, l = x["close"].astype(float), x["high"].astype(float), x["low"].astype(float)
+        prev = c.shift()
+        tr = pd.concat([h-l, (h-prev).abs(), (l-prev).abs()], axis=1).max(axis=1)
+        baseline = tr.shift(10).rolling(60, min_periods=20).median().clip(lower=1e-8)
+        pace = tr.ewm(span=5, adjust=False).mean()
+        travel = c.diff().abs().rolling(10).sum()
+        net = (c-c.shift(10)).abs()
+        efficiency = (net/travel.clip(lower=1e-8)).ewm(span=3, adjust=False).mean()
+        width = h.rolling(10).max()-l.rolling(10).min()
+        overlap = (pd.concat([h,h.shift()],axis=1).min(axis=1)-
+                   pd.concat([l,l.shift()],axis=1).max(axis=1)).clip(lower=0)
+        overlap = (overlap/tr.clip(lower=1e-8)).rolling(10).mean()
+        blocked, ready, last = True, False, {}
+        for i in range(len(x)):
+            b, speed, er, span, move, ov = (float(v.iloc[i]) for v in
+                (baseline, pace, efficiency, width, net, overlap))
+            if not all(np.isfinite(v) for v in (b,speed,er,span,move,ov)):
+                continue
+            price = float(c.iloc[i])
+            relative_pace = speed/b
+            quiet = speed/price < .00018 and span/price < .0012
+            contracted = relative_pace < .65 and span/b < 3.0
+            bounded = er < .28 and ov > .45 and span/b < 4.0 and relative_pace < 1.05
+            lateral = (quiet and er < .40) or (contracted and er < .35) or bounded
+            recovered = ((er > .42 and move/b > 1.5 and relative_pace > .70) or
+                         (er > .32 and span/b > 4.5 and relative_pace > 1.15)) and not lateral
+            if lateral:
+                blocked = True
+            elif recovered:
+                blocked = False
+            ready = True
+            last = {"efficiency":round(er,3), "relative_pace":round(relative_pace,3),
+                    "range_atr":round(span/b,3), "closed_candle":x["time"].iloc[i].isoformat()}
+        if not ready:
+            return waiting
+        return dict(last, blocked=blocked, ready=True,
+                    status="MERCADO LATERAL · SIN SEÑAL" if blocked else "MERCADO ACTIVO")
+    except (KeyError, TypeError, ValueError, IndexError):
+        return waiting
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -2555,6 +2623,19 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         if seconds_left is not None and seconds_left <= 0:
             state["active_direction"] = None
             state["active_since"] = None
+        return
+    regime = (signal or {}).get("market_regime") or {}
+    state["market_regime"] = regime
+    if regime.get("blocked"):
+        # This is an engine transition, not a hidden visual overlay.
+        # Historical signals already issued are preserved, never fabricated.
+        state.update(active_direction=None, active_since=None,
+                     pending_direction=None, pending_count=0, pending_since=None,
+                     pending_last_at=None, pending_price_source=None,
+                     reversal_live_tape=[], opening_live_tapes={},
+                     opening_conflict=regime.get("status"),
+                     decision_reason=regime.get("status"))
+        _reset_withdrawal(state)
         return
     _observe_reversal_prices(state, signal, now)
     active = state.get("active_direction")
@@ -4176,6 +4257,13 @@ def live_dashboard():
         if (ut_warning or round_signal.get("reversal")) and active in ("UP", "DOWN") else ""
     )
 
+    regime = sig.get("market_regime") or {}
+    lateral_html = (
+        '<div class="weakness-inline" role="status">⚠️ ' +
+        html.escape(regime.get("status", "MERCADO LATERAL · SIN SEÑAL")) +
+        '</div>' if regime.get("blocked") else ""
+    )
+
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
     <div class="jcclose-title"><span><span class="jcclose-symbol">◎</span> LECTOR DE CIERRE</span><em>{"● ACTIVO" if reader_active else "● LEYENDO"}</em></div>
@@ -4241,6 +4329,7 @@ def live_dashboard():
     <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
   </section>
 
+  {lateral_html}
   {weakness_html}
 
   {pre_html}
@@ -4566,6 +4655,12 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     _TRACE_CONTEXT.build_payload = None
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
+    regime = market_regime(df)
+    sig["market_regime"] = regime
+    sig["candidate_before_market_filter"] = sig.get("candidate")
+    if regime["blocked"]:
+        sig["candidate"] = None
+        sig["quality"] = regime["status"]
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
         payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
