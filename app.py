@@ -1666,7 +1666,6 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .profit-orbit-track{fill:none;stroke:var(--gold);stroke-width:1.6}
 .profit-orbit-value{fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;stroke-dasharray:100;stroke-dashoffset:100;transform:rotate(-90deg);transform-origin:60px 60px;filter:drop-shadow(0 0 4px currentColor);transition:stroke-dashoffset .7s ease,stroke .25s ease}
 @media(prefers-reduced-motion:reduce){.profit-orbit,.profit-orbit-value{transition:none}}
-.operation-result{min-height:20px;margin:-4px 10px 14px;font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--muted);text-align:center}
 .radar-core{position:absolute;inset:35%;border:1px solid var(--gold);border-radius:50%;background:radial-gradient(#1a335c,#080d1e);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2;box-shadow:0 0 25px #071327}
 .radar-core b{font-size:clamp(14px,2.3vw,25px);color:var(--gold);letter-spacing:1px}
 .radar-core small{font-size:9px;letter-spacing:2px}
@@ -1823,7 +1822,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <small id="radarMode">EDGE</small>
 </div>
 </div>
-<div class="operation-result" id="operationResult" role="status">SIN OPERACIÓN</div>
 <div class="radar-meta">
 <span class="chip">DIRECCIÓN<b id="activeSignal">ESPERANDO</b>
 </span>
@@ -2093,24 +2091,19 @@ function operationRingState(s,net,marked,fresh){
  if(!Number.isFinite(paid)||paid<=0||!Number.isFinite(value))return {state:'unavailable'};
  const pct=value/paid*100;
  return {state:closed?'closed':'open',net:value,pct,
-   progress:Math.min(100,Math.abs(pct)),color:value>0?'#34d399':value<0?'#f87171':'#e8c66a'};
+   progress:Math.max(0,Math.min(100,pct)),color:'#34d399'};
 }
 function updateProfitRing(s,net,marked,fresh){
  const result=operationRingState(s,net,marked,fresh);
- const visible=result.state==='open'||result.state==='closed';
- const orbit=$('#profitOrbit'),label=$('#operationResult');
+ const visible=(result.state==='open'||result.state==='closed')&&result.net>0;
+ const orbit=$('#profitOrbit');
  orbit.style.opacity=visible?'1':'0';
- orbit.style.color=visible?result.color:'';
+ orbit.style.color='#34d399';
  orbit.dataset.state=result.state;
  orbit.setAttribute('aria-hidden',visible?'false':'true');
  orbit.setAttribute('aria-valuenow',String(visible?result.progress:0));
  $('#profitOrbitValue').style.strokeDashoffset=String(100-(visible?result.progress:0));
- const signed=visible?(result.pct>0?'+':'')+result.pct.toFixed(1)+'%':'';
- const amount=visible?(result.net>0?'+':'')+money(result.net):'';
- const text=visible?(result.state==='closed'?'CERRADA':'NETO ESTIMADO')+' · '+signed+' · '+amount:
-   result.state==='unavailable'?'ESPERANDO PRECIO DE SALIDA':'SIN OPERACIÓN';
- label.textContent=text;label.style.color=visible?result.color:'';
- orbit.setAttribute('aria-valuetext',text);
+ orbit.setAttribute('aria-valuetext',visible?'Ganancia neta '+result.pct.toFixed(1)+'%':'Sin ganancia positiva verificable');
 }
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'REAL')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent=s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL';$('#start').disabled=!linked;$('#executionModeLabel').textContent='● '+(s.mode||'REAL');$('#executionFooter').textContent=s.mode||'ENTORNO REAL';$('#accountTypeLabel').textContent=s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar');for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
