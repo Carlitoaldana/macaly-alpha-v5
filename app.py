@@ -546,37 +546,20 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .rarrow{font-size:79px;margin-right:5px;line-height:.7}.rhero.waiting .rsignal{font-size:39px;letter-spacing:-2px}.rhero.waiting .rarrow{display:none}
 .rconf{display:inline-block;margin-top:11px;border:1.5px solid var(--accent);border-radius:18px;padding:5px 17px;color:#fff;font-size:10px;font-weight:900;box-shadow:0 0 10px var(--soft)}
 .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:2px}
-.rcard{background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px}\n
-/* ALPHA EDGE — acabado visual de reflejos diagonales en todos los paneles */
-.rcard, .finalcard, .analysisbox, .probbox,
+.rcard{background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px}
+
+/* Acabado visual ALPHA EDGE: franjas dentro de todos los cuadros */
+.rcard, .rgrid > div, .finalcard, .analysisbox, .probbox,
 .finalclose, .finalanalysis, .weakness-inline, .prebox,
-.rnav, .techrow > div, .motionrow > div,
-[class*="card"], [class*="panel"], [class*="box"] {
-    background-image:
-      repeating-linear-gradient(125deg,
-        transparent 0px, transparent 13px,
-        rgba(255,217,130,.055) 14px,
-        rgba(255,217,130,.015) 19px,
-        transparent 26px, transparent 43px),
-      linear-gradient(145deg,rgba(250,206,109,.065),transparent 42%,rgba(53,146,168,.045));
-    background-blend-mode:screen,normal;
+.rnav, .techrow > div, .motionrow > div {
+ background-image:
+ repeating-linear-gradient(128deg,transparent 0px,transparent 18px,rgba(255,232,173,.12) 19px,rgba(255,232,173,.045) 31px,transparent 40px,transparent 78px),
+ linear-gradient(145deg,#0c1c27,#07151e) !important;
+ background-blend-mode:screen,normal;
 }
-.rcard, .finalcard, .analysisbox, .probbox {
-    position:relative;
-    box-shadow:inset 0 1px 0 rgba(255,224,158,.10),
-      0 0 10px rgba(202,155,61,.065);
-}
-.keycard {border-color:rgba(210,169,84,.55);
-    box-shadow:inset 0 1px 0 rgba(255,224,158,.14),0 0 11px rgba(208,166,70,.13);}
-.keycard .targeticon, .keycard .clock {
-    color:#f6cf70;
-    font-weight:900;
-    text-shadow:0 1px 0 #fff1b7,0 2px 2px #7a4c10,0 0 12px rgba(245,184,65,.45);
-    filter:drop-shadow(0 0 3px rgba(255,194,75,.3));
-}
-.keycard .targeticon {font-size:35px;}
-.keycard .clock {font-size:34px;}
-.keycard > * {position:relative;z-index:1;}
+.rcard {border-color:rgba(228,190,120,.78)!important;box-shadow:inset 0 1px 0 rgba(255,227,170,.18),0 0 8px rgba(215,166,79,.14);}
+.keycard .targeticon,.keycard .clock{width:37px;height:40px;flex:none;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(249,190,68,.58));}
+.keycard .targeticon svg,.keycard .clock svg{width:37px;height:37px;display:block;}
 
 .keycard{height:68px;padding:8px 9px;display:flex;align-items:center;gap:8px}
 .bigicon{font-size:31px;font-weight:900;line-height:1}.btcicon{color:#ff9d00}.targeticon{color:#8acfc3}
@@ -905,6 +888,54 @@ section.main .block-container > * {
   z-index: 1 !important;
 }
 
+
+/* ALPHA EDGE: franjas interiores en TODOS los cuadros del panel.
+   La capa es puramente decorativa y no intercepta clics. */
+.rcard,
+.presignal,
+.probs,
+.finalclose,
+.finalcard,
+.finalanalysis,
+.probbox,
+.ra93-panel,
+.chartbox,
+.history-stat,
+.sq-box,
+.panel,
+.card,
+.metric,
+.motionrow > div,
+.finalgrid > div,
+.metrics > div,
+.cards > div,
+.rgrid > div,
+.history-stats > div,
+.sq-item {
+  position:relative;
+  isolation:isolate;
+  overflow:hidden;
+}
+.rcard::before, .presignal::before, .probs::before, .finalclose::before, .finalcard::before, .finalanalysis::before, .probbox::before, .ra93-panel::before, .chartbox::before, .history-stat::before, .sq-box::before, .panel::before, .card::before, .metric::before, .motionrow > div::before, .finalgrid > div::before, .metrics > div::before, .cards > div::before, .rgrid > div::before, .history-stats > div::before, .sq-item::before {
+  content:"";
+  position:absolute;
+  inset:0;
+  z-index:0;
+  pointer-events:none;
+  border-radius:inherit;
+  background:repeating-linear-gradient(128deg,
+    transparent 0px,
+    transparent 20px,
+    rgba(255,232,169,.15) 21px,
+    rgba(255,232,169,.085) 30px,
+    transparent 39px,
+    transparent 79px);
+  opacity:.85;
+}
+.rcard > *, .presignal > *, .probs > *, .finalclose > *, .finalcard > *, .finalanalysis > *, .probbox > *, .ra93-panel > *, .chartbox > *, .history-stat > *, .sq-box > *, .panel > *, .card > *, .metric > *, .motionrow > div > *, .finalgrid > div > *, .metrics > div > *, .cards > div > *, .rgrid > div > *, .history-stats > div > *, .sq-item > * {
+  position:relative;
+  z-index:1;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -4248,7 +4279,7 @@ def live_dashboard():
       <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="bigicon targeticon">◉</div>
+      <div class="bigicon targeticon"><svg viewBox="0 0 64 64" aria-label="Target dorado" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="tgGold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff4b5"/><stop offset=".45" stop-color="#ffc84e"/><stop offset="1" stop-color="#9b5b12"/></linearGradient></defs><circle cx="29" cy="36" r="23" fill="none" stroke="url(#tgGold)" stroke-width="5"/><circle cx="29" cy="36" r="14" fill="none" stroke="url(#tgGold)" stroke-width="4"/><circle cx="29" cy="36" r="5" fill="#ffcf59"/><path d="M29 36L51 13M45 8l7 5 6-1-6 7-1 7-5-7" fill="none" stroke="#ffd36a" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
       <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
     </div>
     <div class="rcard keycard">
@@ -4257,7 +4288,7 @@ def live_dashboard():
       <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="clock">⏱</div>
+      <div class="clock"><svg viewBox="0 0 64 64" aria-label="Cronómetro dorado" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="clGold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff4b5"/><stop offset=".5" stop-color="#ffca50"/><stop offset="1" stop-color="#99580e"/></linearGradient></defs><path d="M26 4h13v6H26zM44 14l6-6 6 6-6 6" fill="#f4b83c"/><circle cx="32" cy="37" r="23" fill="#14232c" stroke="url(#clGold)" stroke-width="5"/><path d="M32 19v18l-9 7" stroke="#ffd469" stroke-width="4" stroke-linecap="round" fill="none"/><circle cx="32" cy="37" r="4" fill="#ffe49b"/></svg></div>
       <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
       <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
     </div>
