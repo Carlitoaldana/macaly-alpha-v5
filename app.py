@@ -2517,6 +2517,20 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     tapes[source] = tape
     if candidate not in ("UP", "DOWN"):
         return wait("Analizando fuerza actual antes de la primera señal")
+    # Solo primera entrada: no confirmar cuando indicadores clave
+    # contradicen la dirección, aunque una ruta individual la proponga.
+    sign = 1 if candidate == "UP" else -1
+    families = _direction_evidence(signal)
+    if len(families) < 3 or any(v != candidate for v in families.values()):
+        return wait("Indicadores direccionales sin consenso para " + candidate)
+    for field in ("macd1", "macd3", "macd5"):
+        value = _plan_number(signal.get(field))
+        if value is None or sign * value < 0:
+            return wait("MACD sin respaldo conjunto para " + candidate)
+    plus_di = _plan_number(signal.get("plus_di"))
+    minus_di = _plan_number(signal.get("minus_di"))
+    if plus_di is None or minus_di is None or sign * (plus_di-minus_di) < 0:
+        return wait("Presión direccional sin respaldo para " + candidate)
     if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
         return wait("Observando movimiento actual antes de la primera señal")
     prices = [float(x[1]) for x in tape]
