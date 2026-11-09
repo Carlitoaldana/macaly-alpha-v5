@@ -1909,7 +1909,7 @@ def get_kalshi_live_btc(market):
 
 
 # =========================================================
-# INDICADORES ORIGINALES
+# INDICADORES DEL MOTOR ACTUAL
 # =========================================================
 
 def _indicator_frame(df):
@@ -1937,10 +1937,6 @@ def _indicator_frame(df):
     x["vol_ratio"]=vol/vol.rolling(20).mean().replace(0,np.nan)
     return x
 
-def _resample_indicators(df, minutes):
-    if minutes == 1: return _indicator_frame(df)
-    x=df.set_index("time").resample(f"{minutes}min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna().reset_index()
-    return _indicator_frame(x)
 
 def add_indicators(df):
     x=_indicator_frame(df)
@@ -2028,143 +2024,14 @@ def get_no_ask(market):
 # PROBABILIDAD ORIGINAL
 # =========================================================
 
-def estimated_probabilities(
-    final_score, distance, seconds_left, mom3, mom5
-):
-    score = float(np.clip(final_score, -10, 10))
-    up_prob = 50 + score * 4.2
-
-    if mom3 > 0.04:
-        up_prob += 3
-    elif mom3 < -0.04:
-        up_prob -= 3
-
-    if mom5 > 0.06:
-        up_prob += 2
-    elif mom5 < -0.06:
-        up_prob -= 2
-
-    if (
-        distance is not None
-        and seconds_left is not None
-        and seconds_left <= 180
-    ):
-        if distance > 0:
-            up_prob += 3
-        elif distance < 0:
-            up_prob -= 3
-
-    up_prob = float(np.clip(up_prob, 5, 95))
-    return round(up_prob), round(100 - up_prob)
 
 
 # =========================================================
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
-def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
-    """Directional persistence / exhaustion in comparable ATR units.
-
-    Informational internally; never imposes a permanent UP/DOWN lock.
-    Percent momentum is converted to dollars before ATR normalization.
-    Uses completed/current candle history, not fabricated price targets.
-    """
-    if not np.isfinite(price) or price <= 0 or not np.isfinite(atr) or atr <= 0:
-        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
-                "exhaust_down": False, "reliable": False}
-    close = one["close"].astype(float).tail(9).to_numpy()
-    if len(close) < 7 or not np.all(np.isfinite(close)):
-        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
-                "exhaust_down": False, "reliable": False}
-    changes = np.diff(close)
-    # Directional efficiency: net movement divided by total absolute movement.
-    travel = float(np.sum(np.abs(changes[-5:])))
-    efficiency = abs(float(close[-1] - close[-6])) / max(travel, 1e-8)
-    recent = float(np.sum(changes[-2:])) / atr
-    previous = float(np.sum(changes[-5:-2])) / atr
-    m3 = float(np.clip(price * mom3 / 100.0 / atr, -3, 3))
-    m5 = float(np.clip(price * mom5 / 100.0 / atr, -3, 3))
-    m15 = float(np.clip(price * mom15 / 100.0 / atr, -3, 3))
-    volume = float(np.clip(rvol, 0, 3)) if np.isfinite(rvol) else 1.0
-    # No invented dollar target: these are dimensionless internal strengths.
-    trend = .48 * m3 + .32 * m5 + .20 * m15
-    strength = float(np.clip(trend * (.75 + .25 * efficiency) *
-                             (.90 + .10 * min(volume, 1.5)), -3, 3))
-    exhaust_up = (previous > .35 and recent < -.10) or (m5 > .35 and m3 < -.12)
-    exhaust_down = (previous < -.35 and recent > .10) or (m5 < -.35 and m3 > .12)
-    recent_volume_ratio = None
-    if "volume" in one and len(one) >= 24:
-        volume_history = one["volume"].astype(float).iloc[:-1]
-        base_volume = float(volume_history.iloc[-23:-3].mean())
-        recent_volume = float(volume_history.iloc[-3:].mean())
-        if np.isfinite(base_volume) and base_volume > 0 and np.isfinite(recent_volume):
-            recent_volume_ratio = recent_volume/base_volume
-    return {"up": max(0., strength), "down": max(0., -strength),
-            "exhaust_up": bool(exhaust_up), "exhaust_down": bool(exhaust_down),
-            "reliable": True, "efficiency": round(float(efficiency), 3),
-            "recent_atr": round(recent, 3), "previous_atr":round(previous, 3),
-            "volume_ratio_recent":recent_volume_ratio, "momentum3_atr":m3}
 
 
-def _entry_route_checks(sig, seconds_left):
-    """One admission policy for both directions, UI and confirmation.
-
-    Directional alignment describes a side; it cannot substitute for present
-    displacement, participation and persistence. No separate regime latch.
-    Thresholds are explicit heuristics, not calibrated probabilities.
-    """
-    required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
-                "vol_ratio", "mom3", "mom5", "target_atr", "price_ema9_atr")
-    if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
-        return {"valid":False, "sides":{}, "noise_ok":False}
-    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion,live_ema = (float(sig[k]) for k in required)
-    impulse = sig.get("impulse_internal") or {}
-    recent = _plan_number(impulse.get("recent_atr"))
-    previous = _plan_number(impulse.get("previous_atr"))
-    efficiency = _plan_number(impulse.get("efficiency"))
-    participation = _plan_number(impulse.get("volume_ratio_recent"))
-    participation = vol if participation is None else max(vol, participation)
-    current_move = _plan_number(impulse.get("momentum3_atr"))
-    if current_move is None:
-        current_price = _plan_number(sig.get("price"))
-        current_atr = _plan_number(sig.get("atr"))
-        if current_price is not None and current_atr is not None and current_atr > 0:
-            current_move = current_price*mom/100./current_atr
-    sides = {}
-    noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
-    for side,sign,other in (("UP",1,"DOWN"),("DOWN",-1,"UP")):
-        up = sign == 1
-        strength = _plan_number(impulse.get("up" if up else "down"))
-        exhausted = bool(impulse.get("exhaust_up" if up else "exhaust_down"))
-        flow = sig.get("flow_context_internal") or {}
-        flow_ok = bool(flow.get("valid") and flow.get("direction")==side)
-        families = _direction_evidence(sig)
-        agree = sum(v==side for v in families.values())
-        oppose = sum(v==other for v in families.values())
-        slowing = (previous is not None and recent is not None and sign*previous/3 > .25
-                   and sign*recent/2 < .45*sign*previous/3)
-        target_ok = True
-        if sig.get("distance") is not None and seconds_left is not None:
-            remaining = float(np.clip(seconds_left,0,900))
-            tolerance = 1.8-1.4*(.12+.88*(1-remaining/900)**1.6)
-            if -sign*cushion > tolerance:
-                target_ok = (strength is not None and strength>=.75 and mom*sign>.04
-                             and not exhausted and (sig.get("trend3")==side or sig.get("trend5")==side))
-        checks = [
-            ("Tres familias respaldan la dirección, con mayoría", agree>=3 and agree>oppose),
-            ("Precio actual y MACD actuales respaldan la entrada", live_ema*sign>0 and m1*sign>0),
-            ("Momentum reciente y VWAP respaldan la dirección", mom*sign>=.012 and vw*sign>=-.04),
-            ("Desplazamiento actual suficiente respecto a la volatilidad", bool(impulse.get("reliable")) and strength is not None and strength>=.65 and current_move is not None and current_move*sign>=.65),
-            ("Movimiento reciente persistente y a favor", recent is not None and recent*sign>=.15 and efficiency is not None and efficiency>=.35),
-            ("Participación reciente suficiente", participation>=.8 or flow_ok),
-            ("Sin agotamiento ni desaceleración marcada", not exhausted and not slowing),
-            ("Fuera de la zona de ruido", noise_ok),
-            ("Distancia al target y tiempo respaldan la dirección", target_ok),
-        ]
-        sides[side] = [{"name":"FLUJO + IMPULSO" if flow_ok else "EVIDENCIA ACTUAL",
-                        "checks":checks, "met":sum(bool(ok) for _,ok in checks),
-                        "total":len(checks), "complete":all(bool(ok) for _,ok in checks)}]
-    return {"valid":True,"sides":sides,"noise_ok":noise_ok}
 
 
 
@@ -2333,25 +2200,11 @@ def entry_quality(price, seconds_left):
 
 
 # =========================================================
-# CONTROL DE RONDA — EL CEREBRO MANDA
+# CONTROL DE RONDA — MOTOR ACTUAL
 # =========================================================
 
-def _retention_assessment(state, signal):
-    """Use the same evidence families as entry/reversal decisions."""
-    side = state.get("active_direction")
-    if side not in ("UP", "DOWN"):
-        return 0, 0
-    families = _direction_evidence(signal)
-    return (sum(v == side for v in families.values()),
-            sum(v != side for v in families.values()))
 
 
-def _retention_supported(state, signal, seconds_left):
-    """Partial weakening is not sufficient to withdraw an existing signal."""
-    if seconds_left is None or seconds_left <= 0:
-        return False
-    support, _ = _retention_assessment(state, signal)
-    return support >= 2
 
 
 def _reset_withdrawal(state):
@@ -2359,160 +2212,16 @@ def _reset_withdrawal(state):
                  withdraw_since=None, withdraw_last_at=None, retention_warning=None)
 
 
-def _review_active_retention(state, signal, seconds_left, now):
-    """Report weakening without silently withdrawing a confirmed direction.
-
-    Direction changes are handled by the same confirmation path as entries.
-    """
-    side = state.get("active_direction")
-    if side not in ("UP", "DOWN"):
-        _reset_withdrawal(state)
-        return
-    support, contrary = _retention_assessment(state, signal)
-    _reset_withdrawal(state)
-    if contrary > support and contrary >= 2:
-        state["retention_warning"] = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
 
 
-def _direction_evidence(signal):
-    """Independent evidence families; price relative to target is NOT a trend vote."""
-    if not isinstance(signal, dict) or signal.get("data_valid") is False:
-        return {}
-    families = {}
-    ema = signal.get("ema")
-    if ema in ("BULL", "BEAR"):
-        families["trend"] = "UP" if ema == "BULL" else "DOWN"
-    # Short and medium trend belong to one family; disagreement abstains.
-    trends = [signal.get(k) for k in ("trend3", "trend5")]
-    trends = [v for v in trends if v in ("UP", "DOWN")]
-    if trends and len(set(trends)) == 1:
-        families["structure"] = trends[0]
-    rsi = _plan_number(signal.get("rsi"))
-    if rsi is not None and abs(rsi - 50) >= 3:
-        families["oscillator"] = "UP" if rsi > 50 else "DOWN"
-    momentum = [_plan_number(signal.get(k)) for k in ("mom3", "mom5")]
-    momentum = [v for v in momentum if v is not None and abs(v) >= .012]
-    if momentum and all(v > 0 for v in momentum):
-        families["momentum"] = "UP"
-    elif momentum and all(v < 0 for v in momentum):
-        families["momentum"] = "DOWN"
-    return families
 
 
-def _direction_consistent(candidate, signal, active=None):
-    """One evidence policy; neutral families abstain, lagging trend has no veto."""
-    if candidate not in ("UP", "DOWN"):
-        return False
-    families = _direction_evidence(signal)
-    agree = sum(v == candidate for v in families.values())
-    oppose = sum(v != candidate for v in families.values())
-    if agree < 3 or agree <= oppose:
-        return False
-    if active in ("UP", "DOWN") and active != candidate:
-        return families.get("momentum") == candidate and (
-            families.get("oscillator") == candidate or families.get("structure") == candidate)
-    return True
 
 
-def _observe_reversal_prices(state, signal, now):
-    """Actual live observations only; shared by foreground/background transactions."""
-    if not signal or signal.get("data_valid") is False:
-        state["reversal_live_tape"] = []
-        return
-    price = _plan_number(signal.get("price"))
-    source = signal.get("price_source")
-    if price is None or price <= 0 or source not in ("COINBASE", "KALSHI LIVE"):
-        state["reversal_live_tape"] = []
-        return
-    stamp = now.timestamp()
-    tape = state.get("reversal_live_tape") or []
-    if state.get("reversal_live_source") != source or (tape and
-            (stamp < tape[-1][0] or stamp-tape[-1][0] > SIGNAL_CONFIRM_MAX_GAP)):
-        tape = []
-    tape = [item for item in tape if 0 <= stamp-item[0] <= 30]
-    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
-        tape.append([stamp, price])
-    state["reversal_live_tape"] = tape
-    state["reversal_live_source"] = source
 
 
-def _reversal_assessment(state, candidate, signal, seconds_left):
-    """Consensus plus fresh price movement; weakening alone is not a reversal."""
-    if not _direction_consistent(candidate, signal, state.get("active_direction")):
-        return False, "Evidencia contradictoria o insuficiente para invertir"
-    atr = _plan_number((signal or {}).get("atr"))
-    tape = state.get("reversal_live_tape") or []
-    if atr is None or atr <= 0 or len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
-        return False, "Esperando movimiento reciente que confirme el giro"
-    sign = 1 if candidate == "UP" else -1
-    prices = [float(item[1]) for item in tape]
-    split = len(prices)//2
-    net = sign*(prices[-1]-prices[0])
-    recent = sign*(prices[-1]-prices[split])
-    travel = sum(abs(b-a) for a,b in zip(prices,prices[1:]))
-    minimum = max(2., .12*atr)
-    if (net < minimum or recent < minimum*.4 or net/max(travel,1e-8) < .55
-            or sign*(prices[-1]-prices[-2]) < -.25*minimum):
-        return False, "El precio reciente todavía no confirma una reversión"
-    distance = _plan_number((signal or {}).get("distance"))
-    if seconds_left is not None and 0 < seconds_left <= 90 and distance is not None and sign*distance < 0:
-        elapsed = tape[-1][0]-tape[split][0]
-        speed = recent/max(elapsed,1.)
-        allowance = speed*seconds_left + .5*atr*np.sqrt(seconds_left/60.)
-        if abs(distance) > allowance:
-            return False, "Distancia y tiempo de cierre no respaldan el giro"
-    return True, "Consenso de indicadores y movimiento reciente confirman el giro"
 
 
-def _round_opening_crosscheck(state, candidate, signal, now):
-    """Require fresh directional evidence before the first entry of this ticker.
-
-    Old candles remain context, never sufficient evidence for an opening entry.
-    Each live feed has a separate short tape. Later reversals are unrestricted.
-    """
-    if state.get("first_direction") in ("UP", "DOWN"):
-        state["opening_conflict"] = None
-        return candidate
-    def wait(reason):
-        state["opening_conflict"] = reason
-        return None
-    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
-        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
-    if not signal or signal.get("data_valid") is False:
-        return wait("Esperando datos actuales para la primera señal")
-    price = _plan_number(signal.get("price"))
-    atr = _plan_number(signal.get("atr"))
-    source = signal.get("price_source")
-    if (price is None or price <= 0 or atr is None or atr <= 0
-            or source not in ("COINBASE", "KALSHI LIVE")):
-        return wait("Esperando precio en vivo para la primera señal")
-    stamp = now.timestamp()
-    tapes = state.setdefault("opening_live_tapes", {})
-    tape = tapes.get(source, [])
-    if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
-        tape = []
-    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
-    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
-        tape.append([stamp, price])
-    tapes[source] = tape
-    if candidate not in ("UP", "DOWN"):
-        return wait("Analizando fuerza actual antes de la primera señal")
-    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
-        return wait("Observando movimiento actual antes de la primera señal")
-    prices = [float(x[1]) for x in tape]
-    sign = 1 if candidate == "UP" else -1
-    split = len(prices)//2
-    net = sign*(prices[-1]-prices[0])
-    recent = sign*(prices[-1]-prices[split])
-    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
-    efficiency = net/max(travel, 1e-8)
-    minimum = max(2.0, .10*atr)
-    latest = sign*(prices[-1]-prices[-2])
-    if (net < minimum or recent < .5*minimum or efficiency < .60
-            or latest < -.25*minimum):
-        return wait("Sin fuerza actual suficiente para " + candidate)
-    state["opening_conflict"] = None
-    return candidate
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
@@ -3758,87 +3467,37 @@ draw();
 </script></html>'''
 
 
-def signal_requirement_view(sig, seconds_left):
-    return _entry_route_checks(sig, seconds_left)
 
 
-def _diagnostic_entry_parts(sig, side):
-    """Display-only decomposition of the two combined admission checks."""
-    sign = 1 if side == 'UP' else -1
-    def part(label, key, threshold, strict=False):
-        value = _plan_number(sig.get(key))
-        signed = None if value is None else value*sign
-        ok = signed is not None and (signed>threshold if strict else signed>=threshold)
-        relation = '>' if strict else '≥'
-        detail = ('SIN DATO' if value is None else format(value, '.6g'))
-        detail += ' · valor × dirección '+relation+' '+str(threshold)
-        return label, ok, detail
-    return {
-        'Precio actual y MACD actuales respaldan la entrada': [
-            part('Precio frente a EMA9 (distancia en ATR)', 'price_ema9_atr', 0, True),
-            part('MACD de 1 minuto (histograma)', 'macd1', 0, True)],
-        'Momentum reciente y VWAP respaldan la dirección': [
-            part('Momentum de 3 minutos (%)', 'mom3', .012),
-            part('Precio frente a VWAP (distancia en ATR)', 'vwap_atr', -.04)],
-    }
 
 
 def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
-    """Display the exact admission booleans for BOTH sides; no trading changes."""
-    view = signal_requirement_view(sig, seconds_left)
-    def esc(value):
-        return html.escape(str(value), quote=True)
-    style = '<style>.diag{margin:12px 0;padding:14px;border:1px solid #dfc58d;border-radius:14px;background:#081923;color:#eaf1f6}.diag h3{margin:0 0 10px;font-size:14px}.diag p{font-size:11px;line-height:1.5;color:#b6c3ce}.diag-side{margin-top:14px}.diag-row{padding:8px 0;border-bottom:1px solid #293b45;font-size:11px;line-height:1.45}.diag-state{font-weight:800}.diag-ok{color:#00d9b0}.diag-no{color:#ff646b}.diag-meter{height:6px;background:#273641;border-radius:8px;margin:8px 0;overflow:hidden}.diag-meter i{display:block;height:100%;background:#00d9b0}.diag-down .diag-meter i{background:#ff646b}.diag-values{font-size:10px;line-height:1.6;overflow-wrap:anywhere;color:#aabac4}</style>'
-    sections = []
-    if not view.get('valid'):
-        required = ('rsi','rsi3','rsi5','adx','vwap_atr','macd1','macd3','vol_ratio','mom3','mom5','target_atr','price_ema9_atr')
-        missing = [k for k in required if _plan_number(sig.get(k)) is None]
-        sections.append('<p>DATOS INSUFICIENTES: '+esc(', '.join(missing) or 'El motor marca los datos como no válidos')+'</p>')
-    else:
-        for side in ('UP','DOWN'):
-            route = view['sides'][side][0]
-            checks = route['checks']
-            blocked = [label for label, ok in checks if not ok]
-            parts = _diagnostic_entry_parts(sig, side)
-            rendered_rows = []
-            for label, ok in checks:
-                if label in parts:
-                    for part_label, part_ok, detail in parts[label]:
-                        rendered_rows.append('<div class="diag-row"><span class="diag-state '+('diag-ok' if part_ok else 'diag-no')+'">'+('✓ CUMPLE' if part_ok else '✕ BLOQUEA')+'</span> · '+esc(part_label)+'<br><span class="diag-values">'+esc(detail)+'</span></div>')
-                else:
-                    rendered_rows.append('<div class="diag-row"><span class="diag-state '+('diag-ok' if ok else 'diag-no')+'">'+('✓ CUMPLE' if ok else '✕ BLOQUEA')+'</span> · '+esc(label)+'</div>')
-            rows = ''.join(rendered_rows)
-            blocked_parts = [label for label, ok in checks if not ok and label not in parts]
-            blocked_parts += [label for group in parts.values() for label, ok, detail in group if not ok]
-            rows = '<p><b>FRENAN AHORA: </b>'+esc('; '.join(blocked_parts) or 'Ninguna comprobación de entrada')+'</p>'+rows
-            summary = ('ÚLTIMO REQUISITO PENDIENTE: '+blocked[0]) if len(blocked)==1 else (str(len(blocked))+' grupos bloquean ahora') if blocked else 'Todos los requisitos de entrada cumplidos'
-            sections.append('<div class="diag-side '+('diag-down' if side=='DOWN' else '')+'"><b>'+side+' · '+str(route['met'])+'/'+str(route['total'])+' grupos'+'</b><div class="diag-meter"><i style="width:'+str(100*route['met']/route['total'])+'%"></i></div><p>'+esc(summary)+'</p>'+rows+'</div>')
-    import copy
-    state = round_signal.get('round_state') or {}
-    now = now or datetime.now(timezone.utc)
-    extra_rows = []
-    def row(label, status, detail=''):
-        return '<div class="diag-row"><b class="'+('diag-ok' if status else 'diag-no')+'">'+('✓ CUMPLE' if status else '✕ PENDIENTE / BLOQUEA')+'</b> · '+esc(label)+'<br>'+esc(detail)+'</div>'
-    if view.get('valid'):
-        for side in ('UP','DOWN'):
-            active = state.get('active_direction')
-            consistent = _direction_consistent(side, sig, active)
-            extra_rows.append(row(side+' · Consenso final', consistent, str(_direction_evidence(sig))))
-            if active in ('UP','DOWN') and active != side:
-                accepted, reason = _reversal_assessment(copy.deepcopy(state), side, sig, seconds_left)
-                extra_rows.append(row(side+' · Reversión de la señal vigente', accepted, reason))
-            opening_copy = copy.deepcopy(state)
-            opening = _round_opening_crosscheck(opening_copy, side, sig, now)
-            extra_rows.append(row(side+' · Movimiento actual de apertura', opening == side, opening_copy.get('opening_conflict') or 'Cumplido o no aplica: ya existe primera señal'))
-    recorded = state.get('confirmation_diagnostic') or {}
-    actual = ''.join(row(label, ok, detail) for label,ok,detail in recorded.get('stages', []))
-    counters = 'Dirección pendiente: '+str(state.get('pending_direction') or 'ninguna')+' · Lecturas: '+str(state.get('pending_count',0))+'/'+str(SIGNAL_CONFIRM_READINGS)+' · Intervalo mínimo: '+str(SIGNAL_CONFIRM_INTERVAL)+' s · Pausa máxima: '+str(SIGNAL_CONFIRM_MAX_GAP)+' s · Fuente: '+str(state.get('pending_price_source') or sig.get('price_source') or 'sin dato')
-    extra_rows.append('<p>'+esc(counters)+'</p>')
-    extra_rows.append('<h3>RECORRIDO REAL DE LA ÚLTIMA EVALUACIÓN</h3><p>'+esc(recorded.get('observed_at') or 'Esperando evaluación con esta versión')+'</p>'+actual+'<p>Motivo del motor: '+esc(state.get('opening_conflict') or state.get('decision_reason') or 'Sin evaluación registrada')+'</p><p>Señal vigente: '+esc(state.get('active_direction') or 'ESPERANDO')+'</p>')
-    sections.append('<div class="diag-side"><h3>CONFIRMACIÓN FINAL</h3>'+''.join(extra_rows)+'</div>')
-    values = ' · '.join(esc(k)+': '+esc(round(float(sig[k]),4) if _plan_number(sig.get(k)) is not None else 'SIN DATO') for k in ('rsi','rsi3','rsi5','adx','vwap_atr','macd1','macd3','vol_ratio','mom3','mom5','target_atr','price_ema9_atr'))
-    return style+'<section class="diag"><h3>CONDICIONES DEL MOTOR · EN VIVO</h3><p>Comprobaciones reales de entrada. Precio, MACD, momentum y VWAP aparecen separados. El contador conserva los 9 grupos originales; no se añadieron requisitos. Valores × dirección: UP = +1, DOWN = −1. No son probabilidades.</p>'+''.join(sections)+'<details><summary>Lecturas de los indicadores</summary><div class="diag-values">'+values+'</div></details><p>Las filas por dirección comprueban el estado actual. El recorrido real muestra las etapas ejecutadas; las posteriores a un bloqueo pueden no ejecutarse. No se desactiva ningún filtro.</p></section>'
-
+    """Show only the inputs and decision of the clean directional engine."""
+    esc = lambda x: html.escape(str(x), quote=True)
+    def number(key, digits=2):
+        value = _plan_number(sig.get(key))
+        return f"{value:.{digits}f}" if value is not None else "SIN DATO"
+    score = _plan_number(sig.get("final_score"))
+    candidate = sig.get("candidate") if sig.get("candidate") in ("UP", "DOWN") else "ESPERANDO"
+    state = round_signal if isinstance(round_signal, dict) else {}
+    active = state.get("active_direction") or "ESPERANDO"
+    reason = state.get("decision_reason") or "Esperando evaluación"
+    threshold = 2.35 if active in ("UP", "DOWN") and candidate != active else 1.25
+    rows = [
+        ("Movimiento del precio", "Principal componente de dirección (peso 2.0)"),
+        ("VWAP", "Distancia en ATR: " + number("vwap_atr") + " · peso 1.3"),
+        ("MACD", "Histograma: " + number("macd1", 5) + " · peso 1.1"),
+        ("RSI", "Valor: " + number("rsi", 1) + " · peso 0.6"),
+        ("Tiempo restante", (f"{int(seconds_left)} segundos" if seconds_left is not None else "SIN DATO")),
+        ("Distancia al target", number("distance") + " USD"),
+    ]
+    style = '<style>.clean-diag{margin:12px 0;padding:15px;border:1px solid #dfc58d;border-radius:14px;background:#081923;color:#eaf1f6}.clean-diag h3{font-size:14px;margin:0 0 10px}.clean-diag p{font-size:12px;line-height:1.5;color:#c5d1da}.clean-diag .clean-row{padding:8px 0;border-bottom:1px solid #293b45;font-size:12px}.clean-diag .clean-row small{display:block;color:#9db0be;margin-top:3px}.clean-diag strong{color:#ffe19a}</style>'
+    entries = ''.join('<div class="clean-row"><b>'+esc(label)+'</b><small>'+esc(detail)+'</small></div>' for label, detail in rows)
+    score_label = f"{score:+.2f}" if score is not None else "SIN DATO"
+    return (style + '<section class="clean-diag"><h3>CEREBRO ACTUAL · EN VIVO</h3>'
+        + '<p>Señal propuesta: <strong>'+esc(candidate)+'</strong> · Señal activa: <strong>'+esc(active)+'</strong></p>'
+        + '<p>Puntuación: <strong>'+esc(score_label)+'</strong> · Umbral aplicable: '+esc(threshold)+'</p>'
+        + entries + '<p>Decisión: '+esc(reason)+'</p></section>')
 
 
 GOLD_TARGET_ICON = '<svg class="jc-metal-icon" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><defs>\n<linearGradient id="jc-target-metal" x1="10" y1="5" x2="52" y2="67" gradientUnits="userSpaceOnUse"><stop stop-color="#fffbd0"/><stop offset=".16" stop-color="#ffe984"/><stop offset=".38" stop-color="#e5b84e"/><stop offset=".56" stop-color="#ffdc62"/><stop offset=".79" stop-color="#bc700e"/><stop offset="1" stop-color="#f7b72b"/></linearGradient>\n<filter id="jc-target-metal-shadow" x="-25%" y="-25%" width="150%" height="160%"><feDropShadow dx="0" dy="1.4" stdDeviation=".65" flood-color="#9e530a" flood-opacity=".9"/><feDropShadow dx="0" dy="0" stdDeviation="1.2" flood-color="#ffd66e" flood-opacity=".32"/></filter>\n</defs><g filter="url(#jc-target-metal-shadow)"><circle cx="32" cy="35" r="24" fill="none" stroke="url(#jc-target-metal)" stroke-width="7" stroke-dasharray="132 19" transform="rotate(-37 32 35)"/>\n<circle cx="32" cy="35" r="13.5" fill="none" stroke="url(#jc-target-metal)" stroke-width="6.5" stroke-dasharray="69 16" transform="rotate(-37 32 35)"/>\n<circle cx="32" cy="35" r="4.7" fill="url(#jc-target-metal)"/>\n<path d="M33 34 55 12" fill="none" stroke="url(#jc-target-metal)" stroke-width="5.5" stroke-linecap="round"/>\n<path d="m51 13 2-9 5 6 7 2-8 5-4 6-2-7-7 1Z" fill="url(#jc-target-metal)"/>\n<path d="M12 22a24 24 0 0 1 33-8M21 28a13.5 13.5 0 0 1 16-6" fill="none" stroke="#fff6b7" stroke-width="1.3" stroke-linecap="round" opacity=".8"/></g></svg>'
