@@ -2308,6 +2308,84 @@ def _structure_context(df, price, atr, rvol):
             "event": event}
 
 
+
+def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvol, whale):
+    """Unified price-structure decision for the OFFICIAL signal only.
+
+    Look for repeatedly tested zones, current rejection/continuation, and the
+    remaining time relative to target distance. No fixed BTC dollar limits.
+    """
+    ctx = {"event":"NONE", "veto":None, "reversal":None,
+           "support":None, "resistance":None, "breakout":None}
+    if len(df) < 26 or not np.isfinite(atr) or atr <= 0:
+        return ctx
+    past = df.iloc[-65:-3]
+    recent = df.iloc[-3:]
+    if len(past) < 20:
+        return ctx
+    support = float(past["low"].min())
+    resistance = float(past["high"].max())
+    tol = float(atr) * .40
+    upper_tests = int((past["high"] >= resistance-tol).sum())
+    lower_tests = int((past["low"] <= support+tol).sum())
+    latest = recent.iloc[-1]
+    previous = recent.iloc[-2]
+    close = float(latest["close"])
+    prev_close = float(previous["close"])
+    op = float(latest["open"])
+    hi = float(latest["high"])
+    lo = float(latest["low"])
+    volume_ok = bool(rvol >= 1.05)
+    whale = whale if isinstance(whale,dict) else {}
+    buy = float(whale.get("buy30") or 0)
+    sell = float(whale.get("sell30") or 0)
+    bearish_pressure = mom3 < 0 and (rsi < 52 or sell > buy)
+    bullish_pressure = mom3 > 0 and (rsi > 48 or buy > sell)
+    # Breakout confirmation uses direction, continuation and volume/impulse.
+    breakout_up = (close > resistance+tol and prev_close > resistance
+                   and close >= prev_close and (volume_ok or mom3 > .04))
+    breakout_down = (close < support-tol and prev_close < support
+                     and close <= prev_close and (volume_ok or mom3 < -.04))
+    ctx.update(support=support,resistance=resistance,
+               resistance_tests=upper_tests,support_tests=lower_tests)
+    if breakout_up:
+        ctx.update(event="BREAKOUT_UP",breakout="UP")
+        return ctx
+    if breakout_down:
+        ctx.update(event="BREAKOUT_DOWN",breakout="DOWN")
+        return ctx
+    # A rejection may begin with a wick, but requires a counter-move.
+    rejected_resistance = (upper_tests >= 2
+        and float(recent["high"].max()) >= resistance-tol
+        and close < resistance and close < prev_close and bearish_pressure)
+    rejected_support = (lower_tests >= 2
+        and float(recent["low"].min()) <= support+tol
+        and close > support and close > prev_close and bullish_pressure)
+    if rejected_resistance:
+        ctx.update(event="RESISTANCE_REJECTION",veto="UP",reversal="DOWN")
+    elif rejected_support:
+        ctx.update(event="SUPPORT_REJECTION",veto="DOWN",reversal="UP")
+    else:
+        # At an established boundary, don't chase an old trend into a new
+        # counter-direction candle; no automatic opposite signal.
+        if upper_tests >= 2 and resistance-tol <= price <= resistance+tol and close < op:
+            ctx.update(event="RESISTANCE_WARNING",veto="UP")
+        elif lower_tests >= 2 and support-tol <= price <= support+tol and close > op:
+            ctx.update(event="SUPPORT_WARNING",veto="DOWN")
+    # Close to settlement, countertrend calls need plausible target crossing.
+    # Use observed recent volatility, not a fixed dollar or seconds cutoff.
+    if ctx["reversal"] and seconds_left is not None and target is not None:
+        seconds = max(0.,float(seconds_left))
+        recent_speed = float(recent["close"].diff().abs().dropna().mean()) / 60.
+        travel = max(recent_speed, float(atr)/60.*.35) * seconds
+        distance = float(price)-float(target)
+        required = max(0.,distance) if ctx["reversal"]=="DOWN" else max(0.,-distance)
+        if seconds <= 0 or required > travel:
+            ctx["reversal"] = None
+            ctx["event"] += "_TARGET_UNREACHABLE"
+    return ctx
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -2342,52 +2420,28 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     route_view = _entry_route_checks(route_input, seconds_left)
     eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
                 for side in ("UP","DOWN")}
+    # One coherent structure evaluation, shared by all official entry routes.
+    # PRESEÑAL is computed separately and is not modified.
     structure = _structure_context(df, price, atr, rvol)
-    # Early support/resistance reversal route. Use only completed candle evidence:
-    # a rejection at the previous-20-candle boundary plus a subsequent hold,
-    # or a live rejection candle with corroborating momentum and volume.
-    # No fixed-dollar threshold and no automatic trade on a mere touch.
-    early_side = None
-    if structure["available"] and len(df) >= 23:
-        last_candles = df.tail(3)
-        for idx in range(len(last_candles) - 1, -1, -1):
-            bar = last_candles.iloc[idx]
-            history = df.iloc[:len(df)-3+idx]
-            if len(history) < 20:
-                continue
-            floor = float(history.tail(20)["low"].min())
-            ceiling = float(history.tail(20)["high"].max())
-            opn, high, low, cls = (float(bar[k]) for k in ("open","high","low","close"))
-            span = max(high-low, 1e-9)
-            body = abs(cls-opn)
-            lower = min(opn,cls)-low
-            upper = high-max(opn,cls)
-            bounce = (low <= floor and cls > floor and cls > opn
-                      and lower/span >= .25 and lower >= body*.7)
-            reject = (high >= ceiling and cls < ceiling and cls < opn
-                      and upper/span >= .25 and upper >= body*.7)
-            current = df.iloc[-1]
-            current_close = float(current["close"])
-            # A later candle must preserve the rejection; avoid stale signals.
-            if bounce and current_close >= cls and mom3 > 0 and rsi1 >= 45 and price > floor:
-                early_side = "UP"
-                break
-            if reject and current_close <= cls and mom3 < 0 and rsi1 <= 55 and price < ceiling:
-                early_side = "DOWN"
-                break
-    if early_side and seconds_left is not None and seconds_left > 90:
-        # Allow the rejection route to compete with existing routes; it cannot
-        # override opposite completed routes or the boundary safety veto.
-        other = "DOWN" if early_side == "UP" else "UP"
-        if not eligible[other]:
-            eligible[early_side].append({"name":"RECHAZO DE NIVEL + IMPULSO",
-                "checks":[("Rechazo confirmado por vela",True),
-                          ("Continuidad del impulso",True)],
-                "met":2,"total":2,"complete":True})
-            structure["early_rejection"] = early_side
-    if structure["up_blocked"]:
+    levels = _level_decision_context(
+        df, price, atr, seconds_left, target, mom3, rsi1, rvol, whale)
+    structure["level_decision"] = levels
+    if levels["veto"] in ("UP", "DOWN"):
+        eligible[levels["veto"]] = []
+    if levels["reversal"] in ("UP", "DOWN"):
+        side = levels["reversal"]
+        opposite = "DOWN" if side == "UP" else "UP"
+        if not eligible[opposite]:
+            eligible[side].append({
+                "name": "RECHAZO ESTRUCTURAL CONFIRMADO",
+                "checks": [("Nivel probado previamente", True),
+                           ("Rechazo y presión actual", True),
+                           ("Tiempo y distancia al target compatibles", True)],
+                "met": 3, "total": 3, "complete": True})
+    # Preserve chart-level protection; confirmed breakouts may pass it.
+    if structure["up_blocked"] and levels["breakout"] != "UP":
         eligible["UP"] = []
-    if structure["down_blocked"]:
+    if structure["down_blocked"] and levels["breakout"] != "DOWN":
         eligible["DOWN"] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
