@@ -2261,6 +2261,53 @@ def _entry_route_checks(sig, seconds_left):
 
 
 
+def _structure_context(df, price, atr, rvol):
+    """Same previous-20-candle levels used by the chart; no look-ahead.
+
+    Distinguish confirmed breaks from rejection, rather than treating every
+    touch of a level as a reversal. ATR scales the comparison to volatility.
+    """
+    candles = df.tail(22)
+    if len(candles) < 21:
+        return {"available": False, "support": None, "resistance": None,
+                "up_blocked": False, "down_blocked": False, "event": "INSUFFICIENT_DATA"}
+    prior = candles.iloc[-21:-1]
+    last = candles.iloc[-1]
+    support = float(prior["low"].min())
+    resistance = float(prior["high"].max())
+    op, hi, lo, close = (float(last[k]) for k in ("open", "high", "low", "close"))
+    span = max(hi-lo, 1e-9)
+    body = abs(close-op)
+    upper_wick = hi-max(op, close)
+    lower_wick = min(op, close)-lo
+    # Rejection requires a level test and a meaningful counter-direction candle.
+    rejection_up = (hi >= resistance and close < resistance and close < op
+                    and upper_wick >= body * 0.7 and upper_wick/span >= .25)
+    rejection_down = (lo <= support and close > support and close > op
+                      and lower_wick >= body * 0.7 and lower_wick/span >= .25)
+    # Confirmed continuation requires closing beyond the level with a body
+    # in the breakout direction and volume or a meaningful ATR-sized body.
+    break_up = (close > resistance and close > op and
+                (rvol >= 1.15 or body >= atr*.45))
+    break_down = (close < support and close < op and
+                  (rvol >= 1.15 or body >= atr*.45))
+    # Near a boundary without breakout confirmation, do not chase into it
+    # when the last candle is already turning against the proposed entry.
+    near_resistance = 0 <= resistance-price <= atr*.45
+    near_support = 0 <= price-support <= atr*.45
+    up_blocked = bool(rejection_up or (near_resistance and close < op and not break_up))
+    down_blocked = bool(rejection_down or (near_support and close > op and not break_down))
+    event = ("RESISTANCE_REJECTION" if rejection_up else
+             "SUPPORT_REJECTION" if rejection_down else
+             "BREAKOUT_UP" if break_up else "BREAKOUT_DOWN" if break_down else
+             "NEAR_RESISTANCE" if near_resistance else
+             "NEAR_SUPPORT" if near_support else "NONE")
+    return {"available": True, "support": support, "resistance": resistance,
+            "up_blocked": up_blocked, "down_blocked": down_blocked,
+            "break_up": bool(break_up), "break_down": bool(break_down),
+            "event": event}
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -2295,6 +2342,11 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     route_view = _entry_route_checks(route_input, seconds_left)
     eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
                 for side in ("UP","DOWN")}
+    structure = _structure_context(df, price, atr, rvol)
+    if structure["up_blocked"]:
+        eligible["UP"] = []
+    if structure["down_blocked"]:
+        eligible["DOWN"] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
     quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
@@ -2308,7 +2360,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
