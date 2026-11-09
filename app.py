@@ -2254,8 +2254,18 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     distance = signal.get("distance")
     # Opposite evidence must be materially stronger than the initial admission.
     required = 2.35 if active in ("UP","DOWN") else 1.25
-    if abs(score) < required:
-        state["decision_reason"] = "Evidencia insuficiente para cambiar dirección"
+    counter_evidence = state.get("counter_evidence") if state.get("signal_engine_revision") == "counter_impulse_v2" else None
+    if active is None and counter_evidence is not None:
+        # Contraria temprana: validar fuerza OBSERVADA, sin alterar final_score.
+        # Tres confirmaciones independientes y presión real del precio o score.
+        supported = (counter_evidence.get("indicators", 0) >= 3 and
+                     (counter_evidence.get("price_atr", 0) >= .10 or
+                      counter_evidence.get("score_change", 0) >= .48))
+        if not supported:
+            state["decision_reason"] = "Presión contraria insuficiente"
+            return
+    elif abs(score) < required or (score > 0) != (candidate == "UP"):
+        state["decision_reason"] = "Puntuación real insuficiente o dirección incoherente"
         return
     if active in ("UP","DOWN") and seconds_left is not None and seconds_left < 120 and distance is not None:
         # A reversal near expiry must overcome target distance, not just flip momentum.
@@ -4203,6 +4213,7 @@ def _counter_impulse_candidate(state, signal, seconds_left, now):
     """
     if not signal or signal.get("data_valid") is False or seconds_left is None or seconds_left <= 0:
         return None
+    state["counter_evidence"] = None  # Nunca reutilizar evidencia de una lectura anterior.
     price = float(signal.get("price") or 0)
     atr = max(float(signal.get("atr") or 0), 1e-8)
     if price <= 0:
@@ -4254,7 +4265,7 @@ def _counter_impulse_candidate(state, signal, seconds_left, now):
     rsi_turn = sign*rsi_delta
     evidence = sum((pressure >= .045, weakening >= .22, macd_turn >= .018, rsi_turn >= 1.2))
     strong_turn = (pressure >= .10 or weakening >= .48)
-    if evidence < 2 or not strong_turn:
+    if evidence < 3 or not strong_turn:
         return None
     # Evitar señales inviables cuando queda muy poco tiempo frente al target.
     distance = signal.get("distance")
@@ -4270,9 +4281,9 @@ def _counter_impulse_candidate(state, signal, seconds_left, now):
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "counter_impulse_v1":
+    if state.get("signal_engine_revision") != "counter_impulse_v2":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "counter_impulse_v1"
+        state["signal_engine_revision"] = "counter_impulse_v2"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
@@ -4281,14 +4292,8 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
         state["_engine_changed"] = True
     # Sustituye la admisión normal: nunca confirma la dirección dominante.
     candidate = _counter_impulse_candidate(state, signal, seconds_left, now)
-    if state.get("first_direction") is None and candidate is not None:
-        # La evidencia contraria ya se evaluó; no volver a exigir el score
-        # direccional dominante que justamente retrasaba el aviso.
-        counter_signal = dict(signal)
-        counter_signal["final_score"] = 2.5 if candidate == "UP" else -2.5
-    else:
-        counter_signal = signal
-    result = _confirmation_without_trace(state, candidate, market, seconds_left, now, counter_signal)
+    # Pasar lecturas reales, sin sustituir ni inflar la puntuación del motor.
+    result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
     if not isinstance(state.get("exit_plan"), dict) and state.get("first_direction") in ("UP", "DOWN"):
         state["exit_plan"] = make_exit_plan(state, signal, seconds_left, now)
@@ -4296,7 +4301,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"counter_impulse_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"counter_impulse_v2", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
@@ -4334,7 +4339,7 @@ def export_round_diagnostics(ticker, limit=4000):
     with sqlite3.connect(SIGNAL_TRACE_DB, timeout=1) as conn:
         total, last_id = conn.execute("SELECT COUNT(*),MAX(id) FROM decisions WHERE kind='confirmation' AND ticker=?", (ticker,)).fetchone()
         rows = conn.execute("SELECT id,observed_at,thread_key,ticker,build_id,payload FROM decisions WHERE kind='confirmation' AND ticker=? AND id<=? ORDER BY id LIMIT ?", (ticker, last_id or 0, int(limit))).fetchall()
-        header = dict(schema_version=1,ticker=ticker,engine_variant="counter_impulse_v1",
+        header = dict(schema_version=1,ticker=ticker,engine_variant="counter_impulse_v2",
                       exported_at=datetime.now(timezone.utc).isoformat(),
                       available_confirmations=total,exported_confirmations=len(rows),
                       truncated=total > len(rows),history=history)
