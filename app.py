@@ -936,6 +936,26 @@ section.main .block-container > * {
   position:relative;
   z-index:1;
 }
+
+/* SOLO TABLETS (601–1199px): usar el ancho de pantalla disponible.
+   No cambia estilos del teléfono ni lógica del motor. */
+@media screen and (min-width: 601px) and (max-width: 1199px) {
+  [data-testid="stMain"] .block-container,
+  section.main .block-container,
+  .stApp .block-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+    box-sizing: border-box !important;
+  }
+  [data-testid="stMain"] .block-container::before,
+  section.main .block-container::before {
+    width: 100% !important;
+    left: 0 !important;
+    transform: none !important;
+  }
+}
 </style>
 """,
     unsafe_allow_html=True,
