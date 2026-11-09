@@ -15,7 +15,7 @@ from email.utils import parsedate_to_datetime
 
 # =========================================================
 # MACALY + ALPHA BOT v4.6.1 • MOBILE PRO UI
-# BTC 15 MIN • COHERENT CONSENSUS DECISION ENGINE v7
+# BTC 15 MIN • SAME v4.6.1 SIGNAL ENGINE
 # =========================================================
 
 st.set_page_config(
@@ -33,10 +33,9 @@ NEW_ROUND_WAIT = 8
 NEW_ENTRY_LOCK = 75
 
 # Dos lecturas coherentes, separadas por al menos 2 s (mínimo 2 s).
-# Confirmación consistente: varias lecturas separadas; no basta un tick aislado.
-SIGNAL_CONFIRM_READINGS = 1
-SIGNAL_CONFIRM_INTERVAL = 2.5
-# Una pausa prolongada invalida la secuencia pendiente.
+SIGNAL_CONFIRM_READINGS = 2
+SIGNAL_CONFIRM_INTERVAL = 2.0
+# Caducidad operativa: una pausa >10s reinicia las lecturas pendientes.
 SIGNAL_CONFIRM_MAX_GAP = 10.0
 LIVE_PRICE_MAX_AGE = 30.0
 _PRICE_OBSERVATIONS = threading.local()
@@ -1100,7 +1099,7 @@ def new_round_state(ticker, seconds_left):
 # =========================================================
 
 LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
-ROUND_STATE_DB = 'btc_signal_round_state_single_writer_v10.db'
+ROUND_STATE_DB = 'btc_signal_round_state_v2.db'
 _ROUND_TRANSACTION = threading.local()
 
 
@@ -1127,8 +1126,14 @@ def _load_state_from_connection(conn, ticker):
     row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
     if row:
         return _decode_round_payload(row[0])
-    # No importar una confirmación creada por motores anteriores.
-    return None
+    # La primera lectura conserva la ronda anterior, sin permitir que un trabajador
+    # antiguo escriba en la nueva base coordinada.
+    try:
+        with sqlite3.connect('file:' + LEGACY_ROUND_STATE_DB + '?mode=ro', uri=True, timeout=1) as legacy:
+            row = legacy.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
+        return _decode_round_payload(row[0]) if row else None
+    except Exception:
+        return None
 
 
 def load_round_state(ticker):
@@ -1198,45 +1203,14 @@ def _run_round_transaction(action):
 
 
 def process_round_signal(ticker, sig, market, seconds_left):
-    """Vista de solo lectura: NUNCA confirma ni escribe señales.
-
-    El registrador autónomo es el único escritor del estado de ronda.
-    Tanto las alertas como la pantalla usan su confirmación persistida.
-    """
     if not ticker or ticker == '--':
-        return {"decision":"NO TRADE","signal":"SIN RONDA","icon":"•",
-                "color":"#fbbf24","round_state":None,"reversal":False,
-                "reversal_text":"","entry_price":None,
-                "entry_quality":"SIN DATOS","entry_quality_color":"#94a3b8"}
-    state = load_round_state(ticker)
-    if state is None:
-        state = new_round_state(ticker, seconds_left)
-    state.pop('_restored_from_disk', None)
-    st.session_state.rounds[ticker] = state
-    st.session_state.active_ticker = ticker
-    active = state.get('active_direction')
-    first = state.get('first_direction')
-    if active == 'UP':
-        decision, label, icon, color = 'UP', 'SEÑAL UP', '⬆', '#00dfb5'
-        entry = get_yes_ask(market)
-    elif active == 'DOWN':
-        decision, label, icon, color = 'DOWN', 'SEÑAL DOWN', '⬇', '#e64b4b'
-        entry = get_no_ask(market)
-    else:
-        decision, icon, color, entry = 'ESPERANDO', '•', '#38bdf8', None
-        if first in ('UP','DOWN'):
-            label = 'SEÑAL ' + first + ' RETIRADA'
-        elif state.get('pending_direction') in ('UP','DOWN'):
-            label = 'CONFIRMANDO ' + state['pending_direction']
-        else:
-            label = state.get('opening_conflict') or 'SIN CONFIRMACIÓN'
-    quality, quality_color = entry_quality(entry, seconds_left)
-    return {"decision":decision,"signal":label,"icon":icon,"color":color,
-            "round_state":state,
-            "reversal":bool(state.get('reversal_warning')),
-            "reversal_text":state.get('reversal_text') or '',
-            "entry_price":entry,"entry_quality":quality,
-            "entry_quality_color":quality_color}
+        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
+    def apply():
+        latest = load_round_state(ticker)
+        if latest is not None:
+            st.session_state.rounds[ticker] = latest
+        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
+    return _run_round_transaction(apply)
 
 
 def _background_update_state(state, sig, market, seconds_left):
@@ -1256,7 +1230,7 @@ def _background_update_state(state, sig, market, seconds_left):
 # =========================================================
 
 LEGACY_HISTORY_DB = "btc_signal_history.db"
-HISTORY_DB = "btc_signal_history_single_writer_v10.db"
+HISTORY_DB = "btc_signal_history_v2.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
@@ -2271,11 +2245,6 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
-    # Niveles de velas anteriores (sin incluir la vela actual en formación).
-    # Se calculan en el mismo marco de 1 minuto usado por el motor.
-    previous = one.iloc[-21:-1]
-    opening_support = float(previous["low"].min()) if len(previous) >= 10 else None
-    opening_resistance = float(previous["high"].max()) if len(previous) >= 10 else None
     def direction(row):
         bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
         bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
@@ -2319,7 +2288,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr,"opening_support":opening_support,"opening_resistance":opening_resistance,"target":target}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
@@ -2458,200 +2427,112 @@ def _reset_withdrawal(state):
 
 
 def _review_active_retention(state, signal, seconds_left, now):
-    """Retire a stale official direction when independent evidence turns against it.
+    """Report weakening without silently withdrawing a confirmed direction.
 
-    A confirmed direction is not allowed to remain displayed as the official
-    call while the live evidence has materially reversed. We first require
-    multiple independent families to oppose it; then the UI returns to
-    ESPERANDO while the opposite candidate completes its own confirmation.
-    The historical first signal is preserved for audit/history.
+    Direction changes are handled by the same confirmation path as entries.
     """
     side = state.get("active_direction")
     if side not in ("UP", "DOWN"):
         _reset_withdrawal(state)
         return
-    families = _direction_evidence(signal)
-    support = sum(v == side for v in families.values())
-    contrary = sum(v != side for v in families.values())
-    state["retention_support"] = support
-    state["retention_contrary"] = contrary
-    if contrary >= 2 and contrary > support:
-        state["retention_warning"] = side + " PERDIENDO RESPALDO • REEVALUANDO DIRECCIÓN"
-    else:
-        state["retention_warning"] = None
-    # No sostener una llamada oficial vieja cuando el consenso independiente
-    # ya se ha desplazado claramente al lado contrario.
-    if contrary >= 3 and support <= 1:
-        state["active_direction"] = None
-        state["active_since"] = None
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        state["pending_price_source"] = None
+    support, contrary = _retention_assessment(state, signal)
+    _reset_withdrawal(state)
+    if contrary > support and contrary >= 2:
+        state["retention_warning"] = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
 
 
 def _direction_evidence(signal):
-    """Independent, non-duplicated live evidence families for both directions.
-
-    The price/target location is deliberately not counted as a trend vote.
-    Support/resistance reaction is a separate family and only votes when price
-    is genuinely near a level and the live move confirms bounce/rejection.
-    """
+    """Independent evidence families; price relative to target is NOT a trend vote."""
     if not isinstance(signal, dict) or signal.get("data_valid") is False:
         return {}
     families = {}
     ema = signal.get("ema")
     if ema in ("BULL", "BEAR"):
         families["trend"] = "UP" if ema == "BULL" else "DOWN"
-
+    # Short and medium trend belong to one family; disagreement abstains.
     trends = [signal.get(k) for k in ("trend3", "trend5")]
     trends = [v for v in trends if v in ("UP", "DOWN")]
-    if len(trends) == 2 and trends[0] == trends[1]:
+    if trends and len(set(trends)) == 1:
         families["structure"] = trends[0]
-
     rsi = _plan_number(signal.get("rsi"))
-    rsi3 = _plan_number(signal.get("rsi3"))
-    if rsi is not None and rsi3 is not None:
-        if rsi >= 53 and rsi3 >= 50:
-            families["oscillator"] = "UP"
-        elif rsi <= 47 and rsi3 <= 50:
-            families["oscillator"] = "DOWN"
-
-    mom3 = _plan_number(signal.get("mom3"))
-    mom5 = _plan_number(signal.get("mom5"))
-    if mom3 is not None and mom5 is not None:
-        if mom3 > 0.015 and mom5 > 0:
-            families["momentum"] = "UP"
-        elif mom3 < -0.015 and mom5 < 0:
-            families["momentum"] = "DOWN"
-
-    macd1 = _plan_number(signal.get("macd1"))
-    macd3 = _plan_number(signal.get("macd3"))
-    macd5 = _plan_number(signal.get("macd5"))
-    if all(v is not None for v in (macd1, macd3, macd5)):
-        if macd1 > 0 and macd3 > 0 and macd5 >= 0:
-            families["macd"] = "UP"
-        elif macd1 < 0 and macd3 < 0 and macd5 <= 0:
-            families["macd"] = "DOWN"
-
-    plus_di = _plan_number(signal.get("plus_di"))
-    minus_di = _plan_number(signal.get("minus_di"))
-    if plus_di is not None and minus_di is not None:
-        gap = plus_di - minus_di
-        if gap >= 2.0:
-            families["directional_pressure"] = "UP"
-        elif gap <= -2.0:
-            families["directional_pressure"] = "DOWN"
-
-    # Estructura cercana: soporte defendido => UP; resistencia rechazada => DOWN.
-    price = _plan_number(signal.get("price"))
-    atr = _plan_number(signal.get("atr"))
-    support = _plan_number(signal.get("opening_support"))
-    resistance = _plan_number(signal.get("opening_resistance"))
-    if price is not None and atr is not None and atr > 0 and mom3 is not None:
-        near_support = support is not None and abs(price - support) <= 0.65 * atr
-        near_resistance = resistance is not None and abs(resistance - price) <= 0.65 * atr
-        if near_support and mom3 > 0.025:
-            families["level_reaction"] = "UP"
-        elif near_resistance and mom3 < -0.025:
-            families["level_reaction"] = "DOWN"
-
+    if rsi is not None and abs(rsi - 50) >= 3:
+        families["oscillator"] = "UP" if rsi > 50 else "DOWN"
+    momentum = [_plan_number(signal.get(k)) for k in ("mom3", "mom5")]
+    momentum = [v for v in momentum if v is not None and v != 0]
+    if momentum and all(v > 0 for v in momentum):
+        families["momentum"] = "UP"
+    elif momentum and all(v < 0 for v in momentum):
+        families["momentum"] = "DOWN"
     return families
 
 
-def _market_consensus(signal):
-    """Una evaluación compartida: familias independientes, sin vetos aislados.
-
-    El precio respecto al target NO cuenta como voto técnico: se utiliza
-    únicamente por el lector de cierre. Los votos neutrales se abstienen.
-    """
-    families = _direction_evidence(signal)
-    weights = {"trend": 1.0, "structure": 1.0, "oscillator": 1.0,
-               "momentum": 1.2, "macd": 0.85,
-               "directional_pressure": 0.85, "level_reaction": 1.15}
-    scores = {side: sum(weights.get(name, 1.0) for name, direction in families.items()
-                        if direction == side) for side in ("UP", "DOWN")}
-    votes = {side: sum(direction == side for direction in families.values())
-             for side in ("UP", "DOWN")}
-    best = "UP" if scores["UP"] > scores["DOWN"] else "DOWN"
-    other = "DOWN" if best == "UP" else "UP"
-    # Tres familias y margen neto, sin exigir unanimidad absoluta.
-    direction = (best if votes[best] >= 3 and
-                 scores[best] >= 3.0 and scores[best]-scores[other] >= 1.35
-                 else None)
-    return direction, scores, votes
-
-
 def _direction_consistent(candidate, signal, active=None):
-    direction, scores, votes = _market_consensus(signal)
-    if candidate != direction:
+    """Single policy for entry and reversal, using nonduplicated families.
+
+    Reversal requires stronger consensus than first entry; a transient
+    oscillation cannot override a previously confirmed signal.
+    """
+    if candidate not in ("UP", "DOWN"):
         return False
+    families = _direction_evidence(signal)
+    if len(families) < 3:
+        return False
+    agree = sum(v == candidate for v in families.values())
+    oppose = len(families) - agree
     if active in ("UP", "DOWN") and active != candidate:
-        other = active
-        return votes[candidate] >= 4 and scores[candidate]-scores[other] >= 2.0
-    return True
+        return agree >= 3 and oppose == 0
+    return agree >= 3 and agree > oppose
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
-    """Primera decisión: consenso + movimiento reciente real, sin MACD-veto.
+    """Require fresh directional evidence before the first entry of this ticker.
 
-    No depende de las rutas antiguas para abrir una ronda; sus indicadores
-    ya se computaron en _signal_engine_without_trace y llegan en 'signal'.
+    Old candles remain context, never sufficient evidence for an opening entry.
+    Each live feed has a separate short tape. Later reversals are unrestricted.
     """
     if state.get("first_direction") in ("UP", "DOWN"):
         state["opening_conflict"] = None
         return candidate
-
     def wait(reason):
         state["opening_conflict"] = reason
         return None
-
+    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
+        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
     if not signal or signal.get("data_valid") is False:
-        return wait("Esperando datos actuales")
+        return wait("Esperando datos actuales para la primera señal")
     price = _plan_number(signal.get("price"))
     atr = _plan_number(signal.get("atr"))
     source = signal.get("price_source")
-    if (price is None or price <= 0 or atr is None or atr <= 0 or
-            source not in ("COINBASE", "KALSHI LIVE")):
-        return wait("Esperando precio en vivo de referencia")
-
+    if (price is None or price <= 0 or atr is None or atr <= 0
+            or source not in ("COINBASE", "KALSHI LIVE")):
+        return wait("Esperando precio en vivo para la primera señal")
     stamp = now.timestamp()
     tapes = state.setdefault("opening_live_tapes", {})
-    tape = list(tapes.get(source) or [])
+    tape = tapes.get(source, [])
     if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
         tape = []
-    tape = [row for row in tape if 0 <= stamp-row[0] <= 35]
+    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
     if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
         tape.append([stamp, price])
-    tapes[source] = tape[-20:]
-
-    side, scores, votes = _market_consensus(signal)
-    if side is None:
-        return wait("Indicadores sin consenso suficiente")
-    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 5:
-        return wait("Reuniendo movimiento reciente para " + side)
-
-    sign = 1 if side == "UP" else -1
-    # Tomar movimiento de una ventana breve, no obligar a que toda la
-    # ventana de 35s haya ido en un solo sentido.
-    recent = [row for row in tape if tape[-1][0]-row[0] <= 18]
-    if len(recent) < 3:
-        return wait("Analizando continuidad del precio")
-    prices = [float(row[1]) for row in recent]
+    tapes[source] = tape
+    if candidate not in ("UP", "DOWN"):
+        return wait("Analizando fuerza actual antes de la primera señal")
+    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
+        return wait("Observando movimiento actual antes de la primera señal")
+    prices = [float(x[1]) for x in tape]
+    sign = 1 if candidate == "UP" else -1
+    split = len(prices)//2
     net = sign*(prices[-1]-prices[0])
-    travel = sum(abs(y-x) for x,y in zip(prices, prices[1:]))
-    efficiency = net / max(travel, 1e-8)
-    minimum = max(1.5, 0.055*atr)
-    if net < minimum or efficiency < .28:
-        return wait("Sin continuidad reciente para " + side)
-    # Si el precio revierte bruscamente en la última lectura, no autorizar.
-    if sign*(prices[-1]-prices[-2]) < -max(1.0, .06*atr):
-        return wait("Retroceso contrario reciente a " + side)
-    # La reacción en soporte/resistencia ya votó como familia independiente;
-    # no imponer otra puerta de ruptura después del consenso.
+    recent = sign*(prices[-1]-prices[split])
+    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
+    efficiency = net/max(travel, 1e-8)
+    minimum = max(2.0, .10*atr)
+    latest = sign*(prices[-1]-prices[-2])
+    if (net < minimum or recent < .5*minimum or efficiency < .60
+            or latest < -.25*minimum):
+        return wait("Sin fuerza actual suficiente para " + candidate)
     state["opening_conflict"] = None
-    return side
+    return candidate
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
@@ -2660,13 +2541,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     """
     # A candidate is not a confirmation when the available directional
     # evidence contradicts it. Keep the active signal while reassessing.
-    if state.get("first_direction") not in ("UP", "DOWN"):
-        # Una sola evaluación de apertura. Las rutas anteriores no tienen
-        # voto de bloqueo ni de autorización independiente.
-        candidate = _round_opening_crosscheck(state, candidate, signal, now)
-    elif candidate in ("UP", "DOWN") and not _direction_consistent(
-            candidate, signal, state.get("active_direction")):
+    if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
         candidate = None
+    candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
@@ -2685,6 +2562,19 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state[key] = None
         state["pending_count"] = 0
         return
+    # OBSERVACIÓN INICIAL: durante el primer minuto de cada ronda de 15m,
+    # seguir calculando indicadores y recogiendo precios, pero sin confirmar
+    # ni dejar pendiente una primera señal. El reloj viene del cierre real
+    # del mercado, no de cuándo abrió el usuario la pantalla.
+    if (state.get("first_direction") is None
+            and (seconds_left is None or seconds_left > 14 * 60)):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        state["pending_price_source"] = None
+        state["opening_conflict"] = "Analizando el primer minuto de la ronda"
+        return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
         # Una interrupción no demuestra neutralidad ni permite confirmar.
@@ -2696,25 +2586,77 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state["active_direction"] = None
             state["active_since"] = None
         return
-    # Una única decisión autorizada por el consenso y el movimiento reciente.
-    # No se exige otra serie de tres confirmaciones después de la evaluación.
-    # El estado pendiente se limpia siempre para evitar "CONFIRMANDO" eterno.
-    state["pending_direction"] = None
-    state["pending_count"] = 0
-    state["pending_since"] = None
-    state["pending_last_at"] = None
-    state["pending_price_source"] = None
-    _review_active_retention(state, signal, seconds_left, now)
-    if candidate not in ("UP", "DOWN") or candidate == state.get("active_direction"):
+    source = signal.get("price_source") if signal else None
+    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
+        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
+            # Tres lecturas deben pertenecer a una misma referencia de precio.
+            state["pending_direction"] = None
+            state["pending_count"] = 0
+            state["pending_since"] = None
+            state["pending_last_at"] = None
+        state["pending_price_source"] = source
+    if candidate not in ("UP", "DOWN"):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        _review_active_retention(state, signal, seconds_left, now)
         return
-    state["active_direction"] = candidate
-    state["active_since"] = now
-    if state.get("first_direction") is None:
-        state["first_direction"] = candidate
-        state["first_signal_time"] = now
-        state["first_signal_seconds"] = seconds_left
-        state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                       else get_no_ask(market))
+
+    _review_active_retention(state, signal, seconds_left, now)
+    if candidate == state.get("active_direction"):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        return
+
+    last = state.get("pending_last_at")
+    if isinstance(last, str):
+        try:
+            last = datetime.fromisoformat(last)
+        except ValueError:
+            last = None
+    since = state.get("pending_since")
+    if isinstance(since, str):
+        try:
+            since = datetime.fromisoformat(since)
+        except ValueError:
+            since = None
+
+    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
+                              or (now - last).total_seconds() < 0)):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        last = since = None
+    if state.get("pending_direction") != candidate:
+        state["pending_direction"] = candidate
+        state["pending_count"] = 1
+        state["pending_since"] = now.isoformat()
+        state["pending_last_at"] = now.isoformat()
+        return
+
+    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
+        state["pending_count"] = int(state.get("pending_count", 0)) + 1
+        state["pending_last_at"] = now.isoformat()
+
+    elapsed = (now - since).total_seconds() if since else 0
+    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
+            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+        state["active_direction"] = candidate
+        state["active_since"] = now
+        if state.get("first_direction") is None:
+            state["first_direction"] = candidate
+            state["first_signal_time"] = now
+            state["first_signal_seconds"] = seconds_left
+            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                           else get_no_ask(market))
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -2850,7 +2792,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "single_writer_history_v10"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_multi_indicator49_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2950,7 +2892,6 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     state["previous_score"] = float(state.get("last_score", 0.0))
     state["last_score"] = float(sig.get("final_score", 0.0))
     confirm_round_candidate(state, sig.get("candidate"), market, seconds_left, now, sig)
-    state["writer_updated_at"] = now.isoformat()
     save_round_state(state)
     _shadow_capture(state.get("ticker"), sig, state, seconds_left)
     return state
@@ -3767,7 +3708,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 </style>
 <section class="panel">
 <header class="header"><div><h2>BTC / USD</h2><div class="sub" id="subtitle"></div></div><div><div class="price" id="price"></div><div class="live" id="live"></div></div></header>
-<div class="cards" style="display:none" aria-hidden="true"><div class="card signal"><div class="label">SEÑAL OFICIAL DEL BOT</div><strong id="signal" class="cyan">ESPERANDO</strong><small>Motor BTC Signal v4.6.1</small></div><div class="card"><div class="label">APOYO DEL MODELO</div><strong class="cyan" id="model"></strong><small>Apoyo calculado · no probabilidad de acierto</small></div><div class="card"><div class="label">ESTADO DE LA GRÁFICA</div><strong class="status" id="status"></strong><small id="updated"></small></div></div>
+<div class="cards"><div class="card signal"><div class="label">SEÑAL OFICIAL DEL BOT</div><strong id="signal" class="cyan">ESPERANDO</strong><small>Motor BTC Signal v4.6.1</small></div><div class="card"><div class="label">APOYO DEL MODELO</div><strong class="cyan" id="model"></strong><small>Apoyo calculado · no probabilidad de acierto</small></div><div class="card"><div class="label">ESTADO DE LA GRÁFICA</div><strong class="status" id="status"></strong><small id="updated"></small></div></div>
 <details id="whale"><summary>🐋 WHALE FLOW <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>🐋 WHALE FLOW — LIVE</h3><div class="note">Operaciones observadas de Coinbase · últimos 30 s</div><div class="watch" id="watch"></div><div class="metrics"><div class="metric"><small>BUY FLOW</small><b class="green" id="buy"></b></div><div class="metric"><small>SELL FLOW</small><b class="red" id="sell"></b></div><div class="metric"><small>DIFERENCIA</small><b id="diff"></b></div><div class="metric"><small>ACTIVIDAD</small><b id="activity"></b></div><div class="metric"><small>FUERZA DEL DESEQUILIBRIO</small><b id="strength"></b></div></div><div class="bars"><div class="bar">BUY<div class="track"><i id="buybar" style="background:#00dfb5"></i></div><b id="buytotal"></b></div><div class="bar">SELL<div class="track"><i id="sellbar" style="background:#e64b4b"></i></div><b id="selltotal"></b></div></div><div class="count"><div class="metric"><small>🐋 BUY WHALES</small><b class="green" id="buys"></b></div><div class="metric"><small>🐋 SELL WHALES</small><b class="red" id="sells"></b></div></div><div class="metric difference"><small>DIFERENCIA DE OPERACIONES</small><b id="countdiff"></b></div><p class="note">«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. En el laboratorio, el flujo puede apoyar una candidatura solo con confirmación técnica; no decide por sí solo.</p></div></details>
 <details id="momentum"><summary>⚡ SHORT-TERM MOMENTUM <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>MOVIMIENTO RECIENTE DE BTC</h3><div class="metrics" id="momrows"></div><p class="note">Cambio porcentual calculado por el motor en 3, 5 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.</p></div></details>
 <div class="tools"><h3>INDICADORES</h3><div class="toggles" id="toggles"></div><div class="legend" id="legend"></div></div>
@@ -4088,14 +4029,9 @@ def live_dashboard():
     # No se consulta por segunda vez ni modifica las confirmaciones temporales.
 
     state = round_signal.get("round_state")
-    # Never represent historical persisted state as currently live if the worker
-    # stopped receiving fresh data. The first confirmed signal remains in history.
-    updated = _recent_alert_time(state.get("writer_updated_at")) if state else None
-    writer_stale = (updated is None or
-                    (datetime.now(timezone.utc) - updated).total_seconds() > 25)
     active = (
         state.get("active_direction")
-        if state and btc_ok and not writer_stale
+        if state and btc_ok
         else None
     )
 
@@ -4148,7 +4084,7 @@ def live_dashboard():
     if first_display is not None and first_display[0] != ticker:
         st.session_state.pop("first_signal_display")
         first_display = None
-    if first_display is None and state and state.get("ticker") == ticker:
+    if first_display is None and active in ("UP", "DOWN") and state.get("ticker") == ticker:
         side = state.get("first_direction")
         signal_dt = state.get("first_signal_time")
         if side in ("UP", "DOWN") and signal_dt is not None:
@@ -4196,10 +4132,7 @@ def live_dashboard():
         hero_arrow, hero_word = "", "DOWN"
         btc_delta = f"{sig['mom3']:+.2f}%"
     else:
-        first_side = (state or {}).get("first_direction")
-        hero_arrow = "•"
-        hero_word = ("SIN DATOS ACTUALES" if writer_stale else
-                     (first_side + " RETIRADA") if first_side in ("UP", "DOWN") else "ESPERANDO")
+        hero_arrow, hero_word = "•", "ESPERANDO"
         btc_delta = f"{sig['mom3']:+.2f}%"
 
     ema_class = "green" if sig["ema"] == "BULL" else "red"
@@ -4409,11 +4342,9 @@ def live_dashboard():
 
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
-        if st.session_state.get("chart_timeframe") not in (None, "1m", "3m", "5m", "15m", "1h"):
-            st.session_state["chart_timeframe"] = "1m"
         chart_timeframe = st.radio(
             "Temporalidad del gráfico",
-            ["1m", "3m", "5m", "15m", "1h"],
+            ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
             horizontal=True, key="chart_timeframe", label_visibility="collapsed",
         )
         try:
@@ -4687,13 +4618,12 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "single_writer_v10_one_decision":
+    if state.get("signal_engine_revision") != "unified_evidence_v6":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "single_writer_v10_one_decision"
+        state["signal_engine_revision"] = "unified_evidence_v6"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
-                     pending_price_source=None, active_direction=None,
-                     active_since=None)
+                     pending_price_source=None)
         state.setdefault("opening_live_tapes", {})
         _reset_withdrawal(state)
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
@@ -4704,7 +4634,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"single_writer_v10_one_decision", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"limited_retention_exit_plan_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
