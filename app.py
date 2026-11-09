@@ -1036,8 +1036,8 @@ def new_round_state(ticker, seconds_left):
 # Solo guarda el estado de la ronda; NO cambia el cerebro.
 # =========================================================
 
-LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
-ROUND_STATE_DB = 'btc_signal_round_state_v2.db'
+LEGACY_ROUND_STATE_DB = 'alpha_contrario_legacy_no_importar.db'
+ROUND_STATE_DB = 'alpha_contrario_rounds_v1.db'
 _ROUND_TRANSACTION = threading.local()
 
 
@@ -1167,8 +1167,8 @@ def _background_update_state(state, sig, market, seconds_left):
 # No modifica build_signal(), preseñal, lector, ballenas ni gráfico.
 # =========================================================
 
-LEGACY_HISTORY_DB = "btc_signal_history.db"
-HISTORY_DB = "btc_signal_history_v2.db"
+LEGACY_HISTORY_DB = "alpha_contrario_history_legacy_no_importar.db"
+HISTORY_DB = "alpha_contrario_history_v1.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
@@ -2368,8 +2368,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#e64b4b"
         current_entry_price = get_no_ask(market)
     else:
-        decision, signal, icon, color = "ESPERANDO",(state.get("opening_conflict") or
-            ("CONFIRMANDO " + state["pending_direction"] if state.get("pending_direction") in ("UP","DOWN") else "SIN CONFIRMACIÓN")),"•","#38bdf8"
+        decision, signal, icon, color = "ESPERANDO",("ESPERANDO"),"•","#38bdf8"
         current_entry_price = None
 
     quality, quality_color = entry_quality(current_entry_price, seconds_left)
@@ -3700,6 +3699,9 @@ def live_dashboard():
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
     </section>'''
 
+    # En esta variante no se muestra la preseñal de la tendencia principal.
+    pre_html = ""
+
     if active == "UP":
         hero_arrow, hero_word = "", "UP"
         btc_delta = f"{sig['mom3']:+.2f}%"
@@ -4195,18 +4197,101 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     return sig
 
 
+def _counter_impulse_candidate(state, signal, seconds_left, now):
+    """Una dirección inicial de referencia, nunca una señal visible.
+
+    Busca agotamiento y aceleración contraria ANTES de exigir que el
+    indicador direccional principal haya cambiado de lado.
+    Estado persistido por ronda; pantalla y worker comparten esta función.
+    """
+    if not signal or signal.get("data_valid") is False or seconds_left is None or seconds_left <= 0:
+        return None
+    price = float(signal.get("price") or 0)
+    atr = max(float(signal.get("atr") or 0), 1e-8)
+    if price <= 0:
+        return None
+    score = float(signal.get("technical_score") or 0)
+    macd = float(signal.get("macd1") or 0) / atr
+    rsi = float(signal.get("rsi") or 50)
+    # Mantener observaciones recientes para calcular cambios, no sólo niveles.
+    samples = list(state.get("counter_samples") or [])
+    ts = now.timestamp()
+    if not samples or ts > samples[-1][0]:
+        samples.append([ts, price, score, macd, rsi])
+    samples = [row for row in samples if 0 <= ts - row[0] <= 100]
+    state["counter_samples"] = samples[-55:]
+    if state.get("counter_initial") not in ("UP", "DOWN"):
+        # La dirección inicial requiere movimiento observable de ESTA ronda.
+        # No se toma del indicador de velas anteriores ni de la ronda previa.
+        first = samples[0]
+        elapsed = ts - first[0]
+        movement = (price - first[1]) / atr
+        if elapsed >= 5 and abs(movement) >= 0.12:
+            state["counter_initial"] = "UP" if movement > 0 else "DOWN"
+            state["counter_opposite"] = "DOWN" if movement > 0 else "UP"
+            state["counter_locked_at"] = now.isoformat()
+        elif elapsed >= 45:
+            # Sin impulso inicial claro, no inventar la dirección.
+            state["counter_initial"] = "NEUTRAL"
+        return None
+    if state["counter_initial"] == "NEUTRAL":
+        return None
+    opposite = state["counter_opposite"]
+    if state.get("first_direction") in ("UP", "DOWN"):
+        return opposite  # La primera señal se mantiene; nunca gira a la tendencia.
+    # Comparar contra la muestra más cercana a 12-25 segundos atrás.
+    older = [row for row in samples[:-1] if 10 <= ts-row[0] <= 35]
+    if not older:
+        return None
+    prior = older[0]
+    price_delta = (price-prior[1])/atr
+    score_delta = score-prior[2]
+    macd_delta = macd-prior[3]
+    rsi_delta = rsi-prior[4]
+    sign = -1 if opposite == "DOWN" else 1
+    # Se exige un cambio real de impulso más una segunda evidencia.
+    # El precio puede seguir del lado original: no se exige cruce previo.
+    pressure = sign*price_delta
+    weakening = sign*score_delta
+    macd_turn = sign*macd_delta
+    rsi_turn = sign*rsi_delta
+    evidence = sum((pressure >= .045, weakening >= .22, macd_turn >= .018, rsi_turn >= 1.2))
+    strong_turn = (pressure >= .10 or weakening >= .48)
+    if evidence < 2 or not strong_turn:
+        return None
+    # Evitar señales inviables cuando queda muy poco tiempo frente al target.
+    distance = signal.get("distance")
+    if distance is not None and seconds_left < 120:
+        required = sign * float(distance) / atr
+        if required < 0 and abs(required) > max(.35, seconds_left/65):
+            return None
+    state["counter_evidence"] = {"price_atr": round(pressure,3),
+        "score_change": round(weakening,3), "macd_change": round(macd_turn,3),
+        "rsi_change": round(rsi_turn,2), "indicators": evidence}
+    return opposite
+
+
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "clean_direction_v1":
+    if state.get("signal_engine_revision") != "counter_impulse_v1":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "clean_direction_v1"
+        state["signal_engine_revision"] = "counter_impulse_v1"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
         state.setdefault("opening_live_tapes", {})
         _reset_withdrawal(state)
         state["_engine_changed"] = True
-    result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
+    # Sustituye la admisión normal: nunca confirma la dirección dominante.
+    candidate = _counter_impulse_candidate(state, signal, seconds_left, now)
+    if state.get("first_direction") is None and candidate is not None:
+        # La evidencia contraria ya se evaluó; no volver a exigir el score
+        # direccional dominante que justamente retrasaba el aviso.
+        counter_signal = dict(signal)
+        counter_signal["final_score"] = 2.5 if candidate == "UP" else -2.5
+    else:
+        counter_signal = signal
+    result = _confirmation_without_trace(state, candidate, market, seconds_left, now, counter_signal)
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
     if not isinstance(state.get("exit_plan"), dict) and state.get("first_direction") in ("UP", "DOWN"):
         state["exit_plan"] = make_exit_plan(state, signal, seconds_left, now)
@@ -4214,7 +4299,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"clean_direction_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"counter_impulse_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
@@ -4252,7 +4337,7 @@ def export_round_diagnostics(ticker, limit=4000):
     with sqlite3.connect(SIGNAL_TRACE_DB, timeout=1) as conn:
         total, last_id = conn.execute("SELECT COUNT(*),MAX(id) FROM decisions WHERE kind='confirmation' AND ticker=?", (ticker,)).fetchone()
         rows = conn.execute("SELECT id,observed_at,thread_key,ticker,build_id,payload FROM decisions WHERE kind='confirmation' AND ticker=? AND id<=? ORDER BY id LIMIT ?", (ticker, last_id or 0, int(limit))).fetchall()
-        header = dict(schema_version=1,ticker=ticker,engine_variant="clean_direction_v1",
+        header = dict(schema_version=1,ticker=ticker,engine_variant="counter_impulse_v1",
                       exported_at=datetime.now(timezone.utc).isoformat(),
                       available_confirmations=total,exported_confirmations=len(rows),
                       truncated=total > len(rows),history=history)
