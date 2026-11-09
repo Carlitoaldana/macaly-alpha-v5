@@ -2170,53 +2170,58 @@ def _entry_route_checks(sig, seconds_left):
 
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
-    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
-    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
-    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
-    def direction(row):
-        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
-        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
-    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
-    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
-    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
-    target_atr=(distance/atr) if distance is not None else 0.0
-    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
-    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
-    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 0.0
-    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
-    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
-    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
-    # Evaluate all routes for both directions before choosing any candidate.
-    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
-    flow_context = {"direction":flow_side, "valid":False}
-    if isinstance(whale,dict):
-        flow_context["valid"] = (flow_side in ("UP","DOWN") and
-            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
-            float(whale.get("flow_strength") or 0)>=.20)
-    route_input = {"price":price,"atr":atr,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
-        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
-        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
-        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
-        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
-        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
-    route_view = _entry_route_checks(route_input, seconds_left)
-    eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
-                for side in ("UP","DOWN")}
-    choices = [side for side in ("UP","DOWN") if eligible[side]]
-    candidate = choices[0] if len(choices)==1 else None
-    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
-    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
-                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
-    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
-    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
-    # Closing support adapts continuously; it is NOT a calibrated win probability.
-    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
-        weight = .35 + .35 * (180 - seconds_left) / 180
-        evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
-    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
-    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"entry_evidence_internal":route_view,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    """Clean directional engine: continuous evidence, one admission decision."""
+    one = add_indicators(df)
+    if len(one) < 30:
+        raise ValueError("Insufficient candles for signal engine")
+    last = one.iloc[-1]
+    candle_price = float(last["close"])
+    price = float(live_price) if live_price is not None else candle_price
+    atr = float(last["atr"]) if pd.notna(last["atr"]) and last["atr"] > 0 else max(price * .0005, 1.)
+    def safe(key, default=0.):
+        v = last.get(key, default)
+        return float(v) if pd.notna(v) and np.isfinite(float(v)) else float(default)
+    vwap = safe("vwap", price)
+    rsi = safe("rsi", 50)
+    macd = safe("macd_hist") / atr
+    mom3, mom5, mom15 = safe("mom3"), safe("mom5"), safe("mom15")
+    # The direction is measured from movement, VWAP, and momentum; no EMA veto.
+    drift = (price - float(one.iloc[-4]["close"])) / atr
+    vwap_gap = (price - vwap) / atr
+    impulse = np.tanh(drift / 1.5)
+    location = np.tanh(vwap_gap / 1.6)
+    momentum = np.tanh(macd * 8.)
+    rsi_bias = np.tanh((rsi - 50.) / 18.)
+    score = float(2.0 * impulse + 1.3 * location + 1.1 * momentum + .6 * rsi_bias)
+    distance = price - float(target) if target is not None else None
+    target_atr = distance / atr if distance is not None else 0.
+    # As expiration approaches, target distance matters more than a transient candle.
+    if seconds_left is not None and 0 < seconds_left < 180 and distance is not None:
+        closing_weight = .15 + .65 * (180 - seconds_left) / 180
+        score = (1 - closing_weight) * score + closing_weight * 3. * np.tanh(target_atr)
+    confidence = abs(score)
+    candidate = "UP" if score >= 1.25 else "DOWN" if score <= -1.25 else None
+    # No trade on ambiguous, stale, or expired inputs.
+    if seconds_left is not None and seconds_left <= 0:
+        candidate = None
+    quality = "IMPULSO CONFIRMADO" if confidence >= 2.3 and candidate else "MOVIMIENTO CON RESPALDO" if candidate else "ESPERANDO CLARIDAD"
+    up_probability = float(np.clip(50 + score * 8, 5, 95))
+    trend = "UP" if score > .5 else "DOWN" if score < -.5 else "NEUTRAL"
+    return {"price":price,"candle_price":candle_price,"rsi":rsi,"rsi3":rsi,"rsi5":rsi,
+        "mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":safe("vol_ratio"),
+        "ema":"BULL" if score >= 0 else "BEAR","technical_score":score,"target_score":target_atr,
+        "final_score":score,"distance":distance,"distance_pct":distance / float(target) * 100 if target else None,
+        "momentum":"ALCISTA" if score > .5 else "BAJISTA" if score < -.5 else "NEUTRAL",
+        "up_probability":round(up_probability),"down_probability":round(100-up_probability),
+        "candidate":candidate,"quality":quality,"trend3":trend,"trend5":trend,
+        "adx":safe("adx"),"plus_di":safe("plus_di"),"minus_di":safe("minus_di"),
+        "macd3":safe("macd_hist"),"macd5":safe("macd_hist"),"atr":atr,"vwap":vwap,
+        "vwap_atr":vwap_gap,"target_atr":target_atr,"macd1":safe("macd_hist"),
+        "price_ema9_atr":(price-safe("ema9",price))/atr,
+        "entry_route_internal":quality,"entry_evidence_internal":{"sides":{"UP":[],"DOWN":[]}},
+        "flow_context_internal":{"valid":False},"flow_support_internal":{"used":False},
+        "impulse_internal":{},"engine_confidence":confidence}
+
 
 
 def build_presignal(sig, seconds_left):
@@ -2511,149 +2516,64 @@ def _round_opening_crosscheck(state, candidate, signal, now):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """One confirmation path for foreground and background. Neutral readings
-    cancel pending candidates, never erase a confirmed active direction.
-    """
-    state["confirmation_diagnostic"] = {"candidate": candidate, "observed_at": now.isoformat(), "stages": []}
-    diag_stages = state["confirmation_diagnostic"]["stages"]
-    state["decision_reason"] = "Sin candidatura confirmada; se conserva la señal vigente"
-    # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
-    closed = seconds_left is not None and seconds_left <= 0
-    close_time = (market or {}).get("close_time")
-    if close_time:
-        end = pd.to_datetime(close_time, utc=True, errors="coerce")
-        if pd.isna(end):
-            candidate = None
-        else:
-            actual_left = (end - pd.Timestamp(now)).total_seconds()
-            seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
-            closed = seconds_left <= 0
-    diag_stages.append(["Ronda abierta", not closed, "Tiempo restante: " + str(seconds_left)])
-    if closed:
-        _reset_withdrawal(state)
-        for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
-                    "active_direction", "active_since"):
-            state[key] = None
-        state["pending_count"] = 0
-        state["decision_reason"] = "Ronda terminada; pendiente resultado oficial"
+    """Single round-aware confirmation; do not retract on momentary noise."""
+    state["confirmation_diagnostic"] = {"candidate":candidate,"observed_at":now.isoformat(),"stages":[]}
+    end = (market or {}).get("close_time")
+    if end:
+        closing = pd.to_datetime(end, utc=True, errors="coerce")
+        if pd.notna(closing):
+            actual = (closing - pd.Timestamp(now)).total_seconds()
+            seconds_left = actual if seconds_left is None else min(seconds_left, actual)
+    if seconds_left is not None and seconds_left <= 0:
+        state.update(active_direction=None,active_since=None,pending_direction=None,pending_count=0,
+                     pending_since=None,pending_last_at=None,decision_reason="Ronda cerrada")
         return
-    diag_stages.append(["Datos actuales válidos", signal is not None and signal.get("data_valid") is not False, (signal or {}).get("data_error", "")])
-    if signal is not None and signal.get("data_valid") is False:
-        state["reversal_live_tape"] = []
-        _reset_withdrawal(state)
-        # Una interrupción no demuestra neutralidad ni permite confirmar.
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        if seconds_left is not None and seconds_left <= 0:
-            state["active_direction"] = None
-            state["active_since"] = None
+    if signal is None or signal.get("data_valid") is False:
+        state["decision_reason"] = "Sin datos fiables; dirección anterior conservada"
         return
-    _observe_reversal_prices(state, signal, now)
     active = state.get("active_direction")
-    if state.pop("_engine_changed", False) and active in ("UP", "DOWN"):
-        routes = _entry_route_checks(signal or {}, seconds_left).get("sides", {}).get(active, [])
-        if not any(route["complete"] for route in routes):
-            state["active_direction"] = None
-            state["active_since"] = None
-            active = None
-    if candidate in ("UP", "DOWN"):
-        admission = _entry_route_checks(signal or {}, seconds_left)
-        routes = admission.get("sides", {}).get(candidate, [])
-        diag_stages.append(["Admisión de " + candidate, any(route["complete"] for route in routes), "Nueve condiciones de entrada"])
-        if not any(route["complete"] for route in routes):
-            missing = [label for route in routes for label, ok in route["checks"] if not ok]
-            state["decision_reason"] = "Entrada sin respaldo suficiente: " + ("; ".join(missing) or "datos incompletos")
-            candidate = None
-    if candidate in ("UP", "DOWN"):
-        if active in ("UP", "DOWN") and candidate != active:
-            accepted, reason = _reversal_assessment(state, candidate, signal, seconds_left)
-        else:
-            accepted = _direction_consistent(candidate, signal, active)
-            reason = "Consenso suficiente" if accepted else "Evidencia contradictoria o insuficiente"
-        diag_stages.append(["Reversión" if active in ("UP", "DOWN") and candidate != active else "Consenso direccional", bool(accepted), reason])
-        state["decision_reason"] = reason
-        if not accepted:
-            candidate = None
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
-    diag_stages.append(["Movimiento para primera señal", not bool(state.get("opening_conflict")), state.get("opening_conflict") or "Sin bloqueo de apertura"])
-    source = signal.get("price_source") if signal else None
-    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
-        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
-            # Tres lecturas deben pertenecer a una misma referencia de precio.
-            state["pending_direction"] = None
-            state["pending_count"] = 0
-            state["pending_since"] = None
-            state["pending_last_at"] = None
-        state["pending_price_source"] = source
-    if candidate not in ("UP", "DOWN"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        _review_active_retention(state, signal, seconds_left, now)
+    if candidate not in ("UP","DOWN"):
+        state.update(pending_direction=None,pending_count=0,pending_since=None,pending_last_at=None)
+        state["decision_reason"] = "Mercado indeciso; señal activa conservada"
         return
-
-    _review_active_retention(state, signal, seconds_left, now)
-    if candidate == state.get("active_direction"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    if candidate == active:
+        state.update(pending_direction=None,pending_count=0,pending_since=None,pending_last_at=None)
+        state["decision_reason"] = "Dirección confirmada mantenida"
         return
-
+    score = float(signal.get("final_score") or 0)
+    atr = max(float(signal.get("atr") or 1), 1e-6)
+    distance = signal.get("distance")
+    # Opposite evidence must be materially stronger than the initial admission.
+    required = 2.35 if active in ("UP","DOWN") else 1.25
+    if abs(score) < required:
+        state["decision_reason"] = "Evidencia insuficiente para cambiar dirección"
+        return
+    if active in ("UP","DOWN") and seconds_left is not None and seconds_left < 120 and distance is not None:
+        # A reversal near expiry must overcome target distance, not just flip momentum.
+        if (candidate == "UP" and distance < 0 or candidate == "DOWN" and distance > 0):
+            required_move = abs(float(distance)) / atr
+            if required_move > max(.5, seconds_left / 75.):
+                state["decision_reason"] = "Reversión tardía sin recorrido suficiente"
+                return
     last = state.get("pending_last_at")
-    if isinstance(last, str):
-        try:
-            last = datetime.fromisoformat(last)
-        except ValueError:
-            last = None
-    since = state.get("pending_since")
-    if isinstance(since, str):
-        try:
-            since = datetime.fromisoformat(since)
-        except ValueError:
-            since = None
-
-    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
-                              or (now - last).total_seconds() < 0)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        last = since = None
-    if state.get("pending_direction") != candidate:
-        diag_stages.append(["Lecturas consecutivas", False, "Primera lectura de " + candidate])
-        state["pending_direction"] = candidate
-        state["pending_count"] = 1
-        state["pending_since"] = now.isoformat()
-        state["pending_last_at"] = now.isoformat()
+    if isinstance(last,str):
+        try: last = datetime.fromisoformat(last)
+        except ValueError: last = None
+    if state.get("pending_direction") != candidate or last is None or (now-last).total_seconds() > 30 or (now-last).total_seconds() < 0:
+        state.update(pending_direction=candidate,pending_count=1,pending_since=now.isoformat(),pending_last_at=now.isoformat())
+        state["decision_reason"] = "Dirección candidata observada"
         return
+    if (now-last).total_seconds() < 2:
+        return
+    state.update(active_direction=candidate,active_since=now,pending_direction=None,pending_count=0,
+                 pending_since=None,pending_last_at=None,
+                 decision_reason="Reversión respaldada" if active else "Primera señal confirmada")
+    if state.get("first_direction") is None:
+        state["first_direction"] = candidate
+        state["first_signal_time"] = now
+        state["first_signal_seconds"] = seconds_left
+        state["first_signal_price"] = get_yes_ask(market) if candidate == "UP" else get_no_ask(market)
 
-    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] = int(state.get("pending_count", 0)) + 1
-        state["pending_last_at"] = now.isoformat()
-
-    elapsed = (now - since).total_seconds() if since else 0
-    diag_stages.append(["Lecturas consecutivas y tiempo mínimo", state["pending_count"] >= SIGNAL_CONFIRM_READINGS and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1), str(state["pending_count"]) + "/" + str(SIGNAL_CONFIRM_READINGS) + " lecturas; " + str(round(elapsed, 1)) + " s"])
-    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
-        state["active_direction"] = candidate
-        state["active_since"] = now
-        state["decision_reason"] = ("Reversión confirmada a " if active in ("UP", "DOWN")
-                                    else "Primera señal confirmada: ") + candidate
-        _reset_withdrawal(state)
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -4646,9 +4566,9 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "coherent_admission_v8":
+    if state.get("signal_engine_revision") != "clean_direction_v1":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "coherent_admission_v8"
+        state["signal_engine_revision"] = "clean_direction_v1"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
@@ -4663,7 +4583,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"coherent_admission_v8", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"clean_direction_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
@@ -4701,7 +4621,7 @@ def export_round_diagnostics(ticker, limit=4000):
     with sqlite3.connect(SIGNAL_TRACE_DB, timeout=1) as conn:
         total, last_id = conn.execute("SELECT COUNT(*),MAX(id) FROM decisions WHERE kind='confirmation' AND ticker=?", (ticker,)).fetchone()
         rows = conn.execute("SELECT id,observed_at,thread_key,ticker,build_id,payload FROM decisions WHERE kind='confirmation' AND ticker=? AND id<=? ORDER BY id LIMIT ?", (ticker, last_id or 0, int(limit))).fetchall()
-        header = dict(schema_version=1,ticker=ticker,engine_variant="coherent_admission_v8",
+        header = dict(schema_version=1,ticker=ticker,engine_variant="clean_direction_v1",
                       exported_at=datetime.now(timezone.utc).isoformat(),
                       available_confirmations=total,exported_confirmations=len(rows),
                       truncated=total > len(rows),history=history)
