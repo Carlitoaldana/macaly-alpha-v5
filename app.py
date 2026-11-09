@@ -2514,6 +2514,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     """One confirmation path for foreground and background. Neutral readings
     cancel pending candidates, never erase a confirmed active direction.
     """
+    state["confirmation_diagnostic"] = {"candidate": candidate, "observed_at": now.isoformat(), "stages": []}
+    diag_stages = state["confirmation_diagnostic"]["stages"]
     state["decision_reason"] = "Sin candidatura confirmada; se conserva la señal vigente"
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
@@ -2526,6 +2528,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             actual_left = (end - pd.Timestamp(now)).total_seconds()
             seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
             closed = seconds_left <= 0
+    diag_stages.append(["Ronda abierta", not closed, "Tiempo restante: " + str(seconds_left)])
     if closed:
         _reset_withdrawal(state)
         for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
@@ -2534,6 +2537,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_count"] = 0
         state["decision_reason"] = "Ronda terminada; pendiente resultado oficial"
         return
+    diag_stages.append(["Datos actuales válidos", signal is not None and signal.get("data_valid") is not False, (signal or {}).get("data_error", "")])
     if signal is not None and signal.get("data_valid") is False:
         state["reversal_live_tape"] = []
         _reset_withdrawal(state)
@@ -2557,6 +2561,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if candidate in ("UP", "DOWN"):
         admission = _entry_route_checks(signal or {}, seconds_left)
         routes = admission.get("sides", {}).get(candidate, [])
+        diag_stages.append(["Admisión de " + candidate, any(route["complete"] for route in routes), "Nueve condiciones de entrada"])
         if not any(route["complete"] for route in routes):
             missing = [label for route in routes for label, ok in route["checks"] if not ok]
             state["decision_reason"] = "Entrada sin respaldo suficiente: " + ("; ".join(missing) or "datos incompletos")
@@ -2567,10 +2572,12 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         else:
             accepted = _direction_consistent(candidate, signal, active)
             reason = "Consenso suficiente" if accepted else "Evidencia contradictoria o insuficiente"
+        diag_stages.append(["Reversión" if active in ("UP", "DOWN") and candidate != active else "Consenso direccional", bool(accepted), reason])
         state["decision_reason"] = reason
         if not accepted:
             candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    diag_stages.append(["Movimiento para primera señal", not bool(state.get("opening_conflict")), state.get("opening_conflict") or "Sin bloqueo de apertura"])
     source = signal.get("price_source") if signal else None
     if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
         if state.get("pending_count", 0) and state.get("pending_price_source") != source:
@@ -2617,6 +2624,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         last = since = None
     if state.get("pending_direction") != candidate:
+        diag_stages.append(["Lecturas consecutivas", False, "Primera lectura de " + candidate])
         state["pending_direction"] = candidate
         state["pending_count"] = 1
         state["pending_since"] = now.isoformat()
@@ -2628,6 +2636,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = now.isoformat()
 
     elapsed = (now - since).total_seconds() if since else 0
+    diag_stages.append(["Lecturas consecutivas y tiempo mínimo", state["pending_count"] >= SIGNAL_CONFIRM_READINGS and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1), str(state["pending_count"]) + "/" + str(SIGNAL_CONFIRM_READINGS) + " lecturas; " + str(round(elapsed, 1)) + " s"])
     if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
             and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
         state["active_direction"] = candidate
@@ -3833,6 +3842,27 @@ def signal_requirement_view(sig, seconds_left):
     return _entry_route_checks(sig, seconds_left)
 
 
+def _diagnostic_entry_parts(sig, side):
+    """Display-only decomposition of the two combined admission checks."""
+    sign = 1 if side == 'UP' else -1
+    def part(label, key, threshold, strict=False):
+        value = _plan_number(sig.get(key))
+        signed = None if value is None else value*sign
+        ok = signed is not None and (signed>threshold if strict else signed>=threshold)
+        relation = '>' if strict else '≥'
+        detail = ('SIN DATO' if value is None else format(value, '.6g'))
+        detail += ' · valor × dirección '+relation+' '+str(threshold)
+        return label, ok, detail
+    return {
+        'Precio actual y MACD actuales respaldan la entrada': [
+            part('Precio frente a EMA9 (distancia en ATR)', 'price_ema9_atr', 0, True),
+            part('MACD de 1 minuto (histograma)', 'macd1', 0, True)],
+        'Momentum reciente y VWAP respaldan la dirección': [
+            part('Momentum de 3 minutos (%)', 'mom3', .012),
+            part('Precio frente a VWAP (distancia en ATR)', 'vwap_atr', -.04)],
+    }
+
+
 def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
     """Display the exact admission booleans for BOTH sides; no trading changes."""
     view = signal_requirement_view(sig, seconds_left)
@@ -3849,11 +3879,45 @@ def render_signal_requirements(sig, round_signal, market, seconds_left, now=None
             route = view['sides'][side][0]
             checks = route['checks']
             blocked = [label for label, ok in checks if not ok]
-            rows = ''.join('<div class="diag-row"><span class="diag-state '+('diag-ok' if ok else 'diag-no')+'">'+('✓ CUMPLE' if ok else '✕ BLOQUEA')+'</span> · '+esc(label)+'</div>' for label,ok in checks)
-            summary = ('ÚLTIMO REQUISITO PENDIENTE: '+blocked[0]) if len(blocked)==1 else (str(len(blocked))+' requisitos bloquean ahora') if blocked else 'Todos los requisitos de entrada cumplidos'
-            sections.append('<div class="diag-side '+('diag-down' if side=='DOWN' else '')+'"><b>'+side+' · '+str(route['met'])+'/'+str(route['total'])+'</b><div class="diag-meter"><i style="width:'+str(100*route['met']/route['total'])+'%"></i></div><p>'+esc(summary)+'</p>'+rows+'</div>')
+            parts = _diagnostic_entry_parts(sig, side)
+            rendered_rows = []
+            for label, ok in checks:
+                if label in parts:
+                    for part_label, part_ok, detail in parts[label]:
+                        rendered_rows.append('<div class="diag-row"><span class="diag-state '+('diag-ok' if part_ok else 'diag-no')+'">'+('✓ CUMPLE' if part_ok else '✕ BLOQUEA')+'</span> · '+esc(part_label)+'<br><span class="diag-values">'+esc(detail)+'</span></div>')
+                else:
+                    rendered_rows.append('<div class="diag-row"><span class="diag-state '+('diag-ok' if ok else 'diag-no')+'">'+('✓ CUMPLE' if ok else '✕ BLOQUEA')+'</span> · '+esc(label)+'</div>')
+            rows = ''.join(rendered_rows)
+            blocked_parts = [label for label, ok in checks if not ok and label not in parts]
+            blocked_parts += [label for group in parts.values() for label, ok, detail in group if not ok]
+            rows = '<p><b>FRENAN AHORA: </b>'+esc('; '.join(blocked_parts) or 'Ninguna comprobación de entrada')+'</p>'+rows
+            summary = ('ÚLTIMO REQUISITO PENDIENTE: '+blocked[0]) if len(blocked)==1 else (str(len(blocked))+' grupos bloquean ahora') if blocked else 'Todos los requisitos de entrada cumplidos'
+            sections.append('<div class="diag-side '+('diag-down' if side=='DOWN' else '')+'"><b>'+side+' · '+str(route['met'])+'/'+str(route['total'])+' grupos'+'</b><div class="diag-meter"><i style="width:'+str(100*route['met']/route['total'])+'%"></i></div><p>'+esc(summary)+'</p>'+rows+'</div>')
+    import copy
+    state = round_signal.get('round_state') or {}
+    now = now or datetime.now(timezone.utc)
+    extra_rows = []
+    def row(label, status, detail=''):
+        return '<div class="diag-row"><b class="'+('diag-ok' if status else 'diag-no')+'">'+('✓ CUMPLE' if status else '✕ PENDIENTE / BLOQUEA')+'</b> · '+esc(label)+'<br>'+esc(detail)+'</div>'
+    if view.get('valid'):
+        for side in ('UP','DOWN'):
+            active = state.get('active_direction')
+            consistent = _direction_consistent(side, sig, active)
+            extra_rows.append(row(side+' · Consenso final', consistent, str(_direction_evidence(sig))))
+            if active in ('UP','DOWN') and active != side:
+                accepted, reason = _reversal_assessment(copy.deepcopy(state), side, sig, seconds_left)
+                extra_rows.append(row(side+' · Reversión de la señal vigente', accepted, reason))
+            opening_copy = copy.deepcopy(state)
+            opening = _round_opening_crosscheck(opening_copy, side, sig, now)
+            extra_rows.append(row(side+' · Movimiento actual de apertura', opening == side, opening_copy.get('opening_conflict') or 'Cumplido o no aplica: ya existe primera señal'))
+    recorded = state.get('confirmation_diagnostic') or {}
+    actual = ''.join(row(label, ok, detail) for label,ok,detail in recorded.get('stages', []))
+    counters = 'Dirección pendiente: '+str(state.get('pending_direction') or 'ninguna')+' · Lecturas: '+str(state.get('pending_count',0))+'/'+str(SIGNAL_CONFIRM_READINGS)+' · Intervalo mínimo: '+str(SIGNAL_CONFIRM_INTERVAL)+' s · Pausa máxima: '+str(SIGNAL_CONFIRM_MAX_GAP)+' s · Fuente: '+str(state.get('pending_price_source') or sig.get('price_source') or 'sin dato')
+    extra_rows.append('<p>'+esc(counters)+'</p>')
+    extra_rows.append('<h3>RECORRIDO REAL DE LA ÚLTIMA EVALUACIÓN</h3><p>'+esc(recorded.get('observed_at') or 'Esperando evaluación con esta versión')+'</p>'+actual+'<p>Motivo del motor: '+esc(state.get('opening_conflict') or state.get('decision_reason') or 'Sin evaluación registrada')+'</p><p>Señal vigente: '+esc(state.get('active_direction') or 'ESPERANDO')+'</p>')
+    sections.append('<div class="diag-side"><h3>CONFIRMACIÓN FINAL</h3>'+''.join(extra_rows)+'</div>')
     values = ' · '.join(esc(k)+': '+esc(round(float(sig[k]),4) if _plan_number(sig.get(k)) is not None else 'SIN DATO') for k in ('rsi','rsi3','rsi5','adx','vwap_atr','macd1','macd3','vol_ratio','mom3','mom5','target_atr','price_ema9_atr'))
-    return style+'<section class="diag"><h3>CONDICIONES DEL MOTOR · EN VIVO</h3><p>Estado actual de las condiciones reales de entrada. Se actualizan y pueden volver a dejar de cumplirse. No son probabilidades.</p>'+''.join(sections)+'<details><summary>Lecturas de los indicadores</summary><div class="diag-values">'+values+'</div></details><p>La confirmación final puede incluir controles adicionales de ronda. Este panel no desactiva filtros.</p></section>'
+    return style+'<section class="diag"><h3>CONDICIONES DEL MOTOR · EN VIVO</h3><p>Comprobaciones reales de entrada. Precio, MACD, momentum y VWAP aparecen separados. El contador conserva los 9 grupos originales; no se añadieron requisitos. Valores × dirección: UP = +1, DOWN = −1. No son probabilidades.</p>'+''.join(sections)+'<details><summary>Lecturas de los indicadores</summary><div class="diag-values">'+values+'</div></details><p>Las filas por dirección comprueban el estado actual. El recorrido real muestra las etapas ejecutadas; las posteriores a un bloqueo pueden no ejecutarse. No se desactiva ningún filtro.</p></section>'
 
 
 
