@@ -715,28 +715,6 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .features>div>b{border-color:#00dfb5!important;color:#00dfb5!important;box-shadow:0 0 9px #00dfb521}
 .targeticon,.clock{color:#8acfc3!important}.btcicon{filter:drop-shadow(0 0 7px #ff9d0044)}
 .stRadio [role="radiogroup"]{gap:8px!important;flex-wrap:wrap;padding:8px 0}
-/* TABLET: selector real st.radio(key="chart_timeframe"); móvil intacto. */
-@media screen and (min-width:601px) and (max-width:1199px){
-  .st-key-chart_timeframe [role="radiogroup"]{
-    display:grid!important;
-    grid-template-columns:repeat(7,minmax(0,1fr))!important;
-    width:100%!important;
-    gap:8px!important;
-    padding:8px 0!important;
-    justify-content:stretch!important;
-  }
-  .st-key-chart_timeframe [role="radiogroup"] > label{
-    width:100%!important;
-    min-width:0!important;
-    margin:0!important;
-    display:flex!important;
-    align-items:center!important;
-    justify-content:center!important;
-    box-sizing:border-box!important;
-    text-align:center!important;
-  }
-}
-
 .stRadio label{border:1px solid #23685e;border-radius:18px;padding:6px 10px!important;background:#110e20;color:#ded9f4!important}
 [data-testid="stButton"] button{border-color:#23685e;color:#ece3ff;background:#141022;border-radius:12px}
 [data-testid="stButton"] button:hover{border-color:#00dfb5;box-shadow:0 0 13px #00dfb533}
@@ -4439,6 +4417,24 @@ def live_dashboard():
 
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
+        # Centrado real de la fila de temporalidades en iPad/tablet.
+        # No cambia la disposición en teléfonos ni el cálculo del gráfico.
+        st.html("""<style>
+        @media (min-width: 700px) and (max-width: 1199px) {
+          div[data-testid="stRadio"] div[role="radiogroup"] {
+            display: flex !important;
+            width: 100% !important;
+            justify-content: center !important;
+            align-items: center !important;
+            flex-wrap: nowrap !important;
+            gap: clamp(8px, 1.5vw, 22px) !important;
+          }
+          div[data-testid="stRadio"] div[role="radiogroup"] > label {
+            flex: 0 0 auto !important;
+            margin: 0 !important;
+          }
+        }
+        </style>""")
         chart_timeframe = st.radio(
             "Temporalidad del gráfico",
             ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
