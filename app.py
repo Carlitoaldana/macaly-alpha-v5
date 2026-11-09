@@ -2535,27 +2535,6 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     return candidate
 
 
-def _lateral_risk_for_entry(signal):
-    """Conservative sideways-risk guard, only for a FIRST official signal.
-    Uses existing indicators; it does not alter the signal engine.
-    """
-    if not isinstance(signal, dict) or signal.get("data_valid") is False:
-        return False
-    try:
-        adx = float(signal.get("adx") or 0)
-        vwap_distance = abs(float(signal.get("vwap_atr") or 0))
-        target_distance = abs(float(signal.get("target_atr") or 0))
-        mom3 = abs(float(signal.get("mom3") or 0))
-        mom5 = abs(float(signal.get("mom5") or 0))
-        trend3, trend5 = signal.get("trend3"), signal.get("trend5")
-        # Require multiple signs of chop rather than vetoing a single slow indicator.
-        return (adx < 19 and vwap_distance < 0.40
-                and target_distance < 0.65 and mom3 < 0.10 and mom5 < 0.15
-                and (trend3 != trend5 or trend3 == "NEUTRAL"))
-    except (TypeError, ValueError, OverflowError):
-        return False
-
-
 def _kalshi_exit_quote(market, side):
     """Best displayed bid in dollars (not a guaranteed execution price)."""
     if not isinstance(market, dict):
@@ -2610,12 +2589,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
         candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
-    # Sideways protection only BEFORE the first signal; existing signal engine unchanged.
-    if state.get("first_direction") is None and candidate in ("UP", "DOWN") and _lateral_risk_for_entry(signal):
-        state["lateral_protection"] = "MERCADO LATERAL · SIN VENTAJA CLARA"
-        candidate = None
-    else:
-        state["lateral_protection"] = None
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
@@ -4108,9 +4081,6 @@ def live_dashboard():
     )
 
     # Read-only notices. These do not alter the official UP/DOWN or trading.
-    if state and state.get("lateral_protection") and not state.get("first_direction"):
-        st.info("🛑 MERCADO LATERAL · Sin ventaja clara. Analizando antes de dar señal.")
-
     # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
     try:
         order_book = get_coinbase_order_book()
