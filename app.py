@@ -3699,9 +3699,6 @@ def live_dashboard():
       <div class="prebar"><b style="width:{pre_percent}%"></b></div>
     </section>'''
 
-    # En esta variante no se muestra la preseñal de la tendencia principal.
-    pre_html = ""
-
     if active == "UP":
         hero_arrow, hero_word = "", "UP"
         btc_delta = f"{sig['mom3']:+.2f}%"
