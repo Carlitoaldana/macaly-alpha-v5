@@ -2386,6 +2386,51 @@ def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvo
     return ctx
 
 
+def _opening_level_gate(df, price, atr, rvol):
+    """Hard gate for fresh official signals near historical support/resistance.
+
+    Uses only candles preceding the latest two observations to avoid treating
+    the current test as an already confirmed breakout. ATR sets zone width.
+    """
+    result = {"blocked": [], "reason": "NONE", "support": None,
+              "resistance": None, "break_up": False, "break_down": False}
+    if len(df) < 24 or not np.isfinite(atr) or atr <= 0:
+        result.update(blocked=["UP", "DOWN"], reason="LEVEL_DATA_INSUFFICIENT")
+        return result
+    history = df.iloc[-62:-2]
+    if len(history) < 20:
+        result.update(blocked=["UP", "DOWN"], reason="LEVEL_DATA_INSUFFICIENT")
+        return result
+    support = float(history["low"].min())
+    resistance = float(history["high"].max())
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    close, previous = float(last["close"]), float(prev["close"])
+    op = float(last["open"])
+    width = max(float(atr) * .65, abs(close - previous) * .5)
+    # A single wick or one unconfirmed candle is not a breakout.
+    break_up = (close > resistance + width * .25 and
+                previous > resistance and close > op and
+                (rvol >= 1.05 or close > previous))
+    break_down = (close < support - width * .25 and
+                  previous < support and close < op and
+                  (rvol >= 1.05 or close < previous))
+    # Near either boundary, do not issue an official direction before a
+    # confirmed break. The opposite direction may still be evaluated normally.
+    near_resistance = abs(float(price) - resistance) <= width
+    near_support = abs(float(price) - support) <= width
+    blocked = []
+    if near_resistance and not break_up:
+        blocked.append("UP")
+    if near_support and not break_down:
+        blocked.append("DOWN")
+    result.update(blocked=blocked, support=support, resistance=resistance,
+                  break_up=bool(break_up), break_down=bool(break_down),
+                  reason="NEAR_RESISTANCE" if "UP" in blocked else
+                         "NEAR_SUPPORT" if "DOWN" in blocked else "NONE")
+    return result
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -2443,6 +2488,12 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         eligible["UP"] = []
     if structure["down_blocked"] and levels["breakout"] != "DOWN":
         eligible["DOWN"] = []
+    # Mandatory boundary gate on the OFFICIAL entry candidate, independent
+    # of route scoring or EMA momentum. Presignal is untouched.
+    opening_levels = _opening_level_gate(df, price, atr, rvol)
+    structure["opening_level_gate"] = opening_levels
+    for blocked_side in opening_levels["blocked"]:
+        eligible[blocked_side] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
     quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
@@ -2757,6 +2808,10 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
         candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
+    if candidate in level_gate.get("blocked", []):
+        candidate = None
+
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
