@@ -4417,29 +4417,30 @@ def live_dashboard():
 
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
-        # Centrado real de la fila de temporalidades en iPad/tablet.
-        # No cambia la disposición en teléfonos ni el cálculo del gráfico.
-        st.html("""<style>
-        @media (min-width: 700px) and (max-width: 1199px) {
-          div[data-testid="stRadio"] div[role="radiogroup"] {
+        st.markdown("""<style>
+        /* Únicamente tablet; el selector se aplica a la fila real del gráfico. */
+        @media (min-width: 600px) and (max-width: 1200px) {
+          .st-key-alpha_timeframe_center [data-testid="stRadio"] [role="radiogroup"] {
             display: flex !important;
-            width: 100% !important;
+            flex-direction: row !important;
             justify-content: center !important;
             align-items: center !important;
             flex-wrap: nowrap !important;
-            gap: clamp(8px, 1.5vw, 22px) !important;
+            width: 100% !important;
+            gap: clamp(8px, 1.5vw, 20px) !important;
           }
-          div[data-testid="stRadio"] div[role="radiogroup"] > label {
-            flex: 0 0 auto !important;
-            margin: 0 !important;
+          .st-key-alpha_timeframe_center [data-testid="stRadio"] {
+            width: 100% !important;
           }
         }
-        </style>""")
-        chart_timeframe = st.radio(
-            "Temporalidad del gráfico",
-            ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
-            horizontal=True, key="chart_timeframe", label_visibility="collapsed",
-        )
+        </style>""", unsafe_allow_html=True)
+        # Fila de temporalidades: un contenedor propio para centrarla en iPad.
+        with st.container(key="alpha_timeframe_center"):
+            chart_timeframe = st.radio(
+                "Temporalidad del gráfico",
+                ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
+                horizontal=True, key="chart_timeframe", label_visibility="collapsed",
+            )
         try:
             chart_df = btc_df if chart_timeframe in ("1m", "3m", "5m") else _neon_chart_history(chart_timeframe)
             chart_html = render_neon_chart(
