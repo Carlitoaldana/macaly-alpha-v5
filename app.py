@@ -2343,6 +2343,48 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
                 for side in ("UP","DOWN")}
     structure = _structure_context(df, price, atr, rvol)
+    # Early support/resistance reversal route. Use only completed candle evidence:
+    # a rejection at the previous-20-candle boundary plus a subsequent hold,
+    # or a live rejection candle with corroborating momentum and volume.
+    # No fixed-dollar threshold and no automatic trade on a mere touch.
+    early_side = None
+    if structure["available"] and len(df) >= 23:
+        last_candles = df.tail(3)
+        for idx in range(len(last_candles) - 1, -1, -1):
+            bar = last_candles.iloc[idx]
+            history = df.iloc[:len(df)-3+idx]
+            if len(history) < 20:
+                continue
+            floor = float(history.tail(20)["low"].min())
+            ceiling = float(history.tail(20)["high"].max())
+            opn, high, low, cls = (float(bar[k]) for k in ("open","high","low","close"))
+            span = max(high-low, 1e-9)
+            body = abs(cls-opn)
+            lower = min(opn,cls)-low
+            upper = high-max(opn,cls)
+            bounce = (low <= floor and cls > floor and cls > opn
+                      and lower/span >= .25 and lower >= body*.7)
+            reject = (high >= ceiling and cls < ceiling and cls < opn
+                      and upper/span >= .25 and upper >= body*.7)
+            current = df.iloc[-1]
+            current_close = float(current["close"])
+            # A later candle must preserve the rejection; avoid stale signals.
+            if bounce and current_close >= cls and mom3 > 0 and rsi1 >= 45 and price > floor:
+                early_side = "UP"
+                break
+            if reject and current_close <= cls and mom3 < 0 and rsi1 <= 55 and price < ceiling:
+                early_side = "DOWN"
+                break
+    if early_side and seconds_left is not None and seconds_left > 90:
+        # Allow the rejection route to compete with existing routes; it cannot
+        # override opposite completed routes or the boundary safety veto.
+        other = "DOWN" if early_side == "UP" else "UP"
+        if not eligible[other]:
+            eligible[early_side].append({"name":"RECHAZO DE NIVEL + IMPULSO",
+                "checks":[("Rechazo confirmado por vela",True),
+                          ("Continuidad del impulso",True)],
+                "met":2,"total":2,"complete":True})
+            structure["early_rejection"] = early_side
     if structure["up_blocked"]:
         eligible["UP"] = []
     if structure["down_blocked"]:
