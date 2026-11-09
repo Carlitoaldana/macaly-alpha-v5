@@ -546,7 +546,38 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .rarrow{font-size:79px;margin-right:5px;line-height:.7}.rhero.waiting .rsignal{font-size:39px;letter-spacing:-2px}.rhero.waiting .rarrow{display:none}
 .rconf{display:inline-block;margin-top:11px;border:1.5px solid var(--accent);border-radius:18px;padding:5px 17px;color:#fff;font-size:10px;font-weight:900;box-shadow:0 0 10px var(--soft)}
 .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:2px}
-.rcard{background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px}
+.rcard{background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px}\n
+/* ALPHA EDGE — acabado visual de reflejos diagonales en todos los paneles */
+.rcard, .finalcard, .analysisbox, .probbox,
+.finalclose, .finalanalysis, .weakness-inline, .prebox,
+.rnav, .techrow > div, .motionrow > div,
+[class*="card"], [class*="panel"], [class*="box"] {
+    background-image:
+      repeating-linear-gradient(125deg,
+        transparent 0px, transparent 13px,
+        rgba(255,217,130,.055) 14px,
+        rgba(255,217,130,.015) 19px,
+        transparent 26px, transparent 43px),
+      linear-gradient(145deg,rgba(250,206,109,.065),transparent 42%,rgba(53,146,168,.045));
+    background-blend-mode:screen,normal;
+}
+.rcard, .finalcard, .analysisbox, .probbox {
+    position:relative;
+    box-shadow:inset 0 1px 0 rgba(255,224,158,.10),
+      0 0 10px rgba(202,155,61,.065);
+}
+.keycard {border-color:rgba(210,169,84,.55);
+    box-shadow:inset 0 1px 0 rgba(255,224,158,.14),0 0 11px rgba(208,166,70,.13);}
+.keycard .targeticon, .keycard .clock {
+    color:#f6cf70;
+    font-weight:900;
+    text-shadow:0 1px 0 #fff1b7,0 2px 2px #7a4c10,0 0 12px rgba(245,184,65,.45);
+    filter:drop-shadow(0 0 3px rgba(255,194,75,.3));
+}
+.keycard .targeticon {font-size:35px;}
+.keycard .clock {font-size:34px;}
+.keycard > * {position:relative;z-index:1;}
+
 .keycard{height:68px;padding:8px 9px;display:flex;align-items:center;gap:8px}
 .bigicon{font-size:31px;font-weight:900;line-height:1}.btcicon{color:#ff9d00}.targeticon{color:#8acfc3}
 .rlabel{font-size:8px;color:#b9c9dc;letter-spacing:.4px}.rvalue{font-size:19px;font-weight:900;line-height:1.05;margin-top:2px}.rdelta{font-size:9px;font-weight:900;margin-top:2px}
@@ -1036,8 +1067,8 @@ def new_round_state(ticker, seconds_left):
 # Solo guarda el estado de la ronda; NO cambia el cerebro.
 # =========================================================
 
-LEGACY_ROUND_STATE_DB = 'alpha_contrario_legacy_no_importar.db'
-ROUND_STATE_DB = 'alpha_contrario_rounds_v1.db'
+LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
+ROUND_STATE_DB = 'btc_signal_round_state_v2.db'
 _ROUND_TRANSACTION = threading.local()
 
 
@@ -1167,8 +1198,8 @@ def _background_update_state(state, sig, market, seconds_left):
 # No modifica build_signal(), preseñal, lector, ballenas ni gráfico.
 # =========================================================
 
-LEGACY_HISTORY_DB = "alpha_contrario_history_legacy_no_importar.db"
-HISTORY_DB = "alpha_contrario_history_v1.db"
+LEGACY_HISTORY_DB = "btc_signal_history.db"
+HISTORY_DB = "btc_signal_history_v2.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
@@ -1909,7 +1940,7 @@ def get_kalshi_live_btc(market):
 
 
 # =========================================================
-# INDICADORES DEL MOTOR ACTUAL
+# INDICADORES ORIGINALES
 # =========================================================
 
 def _indicator_frame(df):
@@ -1937,6 +1968,10 @@ def _indicator_frame(df):
     x["vol_ratio"]=vol/vol.rolling(20).mean().replace(0,np.nan)
     return x
 
+def _resample_indicators(df, minutes):
+    if minutes == 1: return _indicator_frame(df)
+    x=df.set_index("time").resample(f"{minutes}min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna().reset_index()
+    return _indicator_frame(x)
 
 def add_indicators(df):
     x=_indicator_frame(df)
@@ -2024,71 +2059,205 @@ def get_no_ask(market):
 # PROBABILIDAD ORIGINAL
 # =========================================================
 
+def estimated_probabilities(
+    final_score, distance, seconds_left, mom3, mom5
+):
+    score = float(np.clip(final_score, -10, 10))
+    up_prob = 50 + score * 4.2
+
+    if mom3 > 0.04:
+        up_prob += 3
+    elif mom3 < -0.04:
+        up_prob -= 3
+
+    if mom5 > 0.06:
+        up_prob += 2
+    elif mom5 < -0.06:
+        up_prob -= 2
+
+    if (
+        distance is not None
+        and seconds_left is not None
+        and seconds_left <= 180
+    ):
+        if distance > 0:
+            up_prob += 3
+        elif distance < 0:
+            up_prob -= 3
+
+    up_prob = float(np.clip(up_prob, 5, 95))
+    return round(up_prob), round(100 - up_prob)
 
 
 # =========================================================
 # MOTOR ORIGINAL v4.6.1
 # =========================================================
 
+def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
+    """Directional persistence / exhaustion in comparable ATR units.
+
+    Informational internally; never imposes a permanent UP/DOWN lock.
+    Percent momentum is converted to dollars before ATR normalization.
+    Uses completed/current candle history, not fabricated price targets.
+    """
+    if not np.isfinite(price) or price <= 0 or not np.isfinite(atr) or atr <= 0:
+        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
+                "exhaust_down": False, "reliable": False}
+    close = one["close"].astype(float).tail(9).to_numpy()
+    if len(close) < 7 or not np.all(np.isfinite(close)):
+        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
+                "exhaust_down": False, "reliable": False}
+    changes = np.diff(close)
+    # Directional efficiency: net movement divided by total absolute movement.
+    travel = float(np.sum(np.abs(changes[-5:])))
+    efficiency = abs(float(close[-1] - close[-6])) / max(travel, 1e-8)
+    recent = float(np.sum(changes[-2:])) / atr
+    previous = float(np.sum(changes[-5:-2])) / atr
+    m3 = float(np.clip(price * mom3 / 100.0 / atr, -3, 3))
+    m5 = float(np.clip(price * mom5 / 100.0 / atr, -3, 3))
+    m15 = float(np.clip(price * mom15 / 100.0 / atr, -3, 3))
+    volume = float(np.clip(rvol, 0, 3)) if np.isfinite(rvol) else 1.0
+    # No invented dollar target: these are dimensionless internal strengths.
+    trend = .48 * m3 + .32 * m5 + .20 * m15
+    strength = float(np.clip(trend * (.75 + .25 * efficiency) *
+                             (.90 + .10 * min(volume, 1.5)), -3, 3))
+    exhaust_up = (previous > .35 and recent < -.10) or (m5 > .35 and m3 < -.12)
+    exhaust_down = (previous < -.35 and recent > .10) or (m5 < -.35 and m3 > .12)
+    return {"up": max(0., strength), "down": max(0., -strength),
+            "exhaust_up": bool(exhaust_up), "exhaust_down": bool(exhaust_down),
+            "reliable": True, "efficiency": round(float(efficiency), 3),
+            "recent_atr": round(recent, 3)}
 
 
+def _entry_route_checks(sig, seconds_left):
+    """Evaluate both sides from the same evidence; shared by engine and UI."""
+    required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
+                "vol_ratio", "mom3", "mom5", "target_atr", "price_ema9_atr")
+    if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
+        return {"valid":False, "sides":{}, "noise_ok":False}
+    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion,live_ema = (float(sig[k]) for k in required)
+    d3,d5 = sig.get("trend3"), sig.get("trend5")
+    impulse = sig.get("impulse_internal") or {}
+    noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
+    sides = {}
+    for side,sign,other in (("UP",1,"DOWN"),("DOWN",-1,"UP")):
+        up = sign == 1
+        exhausted = bool(impulse.get("exhaust_up" if up else "exhaust_down"))
+        strength = float(impulse.get("up" if up else "down", 0))
+        reliable = bool(impulse.get("reliable"))
+        current = [
+            ("EMA de 1 minuto y precio actual a favor", sig.get("ema") == ("BULL" if up else "BEAR") and live_ema*sign>0),
+            ("RSI y momentum actuales a favor", (r1>=53 if up else r1<=47) and mom*sign>=.025),
+            ("MACD de 1 minuto y VWAP a favor", m1*sign>0 and vw*sign>=.03),
+            ("Impulso actual sin agotamiento detectado", not exhausted),
+        ]
+        early_five = d5 != other or (reliable and strength>=.75 and mom*sign>.04 and vol>=.9)
+        rsi_vwap = (r1>=52 and vw>=.05) if up else (r1<=48 and vw<=-.05)
+        routes = [
+            ("IMPULSO ACTUAL", current),
+            ("TENDENCIA ALINEADA", [
+                ("Tendencias de 3 y 5 minutos a favor", d3==side and d5==side),
+                ("Fuerza de tendencia o RSI suficientes", adx>=20 or ((r3>=52 and r5>=50) if up else (r3<=48 and r5<=50))),
+                ("VWAP y momentum actual respaldan la tendencia", (vw>-.15 if up else vw<.15) and mom*sign>=.012),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("TEMPRANA", [
+                ("MACD de 3 minutos a favor", m3*sign>0),
+                ("RSI de 1 minuto y VWAP a favor", rsi_vwap),
+                ("Momentum de 3 minutos a favor", mom*sign>.015),
+                ("Contexto de 5 minutos respaldado o superado por fuerza actual", early_five),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("TEMPRANA ACELERADA", [
+                ("MACD y momentum a favor", m3*sign>0 and mom*sign>.015),
+                ("Contexto de 5 minutos no contrario", d5!=other),
+                ("Impulso fuerte con volumen y ADX", reliable and strength>=.65 and adx>=20 and vol>=.8),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("GIRO TEMPRANO", [
+                ("MACD y momentum respaldan el giro", m3*sign>0 and mom*sign>.04),
+                ("RSI de 1 y 3 minutos respaldan el giro", (r1>=54 and r3>=50) if up else (r1<=46 and r3<=50)),
+                ("VWAP y distancia suficientes", vw*sign>=.08 and abs(cushion)>=.30),
+                ("Impulso y volumen suficientes", reliable and strength>=.70 and vol>=.9),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+        ]
+        flow = sig.get("flow_context_internal") or {}
+        flow_ok = flow.get("direction")==side and flow.get("valid",False)
+        routes.append(("FLUJO + IMPULSO", [
+            ("Flujo agresor significativo a favor", flow_ok),
+            ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and live_ema*sign>0),
+            ("Momentum y VWAP a favor", mom*sign>=.012 and vw*sign>=-.04),
+            ("Contexto contrario corroborado por momentum", d5!=other or (mom5*sign>=.025 and abs(mom)>=.025)),
+            ("Impulso fiable sin agotamiento", reliable and not exhausted),
+        ]))
+        target_ok = True
+        if sig.get("distance") is not None and seconds_left is not None:
+            remaining = float(np.clip(seconds_left,0,900))
+            weight = .12+.88*(1-remaining/900)**1.6
+            tolerance = 1.8-1.4*weight
+            if -sign*cushion>tolerance:
+                target_ok = (reliable and strength>=.75 and mom*sign>.04 and not exhausted
+                             and (all(ok for _,ok in current) or d3==side or d5==side))
+        sides[side] = []
+        for name,checks in routes:
+            checks = checks+[("Fuera de la zona de ruido",noise_ok),
+                            ("Distancia al target y tiempo respaldan la dirección",target_ok)]
+            sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
+                                "total":len(checks),"complete":all(bool(ok) for _,ok in checks)})
+    return {"valid":True,"sides":sides,"noise_ok":noise_ok}
 
 
 
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
-    """Clean directional engine: continuous evidence, one admission decision."""
-    one = add_indicators(df)
-    if len(one) < 30:
-        raise ValueError("Insufficient candles for signal engine")
-    last = one.iloc[-1]
-    candle_price = float(last["close"])
-    price = float(live_price) if live_price is not None else candle_price
-    atr = float(last["atr"]) if pd.notna(last["atr"]) and last["atr"] > 0 else max(price * .0005, 1.)
-    def safe(key, default=0.):
-        v = last.get(key, default)
-        return float(v) if pd.notna(v) and np.isfinite(float(v)) else float(default)
-    vwap = safe("vwap", price)
-    rsi = safe("rsi", 50)
-    macd = safe("macd_hist") / atr
-    mom3, mom5, mom15 = safe("mom3"), safe("mom5"), safe("mom15")
-    # The direction is measured from movement, VWAP, and momentum; no EMA veto.
-    drift = (price - float(one.iloc[-4]["close"])) / atr
-    vwap_gap = (price - vwap) / atr
-    impulse = np.tanh(drift / 1.5)
-    location = np.tanh(vwap_gap / 1.6)
-    momentum = np.tanh(macd * 8.)
-    rsi_bias = np.tanh((rsi - 50.) / 18.)
-    score = float(2.0 * impulse + 1.3 * location + 1.1 * momentum + .6 * rsi_bias)
-    distance = price - float(target) if target is not None else None
-    target_atr = distance / atr if distance is not None else 0.
-    # As expiration approaches, target distance matters more than a transient candle.
-    if seconds_left is not None and 0 < seconds_left < 180 and distance is not None:
-        closing_weight = .15 + .65 * (180 - seconds_left) / 180
-        score = (1 - closing_weight) * score + closing_weight * 3. * np.tanh(target_atr)
-    confidence = abs(score)
-    candidate = "UP" if score >= 1.25 else "DOWN" if score <= -1.25 else None
-    # No trade on ambiguous, stale, or expired inputs.
-    if seconds_left is not None and seconds_left <= 0:
-        candidate = None
-    quality = "IMPULSO CONFIRMADO" if confidence >= 2.3 and candidate else "MOVIMIENTO CON RESPALDO" if candidate else "ESPERANDO CLARIDAD"
-    up_probability = float(np.clip(50 + score * 8, 5, 95))
-    trend = "UP" if score > .5 else "DOWN" if score < -.5 else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi,"rsi3":rsi,"rsi5":rsi,
-        "mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":safe("vol_ratio"),
-        "ema":"BULL" if score >= 0 else "BEAR","technical_score":score,"target_score":target_atr,
-        "final_score":score,"distance":distance,"distance_pct":distance / float(target) * 100 if target else None,
-        "momentum":"ALCISTA" if score > .5 else "BAJISTA" if score < -.5 else "NEUTRAL",
-        "up_probability":round(up_probability),"down_probability":round(100-up_probability),
-        "candidate":candidate,"quality":quality,"trend3":trend,"trend5":trend,
-        "adx":safe("adx"),"plus_di":safe("plus_di"),"minus_di":safe("minus_di"),
-        "macd3":safe("macd_hist"),"macd5":safe("macd_hist"),"atr":atr,"vwap":vwap,
-        "vwap_atr":vwap_gap,"target_atr":target_atr,"macd1":safe("macd_hist"),
-        "price_ema9_atr":(price-safe("ema9",price))/atr,
-        "entry_route_internal":quality,"entry_evidence_internal":{"sides":{"UP":[],"DOWN":[]}},
-        "flow_context_internal":{"valid":False},"flow_support_internal":{"used":False},
-        "impulse_internal":{},"engine_confidence":confidence}
-
+    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
+    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
+    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
+    def direction(row):
+        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
+        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
+    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
+    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
+    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
+    target_atr=(distance/atr) if distance is not None else 0.0
+    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
+    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
+    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
+    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
+    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
+    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
+    # Evaluate all routes for both directions before choosing any candidate.
+    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
+    flow_context = {"direction":flow_side, "valid":False}
+    if isinstance(whale,dict):
+        flow_context["valid"] = (flow_side in ("UP","DOWN") and
+            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
+            float(whale.get("flow_strength") or 0)>=.20)
+    route_input = {"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
+        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
+        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
+        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
+        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
+        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
+    route_view = _entry_route_checks(route_input, seconds_left)
+    eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
+                for side in ("UP","DOWN")}
+    choices = [side for side in ("UP","DOWN") if eligible[side]]
+    candidate = choices[0] if len(choices)==1 else None
+    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
+    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
+                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
+    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
+    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
+    # Closing support adapts continuously; it is NOT a calibrated win probability.
+    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
+        weight = .35 + .35 * (180 - seconds_left) / 180
+        evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
+    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
+    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
@@ -2200,11 +2369,25 @@ def entry_quality(price, seconds_left):
 
 
 # =========================================================
-# CONTROL DE RONDA — MOTOR ACTUAL
+# CONTROL DE RONDA — EL CEREBRO MANDA
 # =========================================================
 
+def _retention_assessment(state, signal):
+    """Use the same evidence families as entry/reversal decisions."""
+    side = state.get("active_direction")
+    if side not in ("UP", "DOWN"):
+        return 0, 0
+    families = _direction_evidence(signal)
+    return (sum(v == side for v in families.values()),
+            sum(v != side for v in families.values()))
 
 
+def _retention_supported(state, signal, seconds_left):
+    """Partial weakening is not sufficient to withdraw an existing signal."""
+    if seconds_left is None or seconds_left <= 0:
+        return False
+    support, _ = _retention_assessment(state, signal)
+    return support >= 2
 
 
 def _reset_withdrawal(state):
@@ -2212,87 +2395,224 @@ def _reset_withdrawal(state):
                  withdraw_since=None, withdraw_last_at=None, retention_warning=None)
 
 
+def _review_active_retention(state, signal, seconds_left, now):
+    """Report weakening without silently withdrawing a confirmed direction.
+
+    Direction changes are handled by the same confirmation path as entries.
+    """
+    side = state.get("active_direction")
+    if side not in ("UP", "DOWN"):
+        _reset_withdrawal(state)
+        return
+    support, contrary = _retention_assessment(state, signal)
+    _reset_withdrawal(state)
+    if contrary > support and contrary >= 2:
+        state["retention_warning"] = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
 
 
+def _direction_evidence(signal):
+    """Independent evidence families; price relative to target is NOT a trend vote."""
+    if not isinstance(signal, dict) or signal.get("data_valid") is False:
+        return {}
+    families = {}
+    ema = signal.get("ema")
+    if ema in ("BULL", "BEAR"):
+        families["trend"] = "UP" if ema == "BULL" else "DOWN"
+    # Short and medium trend belong to one family; disagreement abstains.
+    trends = [signal.get(k) for k in ("trend3", "trend5")]
+    trends = [v for v in trends if v in ("UP", "DOWN")]
+    if trends and len(set(trends)) == 1:
+        families["structure"] = trends[0]
+    rsi = _plan_number(signal.get("rsi"))
+    if rsi is not None and abs(rsi - 50) >= 3:
+        families["oscillator"] = "UP" if rsi > 50 else "DOWN"
+    momentum = [_plan_number(signal.get(k)) for k in ("mom3", "mom5")]
+    momentum = [v for v in momentum if v is not None and v != 0]
+    if momentum and all(v > 0 for v in momentum):
+        families["momentum"] = "UP"
+    elif momentum and all(v < 0 for v in momentum):
+        families["momentum"] = "DOWN"
+    return families
 
 
+def _direction_consistent(candidate, signal, active=None):
+    """Single policy for entry and reversal, using nonduplicated families.
+
+    Reversal requires stronger consensus than first entry; a transient
+    oscillation cannot override a previously confirmed signal.
+    """
+    if candidate not in ("UP", "DOWN"):
+        return False
+    families = _direction_evidence(signal)
+    if len(families) < 3:
+        return False
+    agree = sum(v == candidate for v in families.values())
+    oppose = len(families) - agree
+    if active in ("UP", "DOWN") and active != candidate:
+        return agree >= 3 and oppose == 0
+    return agree >= 3 and agree > oppose
 
 
+def _round_opening_crosscheck(state, candidate, signal, now):
+    """Require fresh directional evidence before the first entry of this ticker.
 
-
-
-
+    Old candles remain context, never sufficient evidence for an opening entry.
+    Each live feed has a separate short tape. Later reversals are unrestricted.
+    """
+    if state.get("first_direction") in ("UP", "DOWN"):
+        state["opening_conflict"] = None
+        return candidate
+    def wait(reason):
+        state["opening_conflict"] = reason
+        return None
+    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
+        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
+    if not signal or signal.get("data_valid") is False:
+        return wait("Esperando datos actuales para la primera señal")
+    price = _plan_number(signal.get("price"))
+    atr = _plan_number(signal.get("atr"))
+    source = signal.get("price_source")
+    if (price is None or price <= 0 or atr is None or atr <= 0
+            or source not in ("COINBASE", "KALSHI LIVE")):
+        return wait("Esperando precio en vivo para la primera señal")
+    stamp = now.timestamp()
+    tapes = state.setdefault("opening_live_tapes", {})
+    tape = tapes.get(source, [])
+    if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
+        tape = []
+    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
+    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
+        tape.append([stamp, price])
+    tapes[source] = tape
+    if candidate not in ("UP", "DOWN"):
+        return wait("Analizando fuerza actual antes de la primera señal")
+    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
+        return wait("Observando movimiento actual antes de la primera señal")
+    prices = [float(x[1]) for x in tape]
+    sign = 1 if candidate == "UP" else -1
+    split = len(prices)//2
+    net = sign*(prices[-1]-prices[0])
+    recent = sign*(prices[-1]-prices[split])
+    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
+    efficiency = net/max(travel, 1e-8)
+    minimum = max(2.0, .10*atr)
+    latest = sign*(prices[-1]-prices[-2])
+    if (net < minimum or recent < .5*minimum or efficiency < .60
+            or latest < -.25*minimum):
+        return wait("Sin fuerza actual suficiente para " + candidate)
+    state["opening_conflict"] = None
+    return candidate
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """Single round-aware confirmation; do not retract on momentary noise."""
-    state["confirmation_diagnostic"] = {"candidate":candidate,"observed_at":now.isoformat(),"stages":[]}
-    end = (market or {}).get("close_time")
-    if end:
-        closing = pd.to_datetime(end, utc=True, errors="coerce")
-        if pd.notna(closing):
-            actual = (closing - pd.Timestamp(now)).total_seconds()
-            seconds_left = actual if seconds_left is None else min(seconds_left, actual)
-    if seconds_left is not None and seconds_left <= 0:
-        state.update(active_direction=None,active_since=None,pending_direction=None,pending_count=0,
-                     pending_since=None,pending_last_at=None,decision_reason="Ronda cerrada")
+    """One confirmation path for foreground and background. Neutral readings
+    cancel pending candidates, never erase a confirmed active direction.
+    """
+    # A candidate is not a confirmation when the available directional
+    # evidence contradicts it. Keep the active signal while reassessing.
+    if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
+        candidate = None
+    candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
+    closed = seconds_left is not None and seconds_left <= 0
+    close_time = (market or {}).get("close_time")
+    if close_time:
+        end = pd.to_datetime(close_time, utc=True, errors="coerce")
+        if pd.isna(end):
+            candidate = None
+        else:
+            actual_left = (end - pd.Timestamp(now)).total_seconds()
+            seconds_left = actual_left if seconds_left is None else min(seconds_left, actual_left)
+            closed = seconds_left <= 0
+    if closed:
+        _reset_withdrawal(state)
+        for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
+                    "active_direction", "active_since"):
+            state[key] = None
+        state["pending_count"] = 0
         return
-    if signal is None or signal.get("data_valid") is False:
-        state["decision_reason"] = "Sin datos fiables; dirección anterior conservada"
+    if signal is not None and signal.get("data_valid") is False:
+        _reset_withdrawal(state)
+        # Una interrupción no demuestra neutralidad ni permite confirmar.
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        if seconds_left is not None and seconds_left <= 0:
+            state["active_direction"] = None
+            state["active_since"] = None
         return
-    active = state.get("active_direction")
-    if candidate not in ("UP","DOWN"):
-        state.update(pending_direction=None,pending_count=0,pending_since=None,pending_last_at=None)
-        state["decision_reason"] = "Mercado indeciso; señal activa conservada"
+    source = signal.get("price_source") if signal else None
+    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
+        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
+            # Tres lecturas deben pertenecer a una misma referencia de precio.
+            state["pending_direction"] = None
+            state["pending_count"] = 0
+            state["pending_since"] = None
+            state["pending_last_at"] = None
+        state["pending_price_source"] = source
+    if candidate not in ("UP", "DOWN"):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        _review_active_retention(state, signal, seconds_left, now)
         return
-    if candidate == active:
-        state.update(pending_direction=None,pending_count=0,pending_since=None,pending_last_at=None)
-        state["decision_reason"] = "Dirección confirmada mantenida"
-        return
-    score = float(signal.get("final_score") or 0)
-    atr = max(float(signal.get("atr") or 1), 1e-6)
-    distance = signal.get("distance")
-    # Opposite evidence must be materially stronger than the initial admission.
-    required = 2.35 if active in ("UP","DOWN") else 1.25
-    counter_evidence = state.get("counter_evidence") if state.get("signal_engine_revision") == "counter_impulse_v2" else None
-    if active is None and counter_evidence is not None:
-        # Contraria temprana: validar fuerza OBSERVADA, sin alterar final_score.
-        # Tres confirmaciones independientes y presión real del precio o score.
-        supported = (counter_evidence.get("indicators", 0) >= 3 and
-                     (counter_evidence.get("price_atr", 0) >= .10 or
-                      counter_evidence.get("score_change", 0) >= .48))
-        if not supported:
-            state["decision_reason"] = "Presión contraria insuficiente"
-            return
-    elif abs(score) < required or (score > 0) != (candidate == "UP"):
-        state["decision_reason"] = "Puntuación real insuficiente o dirección incoherente"
-        return
-    if active in ("UP","DOWN") and seconds_left is not None and seconds_left < 120 and distance is not None:
-        # A reversal near expiry must overcome target distance, not just flip momentum.
-        if (candidate == "UP" and distance < 0 or candidate == "DOWN" and distance > 0):
-            required_move = abs(float(distance)) / atr
-            if required_move > max(.5, seconds_left / 75.):
-                state["decision_reason"] = "Reversión tardía sin recorrido suficiente"
-                return
-    last = state.get("pending_last_at")
-    if isinstance(last,str):
-        try: last = datetime.fromisoformat(last)
-        except ValueError: last = None
-    if state.get("pending_direction") != candidate or last is None or (now-last).total_seconds() > 30 or (now-last).total_seconds() < 0:
-        state.update(pending_direction=candidate,pending_count=1,pending_since=now.isoformat(),pending_last_at=now.isoformat())
-        state["decision_reason"] = "Dirección candidata observada"
-        return
-    if (now-last).total_seconds() < 2:
-        return
-    state.update(active_direction=candidate,active_since=now,pending_direction=None,pending_count=0,
-                 pending_since=None,pending_last_at=None,
-                 decision_reason="Reversión respaldada" if active else "Primera señal confirmada")
-    if state.get("first_direction") is None:
-        state["first_direction"] = candidate
-        state["first_signal_time"] = now
-        state["first_signal_seconds"] = seconds_left
-        state["first_signal_price"] = get_yes_ask(market) if candidate == "UP" else get_no_ask(market)
 
+    _review_active_retention(state, signal, seconds_left, now)
+    if candidate == state.get("active_direction"):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        return
+
+    last = state.get("pending_last_at")
+    if isinstance(last, str):
+        try:
+            last = datetime.fromisoformat(last)
+        except ValueError:
+            last = None
+    since = state.get("pending_since")
+    if isinstance(since, str):
+        try:
+            since = datetime.fromisoformat(since)
+        except ValueError:
+            since = None
+
+    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
+                              or (now - last).total_seconds() < 0)):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        last = since = None
+    if state.get("pending_direction") != candidate:
+        state["pending_direction"] = candidate
+        state["pending_count"] = 1
+        state["pending_since"] = now.isoformat()
+        state["pending_last_at"] = now.isoformat()
+        return
+
+    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
+        state["pending_count"] = int(state.get("pending_count", 0)) + 1
+        state["pending_last_at"] = now.isoformat()
+
+    elapsed = (now - since).total_seconds() if since else 0
+    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
+            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+        state["active_direction"] = candidate
+        state["active_since"] = now
+        if state.get("first_direction") is None:
+            state["first_direction"] = candidate
+            state["first_signal_time"] = now
+            state["first_signal_seconds"] = seconds_left
+            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                           else get_no_ask(market))
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -2365,6 +2685,31 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
     reversal = False
     reversal_text = ""
 
+    # Aviso informativo solamente; nunca bloquea ni congela la señal.
+    if active == "UP":
+        weakness_points = 0
+        if sig.get("impulse_internal", {}).get("exhaust_up"): weakness_points += 1
+        if score < 0: weakness_points += 1
+        if score_change <= -1.25: weakness_points += 1
+        if sig.get("mom3",0) < -0.02: weakness_points += 1
+        if sig.get("mom5",0) < 0: weakness_points += 1
+        if price_change < -8: weakness_points += 1
+        if weakness_points >= 2:
+            reversal = True
+            reversal_text = "UP PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
+
+    elif active == "DOWN":
+        weakness_points = 0
+        if sig.get("impulse_internal", {}).get("exhaust_down"): weakness_points += 1
+        if score > 0: weakness_points += 1
+        if score_change >= 1.25: weakness_points += 1
+        if sig.get("mom3",0) > 0.02: weakness_points += 1
+        if sig.get("mom5",0) > 0: weakness_points += 1
+        if price_change > 8: weakness_points += 1
+        if weakness_points >= 2:
+            reversal = True
+            reversal_text = "DOWN PERDIENDO FUERZA • PRESIÓN CONTRARIA DETECTADA"
+
     if active and state.get("retention_warning"):
         reversal = True
         reversal_text = state["retention_warning"]
@@ -2378,7 +2723,8 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#e64b4b"
         current_entry_price = get_no_ask(market)
     else:
-        decision, signal, icon, color = "ESPERANDO",("ESPERANDO"),"•","#38bdf8"
+        decision, signal, icon, color = "ESPERANDO",(state.get("opening_conflict") or
+            ("CONFIRMANDO " + state["pending_direction"] if state.get("pending_direction") in ("UP","DOWN") else "SIN CONFIRMACIÓN")),"•","#38bdf8"
         current_entry_price = None
 
     quality, quality_color = entry_quality(current_entry_price, seconds_left)
@@ -2402,7 +2748,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "multi_indicator_admission_v8_single_worker"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_multi_indicator49_v1"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2562,9 +2908,7 @@ def _retire_history_workers():
             continue
         if worker is threading.current_thread() or not worker.is_alive():
             continue
-        if (getattr(worker, "_btc_data_revision", None) == BACKGROUND_DATA_REVISION
-                and getattr(worker, "_btc_engine_fingerprint", None) == ENGINE_FINGERPRINT
-                and current is None):
+        if getattr(worker, "_btc_data_revision", None) == BACKGROUND_DATA_REVISION and current is None:
             current = worker
             continue
         stop = getattr(worker, "_btc_stop_event", None)
@@ -2588,27 +2932,17 @@ def _retire_history_workers():
         context["BACKGROUND_RUN_SECONDS"] = value
     return current
 
+@st.cache_resource(validate=lambda worker: worker.is_alive() and getattr(worker, "_btc_data_revision", None) == BACKGROUND_DATA_REVISION)
 def start_continuous_history_worker():
-    """Always check retirement, even when Streamlit shares cached resources.
-
-    Process-wide lock serializes starts from concurrent sessions. A changed
-    engine fingerprint retires the old worker before another can write.
-    """
-    import sys
-    import types
-    runtime = sys.modules.setdefault("_alpha_signal_worker_runtime", types.ModuleType("_alpha_signal_worker_runtime"))
-    lock = runtime.__dict__.setdefault("lock", threading.RLock())
-    with lock:
-        current = _retire_history_workers()
-        if current is not None:
-            return current
-        stop_event = threading.Event()
-        worker = threading.Thread(target=_background_history_loop, args=(stop_event,), name="btc-history-source-v1", daemon=True)
-        worker._btc_stop_event = stop_event
-        worker._btc_data_revision = BACKGROUND_DATA_REVISION
-        worker._btc_engine_fingerprint = ENGINE_FINGERPRINT
-        worker.start()
-        return worker
+    current = _retire_history_workers()
+    if current is not None:
+        return current
+    stop_event = threading.Event()
+    worker = threading.Thread(target=_background_history_loop, args=(stop_event,), name="btc-history-source-v1", daemon=True)
+    worker._btc_stop_event = stop_event
+    worker._btc_data_revision = BACKGROUND_DATA_REVISION
+    worker.start()
+    return worker
 
 # =========================================================
 # LECTOR DE CIERRE PRO — MICRO LECTURA ~2 SEGUNDOS
@@ -3476,18 +3810,56 @@ draw();
 </script></html>'''
 
 
+def signal_requirement_view(sig, seconds_left):
+    return _entry_route_checks(sig, seconds_left)
 
 
+def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
+    """One visual box for individual conditions; never changes confirmation."""
+    view = signal_requirement_view(sig, seconds_left)
+    state = round_signal.get('round_state') or {}
+    now = now or datetime.now(timezone.utc)
+    end = pd.to_datetime((market or {}).get('close_time'), utc=True, errors='coerce')
+    closed = seconds_left is not None and seconds_left <= 0
+    if not pd.isna(end):
+        closed = closed or end <= pd.Timestamp(now)
+    ready = view['valid'] and bool(state) and not closed and not pd.isna(end)
+    side = sig.get('candidate')
+    if side not in ('UP', 'DOWN'):
+        # La dirección histórica no decide qué requisitos se inspeccionan.
+        # Sin candidatura válida, mostrar el lado de mayor evidencia ACTUAL,
+        # sin convertirlo en señal oficial.
+        current_score = sig.get('final_score')
+        if current_score is not None:
+            try:
+                value = float(current_score)
+                if np.isfinite(value) and value != 0:
+                    side = 'UP' if value > 0 else 'DOWN'
+            except (TypeError, ValueError):
+                pass
+    if side not in ('UP', 'DOWN') and view['valid']:
+        side = max(('UP', 'DOWN'), key=lambda d: max(r['met']/r['total'] for r in view['sides'][d]))
+    checks = []
+    if view['valid'] and side in ('UP', 'DOWN'):
+        routes = view['sides'][side]
+        # Mostrar solo rutas de tendencia y entrada temprana.
+        complete = [r for r in routes if r['complete']]
+        route = complete[0] if complete else max(routes, key=lambda r: r['met']/r['total'])
+        checks = route['checks']
+    total = len(checks)
+    met = sum(bool(ok) for _, ok in checks) if ready else 0
+    # Cada nombre corresponde al mismo booleano que controla su barra.
+    bars = ''.join(
+        '<div class="sq-item"><i' + (' class="sq-on"' if ready and ok else '') +
+        ' title="' + html.escape(label, quote=True) + '"></i>' +
+        '<span>' + html.escape(label) + '</span></div>'
+        for label, ok in checks
+    )
+    label = 'REQUISITOS ' + side if side in ('UP','DOWN') else 'REQUISITOS DE LA SEÑAL'
+    note = 'RONDA TERMINADA' if closed else 'ESPERANDO DATOS' if not ready else 'Cada barra representa un requisito.'
+    number = str(met) + '<small>/' + str(total) + '</small>' if total else '—'
+    return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars .sq-item{flex:1;min-width:0;text-align:center}.sq-bars i{display:block;height:7px;width:100%;background:#1d3038;border-radius:9px}.sq-bars .sq-item span{display:block;margin-top:7px;font-size:9px;line-height:1.25;color:#a5b6be;overflow-wrap:anywhere}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
 
-
-
-
-GOLD_TARGET_ICON = '<svg class="jc-metal-icon" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><defs>\n<linearGradient id="jc-target-metal" x1="10" y1="5" x2="52" y2="67" gradientUnits="userSpaceOnUse"><stop stop-color="#fffbd0"/><stop offset=".16" stop-color="#ffe984"/><stop offset=".38" stop-color="#e5b84e"/><stop offset=".56" stop-color="#ffdc62"/><stop offset=".79" stop-color="#bc700e"/><stop offset="1" stop-color="#f7b72b"/></linearGradient>\n<filter id="jc-target-metal-shadow" x="-25%" y="-25%" width="150%" height="160%"><feDropShadow dx="0" dy="1.4" stdDeviation=".65" flood-color="#9e530a" flood-opacity=".9"/><feDropShadow dx="0" dy="0" stdDeviation="1.2" flood-color="#ffd66e" flood-opacity=".32"/></filter>\n</defs><g filter="url(#jc-target-metal-shadow)"><circle cx="32" cy="35" r="24" fill="none" stroke="url(#jc-target-metal)" stroke-width="7" stroke-dasharray="132 19" transform="rotate(-37 32 35)"/>\n<circle cx="32" cy="35" r="13.5" fill="none" stroke="url(#jc-target-metal)" stroke-width="6.5" stroke-dasharray="69 16" transform="rotate(-37 32 35)"/>\n<circle cx="32" cy="35" r="4.7" fill="url(#jc-target-metal)"/>\n<path d="M33 34 55 12" fill="none" stroke="url(#jc-target-metal)" stroke-width="5.5" stroke-linecap="round"/>\n<path d="m51 13 2-9 5 6 7 2-8 5-4 6-2-7-7 1Z" fill="url(#jc-target-metal)"/>\n<path d="M12 22a24 24 0 0 1 33-8M21 28a13.5 13.5 0 0 1 16-6" fill="none" stroke="#fff6b7" stroke-width="1.3" stroke-linecap="round" opacity=".8"/></g></svg>'
-GOLD_TIMER_ICON = '<svg class="jc-metal-icon" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><defs>\n<linearGradient id="jc-timer-metal" x1="10" y1="5" x2="52" y2="67" gradientUnits="userSpaceOnUse"><stop stop-color="#fffbd0"/><stop offset=".16" stop-color="#ffe984"/><stop offset=".38" stop-color="#e5b84e"/><stop offset=".56" stop-color="#ffdc62"/><stop offset=".79" stop-color="#bc700e"/><stop offset="1" stop-color="#f7b72b"/></linearGradient>\n<filter id="jc-timer-metal-shadow" x="-25%" y="-25%" width="150%" height="160%"><feDropShadow dx="0" dy="1.4" stdDeviation=".65" flood-color="#9e530a" flood-opacity=".9"/><feDropShadow dx="0" dy="0" stdDeviation="1.2" flood-color="#ffd66e" flood-opacity=".32"/></filter>\n</defs><g filter="url(#jc-timer-metal-shadow)"><path d="M27 5h13v5H27zM31 10h5v7h-5z" fill="url(#jc-timer-metal)"/>\n<path d="m49 15 4-5 7 6-4 5z" fill="url(#jc-timer-metal)"/>\n<circle cx="33.5" cy="39" r="23" fill="none" stroke="url(#jc-timer-metal)" stroke-width="7"/>\n<path d="M33.5 39V22" fill="none" stroke="url(#jc-timer-metal)" stroke-width="4" stroke-linecap="round"/>\n<circle cx="33.5" cy="39" r="4.2" fill="url(#jc-timer-metal)"/>\n<path d="M33.5 20v3M33.5 55v3M14.5 39h3M49.5 39h3" stroke="#d59c31" stroke-width="1.7" stroke-linecap="round"/>\n<path d="M14 27a23 23 0 0 1 34-7" fill="none" stroke="#fff8ba" stroke-width="1.4" stroke-linecap="round" opacity=".9"/></g></svg>'
-GOLD_SUPPORT_CSS = '\n/* Beveled gold plaque: main support label only. */\n.refapp .rhero>.rconf.jc-gold-plaque{\n position:relative!important;isolation:isolate;display:flex!important;align-items:center;justify-content:center;\n width:min(94%,440px)!important;min-height:34px!important;box-sizing:border-box!important;\n margin:10px auto 5px!important;padding:8px 23px!important;border:0!important;border-radius:0!important;\n background:transparent!important;box-shadow:none!important;color:#fffdf5!important;\n font-size:clamp(10px,2.8vw,13px)!important;line-height:1.25!important;font-weight:850!important;\n letter-spacing:.35px!important;filter:drop-shadow(0 0 3px rgba(255,196,53,.55)) drop-shadow(0 0 8px rgba(214,145,16,.22));\n}\n.refapp .rhero>.rconf.jc-gold-plaque:before{\n content:"";position:absolute;inset:0;z-index:-2;pointer-events:none;\n clip-path:polygon(4% 0,96% 0,100% 50%,96% 100%,4% 100%,0 50%);\n background:linear-gradient(174deg,#fffed0 0%,#f5dc77 13%,#95601b 28%,#ffd263 47%,#b17520 61%,#fffbd2 78%,#ffdc66 88%,#ba6d08 100%);\n}\n.refapp .rhero>.rconf.jc-gold-plaque:after{\n content:"";position:absolute;inset:2.5px 3px;z-index:-1;pointer-events:none;\n clip-path:polygon(4% 0,96% 0,100% 50%,96% 100%,4% 100%,0 50%);\n background:radial-gradient(ellipse at 3% 96%,rgba(255,209,70,.28),transparent 23%),\n radial-gradient(ellipse at 97% 96%,rgba(255,209,70,.28),transparent 23%),\n linear-gradient(180deg,#25200c 0%,#0b0b06 17%,#030805 57%,#211703 100%);\n box-shadow:inset 0 1px 2px rgba(255,243,163,.32),inset 0 -1px 2px rgba(255,197,56,.36);\n}\n.refapp .rhero>.jc-gold-plaque>span{position:relative;z-index:1;color:inherit;text-shadow:0 1px 2px #000,0 0 3px rgba(255,255,232,.18)}\n@media(max-width:380px){.refapp .rhero>.rconf.jc-gold-plaque{min-height:31px!important;padding:7px 20px!important;font-size:10px!important;letter-spacing:.2px!important}}\n'
-GOLD_SUPPORT_CSS += '\n/* DOWN arrow occupies its full visible bounds, including the tip. */\n.refapp.dir-down .rhero:not(.waiting) .rsignal{gap:12px!important;line-height:1!important;min-height:76px;}\n.refapp.dir-down .rhero .cssarrow{width:58px;height:66px;transform:none!important;border-radius:0;box-shadow:none;clip-path:polygon(20% 0,80% 0,80% 62%,100% 62%,50% 100%,0 62%,20% 62%);}\n.refapp.dir-down .rhero .cssarrow:before{display:none!important;}\n.refapp.dir-down .rhero>.rconf.jc-gold-plaque{margin-top:14px!important;}\n'
-
-GOLD_METRIC_CSS = '\n/* Scoped metallic details: only the two requested cards. */\n.refapp .rcard.jc-target-card,.refapp .rcard.jc-timer-card{\n position:relative;isolation:isolate;overflow:hidden;border:1.25px solid transparent!important;\n background:linear-gradient(145deg,#102337 0%,#04131e 45%,#041216 100%) padding-box,\n linear-gradient(123deg,#c68d36 0%,#fff5c9 18%,#647e96 43%,#8ca9b5 64%,#f7d06e 84%,#fff3cc 100%) border-box!important;\n box-shadow:inset 0 1px 1px rgba(255,250,215,.26),inset 0 -1px 2px rgba(96,202,217,.16),0 0 8px rgba(226,171,58,.12)!important;\n}\n.refapp .rcard.jc-timer-card{\n background:linear-gradient(145deg,#10283b 0%,#04131e 48%,#032222 100%) padding-box,\n linear-gradient(135deg,#fff8de 0%,#9cbacb 29%,#41687e 57%,#22d5d0 85%,#c4f4e9 100%) border-box!important;\n box-shadow:inset 0 1px 1px rgba(228,247,255,.32),inset 0 -1px 2px rgba(0,225,204,.24),0 0 8px rgba(1,211,200,.14)!important;\n}\n.refapp .jc-target-card:before,.refapp .jc-timer-card:before{\n content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;\n background:linear-gradient(131deg,transparent 0 9%,rgba(133,196,239,.20) 9.5% 15%,transparent 15.5% 22%,rgba(189,222,245,.045) 22.5% 26%,transparent 26.5%);\n}\n.refapp .jc-target-card:after{\n content:"";position:absolute;left:-2px;top:18%;height:58%;width:3px;border-radius:100%;pointer-events:none;\n background:#fff4b6;box-shadow:0 0 4px 1px #ffd55e,0 0 11px 2px rgba(255,180,31,.65);\n}\n.refapp .jc-metal-holder{flex:0 0 35px;width:35px;height:41px;display:grid;place-items:center;line-height:0}\n.refapp .jc-metal-icon{display:block;width:100%;height:auto;overflow:visible;filter:drop-shadow(0 0 2px rgba(249,192,57,.20))}\n.refapp .jc-target-card>.jc-metal-copy,.refapp .jc-timer-card>.timecontent{min-width:0;flex:1}\n.refapp .jc-timer-card .timebar{background:rgba(36,70,86,.65);box-shadow:inset 0 1px 2px rgba(0,0,0,.3)}\n.refapp .jc-timer-card .timebar b{box-shadow:0 0 6px rgba(0,235,190,.38)}\n@media(min-width:601px){.refapp .jc-metal-holder{flex-basis:39px;width:39px;height:43px}}\n'
 
 @st.fragment(run_every="2s")
 def live_dashboard():
@@ -3792,7 +4164,7 @@ def live_dashboard():
     </div>'''
 
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
-    ut_warning = False  # La advertencia principal procede del motor compartido.
+    ut_warning = active in ("UP", "DOWN") and ut.get("ut_short") in ("UP", "DOWN") and ut["ut_short"] != active
     weakness_html = (
         '<div class="weakness-inline" role="status">⚠ ' +
         html.escape(f"{active} PERDIENDO FUERZA" if ut_warning else round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
@@ -3817,8 +4189,6 @@ def live_dashboard():
 
     panel_html = f"""
 <style>
-{GOLD_METRIC_CSS}
-{GOLD_SUPPORT_CSS}
 /* app 31: conserve el encabezado dibujado en el fondo; solo un logo y titulo. */
 .refapp .rhead.jc-bg-header {{
   display:block!important;visibility:visible!important;position:relative!important;
@@ -3864,7 +4234,7 @@ def live_dashboard():
 
   <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}" data-official-signal="{hero_word}">
     <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
-    <div class="rconf jc-gold-plaque"><span>{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</span></div>
+    <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
   </section>
 
   {weakness_html}
@@ -3877,17 +4247,17 @@ def live_dashboard():
       <div><div class="rlabel">BTC</div><div class="rvalue">${sig["price"]:,.0f}</div>
       <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
     </div>
-    <div class="rcard keycard jc-target-card">
-      <div class="jc-metal-holder">{GOLD_TARGET_ICON}</div>
-      <div class="jc-metal-copy"><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
+    <div class="rcard keycard">
+      <div class="bigicon targeticon">◉</div>
+      <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
     </div>
     <div class="rcard keycard">
       <div class="bars" style="--accent:{distance_color}"><b></b><b></b><b></b></div>
       <div><div class="rlabel">DISTANCIA AL TARGET</div><div class="rvalue" style="color:{distance_color}">{distance_text}</div>
       <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
     </div>
-    <div class="rcard keycard jc-timer-card">
-      <div class="jc-metal-holder">{GOLD_TIMER_ICON}</div>
+    <div class="rcard keycard">
+      <div class="clock">⏱</div>
       <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
       <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
     </div>
@@ -3900,7 +4270,6 @@ def live_dashboard():
   </section>
 
   {reader_html}
-
 
 
 
@@ -4193,7 +4562,6 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     _TRACE_CONTEXT.build_payload = None
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
-    sig["engine_fingerprint"] = ENGINE_FINGERPRINT
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
         payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
@@ -4204,95 +4572,16 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     return sig
 
 
-def _counter_impulse_candidate(state, signal, seconds_left, now):
-    """Una dirección inicial de referencia, nunca una señal visible.
-
-    Busca agotamiento y aceleración contraria ANTES de exigir que el
-    indicador direccional principal haya cambiado de lado.
-    Estado persistido por ronda; pantalla y worker comparten esta función.
-    """
-    if not signal or signal.get("data_valid") is False or seconds_left is None or seconds_left <= 0:
-        return None
-    state["counter_evidence"] = None  # Nunca reutilizar evidencia de una lectura anterior.
-    price = float(signal.get("price") or 0)
-    atr = max(float(signal.get("atr") or 0), 1e-8)
-    if price <= 0:
-        return None
-    score = float(signal.get("technical_score") or 0)
-    macd = float(signal.get("macd1") or 0) / atr
-    rsi = float(signal.get("rsi") or 50)
-    # Mantener observaciones recientes para calcular cambios, no sólo niveles.
-    samples = list(state.get("counter_samples") or [])
-    ts = now.timestamp()
-    if not samples or ts > samples[-1][0]:
-        samples.append([ts, price, score, macd, rsi])
-    samples = [row for row in samples if 0 <= ts - row[0] <= 100]
-    state["counter_samples"] = samples[-55:]
-    if state.get("counter_initial") not in ("UP", "DOWN"):
-        # La dirección inicial requiere movimiento observable de ESTA ronda.
-        # No se toma del indicador de velas anteriores ni de la ronda previa.
-        first = samples[0]
-        elapsed = ts - first[0]
-        movement = (price - first[1]) / atr
-        if elapsed >= 5 and abs(movement) >= 0.12:
-            state["counter_initial"] = "UP" if movement > 0 else "DOWN"
-            state["counter_opposite"] = "DOWN" if movement > 0 else "UP"
-            state["counter_locked_at"] = now.isoformat()
-        elif elapsed >= 45:
-            # Sin impulso inicial claro, no inventar la dirección.
-            state["counter_initial"] = "NEUTRAL"
-        return None
-    if state["counter_initial"] == "NEUTRAL":
-        return None
-    opposite = state["counter_opposite"]
-    if state.get("first_direction") in ("UP", "DOWN"):
-        return opposite  # La primera señal se mantiene; nunca gira a la tendencia.
-    # Comparar contra la muestra más cercana a 12-25 segundos atrás.
-    older = [row for row in samples[:-1] if 10 <= ts-row[0] <= 35]
-    if not older:
-        return None
-    prior = older[0]
-    price_delta = (price-prior[1])/atr
-    score_delta = score-prior[2]
-    macd_delta = macd-prior[3]
-    rsi_delta = rsi-prior[4]
-    sign = -1 if opposite == "DOWN" else 1
-    # Se exige un cambio real de impulso más una segunda evidencia.
-    # El precio puede seguir del lado original: no se exige cruce previo.
-    pressure = sign*price_delta
-    weakening = sign*score_delta
-    macd_turn = sign*macd_delta
-    rsi_turn = sign*rsi_delta
-    evidence = sum((pressure >= .045, weakening >= .22, macd_turn >= .018, rsi_turn >= 1.2))
-    strong_turn = (pressure >= .10 or weakening >= .48)
-    if evidence < 3 or not strong_turn:
-        return None
-    # Evitar señales inviables cuando queda muy poco tiempo frente al target.
-    distance = signal.get("distance")
-    if distance is not None and seconds_left < 120:
-        required = sign * float(distance) / atr
-        if required < 0 and abs(required) > max(.35, seconds_left/65):
-            return None
-    state["counter_evidence"] = {"price_atr": round(pressure,3),
-        "score_change": round(weakening,3), "macd_change": round(macd_turn,3),
-        "rsi_change": round(rsi_turn,2), "indicators": evidence}
-    return opposite
-
-
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "counter_impulse_v2":
+    if state.get("signal_engine_revision") != "unified_evidence_v6":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "counter_impulse_v2"
+        state["signal_engine_revision"] = "unified_evidence_v6"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
         state.setdefault("opening_live_tapes", {})
         _reset_withdrawal(state)
-        state["_engine_changed"] = True
-    # Sustituye la admisión normal: nunca confirma la dirección dominante.
-    candidate = _counter_impulse_candidate(state, signal, seconds_left, now)
-    # Pasar lecturas reales, sin sustituir ni inflar la puntuación del motor.
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
     if not isinstance(state.get("exit_plan"), dict) and state.get("first_direction") in ("UP", "DOWN"):
@@ -4301,7 +4590,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"counter_impulse_v2", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"limited_retention_exit_plan_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
@@ -4339,7 +4628,7 @@ def export_round_diagnostics(ticker, limit=4000):
     with sqlite3.connect(SIGNAL_TRACE_DB, timeout=1) as conn:
         total, last_id = conn.execute("SELECT COUNT(*),MAX(id) FROM decisions WHERE kind='confirmation' AND ticker=?", (ticker,)).fetchone()
         rows = conn.execute("SELECT id,observed_at,thread_key,ticker,build_id,payload FROM decisions WHERE kind='confirmation' AND ticker=? AND id<=? ORDER BY id LIMIT ?", (ticker, last_id or 0, int(limit))).fetchall()
-        header = dict(schema_version=1,ticker=ticker,engine_variant="counter_impulse_v2",
+        header = dict(schema_version=1,ticker=ticker,engine_variant="limited_retention_v1",
                       exported_at=datetime.now(timezone.utc).isoformat(),
                       available_confirmations=total,exported_confirmations=len(rows),
                       truncated=total > len(rows),history=history)
@@ -4711,22 +5000,6 @@ _RECENT_ALERTS_HOST = r'''
 
 
 # Inicia una sola vez el registrador autónomo continuo.
-def _engine_policy_fingerprint():
-    import hashlib
-    import marshal
-    names = ("_indicator_frame", "_signal_engine_without_trace",
-             "_confirmation_without_trace", "confirm_round_candidate",
-             "build_signal", "_background_history_loop")
-    digest = hashlib.sha256()
-    digest.update(repr((BACKGROUND_DATA_REVISION, SIGNAL_CONFIRM_READINGS,
-                        SIGNAL_CONFIRM_INTERVAL, SIGNAL_CONFIRM_MAX_GAP,
-                        LIVE_PRICE_MAX_AGE)).encode("utf-8"))
-    for name in names:
-        digest.update(marshal.dumps(globals()[name].__code__))
-    return digest.hexdigest()
-
-
-ENGINE_FINGERPRINT = _engine_policy_fingerprint()
 start_continuous_history_worker()
 start_history_verifier()
 
