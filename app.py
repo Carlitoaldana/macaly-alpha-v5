@@ -4110,14 +4110,6 @@ def live_dashboard():
     # Read-only notices. These do not alter the official UP/DOWN or trading.
     if state and state.get("lateral_protection") and not state.get("first_direction"):
         st.info("🛑 MERCADO LATERAL · Sin ventaja clara. Analizando antes de dar señal.")
-    if state and isinstance(state.get("public_profit_alert"), dict):
-        notice = state["public_profit_alert"]
-        st.warning(
-            f"💰 ASEGURAR GANANCIAS · POSIBLE RETROCESO | "
-            f"{notice['side']} · Mejor oferta de compra Kalshi: {notice['bid']}¢ "
-            f"(máximo observado: {notice['peak']}¢). "
-            "Aviso general; no equivale a ganancia personal ni garantiza venta."
-        )
 
     # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
     try:
@@ -4293,12 +4285,16 @@ def live_dashboard():
 
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
     ut_warning = active in ("UP", "DOWN") and ut.get("ut_short") in ("UP", "DOWN") and ut["ut_short"] != active
-    weakness_html = (
+    profit_notice = state.get("public_profit_alert") if state else None
+    if active in ("UP", "DOWN") and isinstance(profit_notice, dict):
+        weakness_html = '<div class="weakness-inline" role="status">💰 ASEGURAR GANANCIAS</div>'
+    else:
+        weakness_html = (
         '<div class="weakness-inline" role="status">⚠ ' +
         html.escape(f"{active} PERDIENDO FUERZA" if ut_warning else round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
         '</div>'
         if (ut_warning or round_signal.get("reversal")) and active in ("UP", "DOWN") else ""
-    )
+        )
 
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
