@@ -4256,15 +4256,15 @@ def live_dashboard():
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
     ut_warning = active in ("UP", "DOWN") and ut.get("ut_short") in ("UP", "DOWN") and ut["ut_short"] != active
     profit_notice = state.get("public_profit_alert") if state else None
-    if active in ("UP", "DOWN") and isinstance(profit_notice, dict):
-        weakness_html = '<div class="weakness-inline" role="status">💰 ASEGURAR GANANCIAS</div>'
-    else:
-        weakness_html = (
+    # Independent notices: neither hides the other or modifies the signal.
+    weakness_html = (
         '<div class="weakness-inline" role="status">⚠ ' +
         html.escape(f"{active} PERDIENDO FUERZA" if ut_warning else round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
         '</div>'
         if (ut_warning or round_signal.get("reversal")) and active in ("UP", "DOWN") else ""
-        )
+    )
+    if active in ("UP", "DOWN") and isinstance(profit_notice, dict):
+        weakness_html += '<div class="weakness-inline" role="status">💰 ASEGURAR GANANCIAS</div>'
 
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
