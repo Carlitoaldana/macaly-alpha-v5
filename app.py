@@ -4473,7 +4473,7 @@ def live_dashboard():
         # Mantener el control nativo para preservar el estado y el ancho distribuido.
         st.markdown("""
         <style>
-        @media (min-width: 600px) and (max-width: 1199px) {
+        @media (max-width: 1199px) {
           .st-key-chart_timeframe,
           .st-key-chart_timeframe [data-testid="stSegmentedControl"],
           .st-key-chart_timeframe [data-testid="stSegmentedControl"] > div,
@@ -4523,6 +4523,18 @@ def live_dashboard():
             border-color: #f47786 !important;
             color: #ffc3c9 !important;
             box-shadow: inset 0 1px 0 rgba(255,195,195,.2),0 0 7px rgba(244,119,134,.35) !important;
+          }
+        }
+        @media (max-width: 599px) {
+          .st-key-chart_timeframe [role="group"],
+          .st-key-chart_timeframe [data-baseweb="button-group"],
+          .st-key-chart_timeframe [data-testid="stSegmentedControl"] > div {
+            gap: 3px !important;
+          }
+          .st-key-chart_timeframe button {
+            min-height: 40px !important;
+            font-size: 12px !important;
+            padding: 6px 0 !important;
           }
         }
         </style>
