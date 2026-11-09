@@ -4317,6 +4317,11 @@ def live_dashboard():
   opacity:0!important;cursor:pointer!important;
 }}
 .refapp .rhero {{margin-top:2px!important;}}
+/* Solo tablet: separar la señal del título y la versión del encabezado.
+   No modifica móvil, escritorio ni el motor de señales. */
+@media screen and (min-width:601px) and (max-width:1199px) {{
+  .refapp .rhero {{margin-top:42px!important;}}
+}}
 @media(max-width:400px){{
   .refapp .rhead.jc-bg-header{{height:145px!important;min-height:145px!important;max-height:145px!important}}
 }}
