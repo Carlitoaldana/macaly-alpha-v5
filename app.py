@@ -3471,33 +3471,6 @@ draw();
 
 
 
-def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
-    """Show only the inputs and decision of the clean directional engine."""
-    esc = lambda x: html.escape(str(x), quote=True)
-    def number(key, digits=2):
-        value = _plan_number(sig.get(key))
-        return f"{value:.{digits}f}" if value is not None else "SIN DATO"
-    score = _plan_number(sig.get("final_score"))
-    candidate = sig.get("candidate") if sig.get("candidate") in ("UP", "DOWN") else "ESPERANDO"
-    state = round_signal if isinstance(round_signal, dict) else {}
-    active = state.get("active_direction") or "ESPERANDO"
-    reason = state.get("decision_reason") or "Esperando evaluación"
-    threshold = 2.35 if active in ("UP", "DOWN") and candidate != active else 1.25
-    rows = [
-        ("Movimiento del precio", "Principal componente de dirección (peso 2.0)"),
-        ("VWAP", "Distancia en ATR: " + number("vwap_atr") + " · peso 1.3"),
-        ("MACD", "Histograma: " + number("macd1", 5) + " · peso 1.1"),
-        ("RSI", "Valor: " + number("rsi", 1) + " · peso 0.6"),
-        ("Tiempo restante", (f"{int(seconds_left)} segundos" if seconds_left is not None else "SIN DATO")),
-        ("Distancia al target", number("distance") + " USD"),
-    ]
-    style = '<style>.clean-diag{margin:12px 0;padding:15px;border:1px solid #dfc58d;border-radius:14px;background:#081923;color:#eaf1f6}.clean-diag h3{font-size:14px;margin:0 0 10px}.clean-diag p{font-size:12px;line-height:1.5;color:#c5d1da}.clean-diag .clean-row{padding:8px 0;border-bottom:1px solid #293b45;font-size:12px}.clean-diag .clean-row small{display:block;color:#9db0be;margin-top:3px}.clean-diag strong{color:#ffe19a}</style>'
-    entries = ''.join('<div class="clean-row"><b>'+esc(label)+'</b><small>'+esc(detail)+'</small></div>' for label, detail in rows)
-    score_label = f"{score:+.2f}" if score is not None else "SIN DATO"
-    return (style + '<section class="clean-diag"><h3>CEREBRO ACTUAL · EN VIVO</h3>'
-        + '<p>Señal propuesta: <strong>'+esc(candidate)+'</strong> · Señal activa: <strong>'+esc(active)+'</strong></p>'
-        + '<p>Puntuación: <strong>'+esc(score_label)+'</strong> · Umbral aplicable: '+esc(threshold)+'</p>'
-        + entries + '<p>Decisión: '+esc(reason)+'</p></section>')
 
 
 GOLD_TARGET_ICON = '<svg class="jc-metal-icon" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" focusable="false"><defs>\n<linearGradient id="jc-target-metal" x1="10" y1="5" x2="52" y2="67" gradientUnits="userSpaceOnUse"><stop stop-color="#fffbd0"/><stop offset=".16" stop-color="#ffe984"/><stop offset=".38" stop-color="#e5b84e"/><stop offset=".56" stop-color="#ffdc62"/><stop offset=".79" stop-color="#bc700e"/><stop offset="1" stop-color="#f7b72b"/></linearGradient>\n<filter id="jc-target-metal-shadow" x="-25%" y="-25%" width="150%" height="160%"><feDropShadow dx="0" dy="1.4" stdDeviation=".65" flood-color="#9e530a" flood-opacity=".9"/><feDropShadow dx="0" dy="0" stdDeviation="1.2" flood-color="#ffd66e" flood-opacity=".32"/></filter>\n</defs><g filter="url(#jc-target-metal-shadow)"><circle cx="32" cy="35" r="24" fill="none" stroke="url(#jc-target-metal)" stroke-width="7" stroke-dasharray="132 19" transform="rotate(-37 32 35)"/>\n<circle cx="32" cy="35" r="13.5" fill="none" stroke="url(#jc-target-metal)" stroke-width="6.5" stroke-dasharray="69 16" transform="rotate(-37 32 35)"/>\n<circle cx="32" cy="35" r="4.7" fill="url(#jc-target-metal)"/>\n<path d="M33 34 55 12" fill="none" stroke="url(#jc-target-metal)" stroke-width="5.5" stroke-linecap="round"/>\n<path d="m51 13 2-9 5 6 7 2-8 5-4 6-2-7-7 1Z" fill="url(#jc-target-metal)"/>\n<path d="M12 22a24 24 0 0 1 33-8M21 28a13.5 13.5 0 0 1 16-6" fill="none" stroke="#fff6b7" stroke-width="1.3" stroke-linecap="round" opacity=".8"/></g></svg>'
@@ -3919,7 +3892,6 @@ def live_dashboard():
 
   {reader_html}
 
-  {render_signal_requirements(sig, round_signal, market, seconds_left)}
 
 
 
