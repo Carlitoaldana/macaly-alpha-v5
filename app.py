@@ -2535,111 +2535,98 @@ def _direction_evidence(signal):
     return families
 
 
-def _direction_consistent(candidate, signal, active=None):
-    """Require broad agreement; reversal needs stronger clean consensus.
+def _market_consensus(signal):
+    """Una evaluación compartida: familias independientes, sin vetos aislados.
 
-    Missing/neutral families abstain, but no observed family may oppose the
-    proposed direction. Reversal requires at least four agreeing families.
+    El precio respecto al target NO cuenta como voto técnico: se utiliza
+    únicamente por el lector de cierre. Los votos neutrales se abstienen.
     """
-    if candidate not in ("UP", "DOWN"):
-        return False
     families = _direction_evidence(signal)
-    if len(families) < 3:
-        return False
-    agree = sum(v == candidate for v in families.values())
-    oppose = sum(v != candidate for v in families.values())
-    if oppose:
+    weights = {"trend": 1.0, "structure": 1.0, "oscillator": 1.0,
+               "momentum": 1.2, "macd": 0.85,
+               "directional_pressure": 0.85, "level_reaction": 1.15}
+    scores = {side: sum(weights.get(name, 1.0) for name, direction in families.items()
+                        if direction == side) for side in ("UP", "DOWN")}
+    votes = {side: sum(direction == side for direction in families.values())
+             for side in ("UP", "DOWN")}
+    best = "UP" if scores["UP"] > scores["DOWN"] else "DOWN"
+    other = "DOWN" if best == "UP" else "UP"
+    # Tres familias y margen neto, sin exigir unanimidad absoluta.
+    direction = (best if votes[best] >= 3 and
+                 scores[best] >= 3.0 and scores[best]-scores[other] >= 1.35
+                 else None)
+    return direction, scores, votes
+
+
+def _direction_consistent(candidate, signal, active=None):
+    direction, scores, votes = _market_consensus(signal)
+    if candidate != direction:
         return False
     if active in ("UP", "DOWN") and active != candidate:
-        return agree >= 4
-    return agree >= 3
+        other = active
+        return votes[candidate] >= 4 and scores[candidate]-scores[other] >= 2.0
+    return True
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
-    """Require fresh directional evidence before the first entry of this ticker.
+    """Primera decisión: consenso + movimiento reciente real, sin MACD-veto.
 
-    Old candles remain context, never sufficient evidence for an opening entry.
-    Each live feed has a separate short tape. Later reversals are unrestricted.
+    No depende de las rutas antiguas para abrir una ronda; sus indicadores
+    ya se computaron en _signal_engine_without_trace y llegan en 'signal'.
     """
     if state.get("first_direction") in ("UP", "DOWN"):
         state["opening_conflict"] = None
         return candidate
+
     def wait(reason):
         state["opening_conflict"] = reason
         return None
-    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
-        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
+
     if not signal or signal.get("data_valid") is False:
-        return wait("Esperando datos actuales para la primera señal")
+        return wait("Esperando datos actuales")
     price = _plan_number(signal.get("price"))
     atr = _plan_number(signal.get("atr"))
     source = signal.get("price_source")
-    if (price is None or price <= 0 or atr is None or atr <= 0
-            or source not in ("COINBASE", "KALSHI LIVE")):
-        return wait("Esperando precio en vivo para la primera señal")
+    if (price is None or price <= 0 or atr is None or atr <= 0 or
+            source not in ("COINBASE", "KALSHI LIVE")):
+        return wait("Esperando precio en vivo de referencia")
+
     stamp = now.timestamp()
     tapes = state.setdefault("opening_live_tapes", {})
-    tape = tapes.get(source, [])
+    tape = list(tapes.get(source) or [])
     if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
         tape = []
-    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
+    tape = [row for row in tape if 0 <= stamp-row[0] <= 35]
     if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
         tape.append([stamp, price])
-    tapes[source] = tape
-    if candidate not in ("UP", "DOWN"):
-        return wait("Analizando fuerza actual antes de la primera señal")
-    # Solo primera entrada: no confirmar cuando indicadores clave
-    # contradicen la dirección, aunque una ruta individual la proponga.
-    sign = 1 if candidate == "UP" else -1
-    families = _direction_evidence(signal)
-    if len(families) < 3 or any(v != candidate for v in families.values()):
-        return wait("Indicadores direccionales sin consenso para " + candidate)
-    for field in ("macd1", "macd3", "macd5"):
-        value = _plan_number(signal.get(field))
-        if value is None or sign * value < 0:
-            return wait("MACD sin respaldo conjunto para " + candidate)
-    plus_di = _plan_number(signal.get("plus_di"))
-    minus_di = _plan_number(signal.get("minus_di"))
-    if plus_di is None or minus_di is None or sign * (plus_di-minus_di) < 0:
-        return wait("Presión direccional sin respaldo para " + candidate)
-    # Antes de la primera confirmación, comprobar si el TARGET está
-    # cerca de una barrera estructural en la dirección propuesta.
-    # No usar el nivel como señal: exigir ruptura efectiva con margen
-    # proporcional a la volatilidad y momentum que la respalde.
-    target = _plan_number(signal.get("target"))
-    boundary = _plan_number(signal.get("opening_support" if candidate == "DOWN" else "opening_resistance"))
-    if boundary is not None and target is not None:
-        near_target = abs(target-boundary) <= 0.6*atr
-        near_price = abs(price-boundary) <= 1.0*atr
-        if near_target and near_price:
-            breakout = sign*(price-boundary) >= 0.20*atr
-            momentum = _plan_number(signal.get("mom3"))
-            if not breakout or momentum is None or sign*momentum <= 0:
-                return wait("Esperando ruptura confirmada de soporte/resistencia para " + candidate)
-    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
-        return wait("Observando movimiento actual antes de la primera señal")
-    prices = [float(x[1]) for x in tape]
-    sign = 1 if candidate == "UP" else -1
-    split = len(prices)//2
+    tapes[source] = tape[-20:]
+
+    side, scores, votes = _market_consensus(signal)
+    if side is None:
+        return wait("Indicadores sin consenso suficiente")
+    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 5:
+        return wait("Reuniendo movimiento reciente para " + side)
+
+    sign = 1 if side == "UP" else -1
+    # Tomar movimiento de una ventana breve, no obligar a que toda la
+    # ventana de 35s haya ido en un solo sentido.
+    recent = [row for row in tape if tape[-1][0]-row[0] <= 18]
+    if len(recent) < 3:
+        return wait("Analizando continuidad del precio")
+    prices = [float(row[1]) for row in recent]
     net = sign*(prices[-1]-prices[0])
-    recent = sign*(prices[-1]-prices[split])
-    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
-    efficiency = net/max(travel, 1e-8)
-    minimum = max(2.0, .10*atr)
-    latest = sign*(prices[-1]-prices[-2])
-    # La primera señal requiere continuidad en ambas mitades de la
-    # observación; una caída/subida inicial seguida de rebote no basta.
-    early = sign*(prices[split]-prices[0])
-    opposite_steps = sum(
-        1 for a, b in zip(prices, prices[1:])
-        if sign*(b-a) < -0.15*minimum
-    )
-    if (net < minimum or recent < .5*minimum or early <= 0
-            or efficiency < .60 or latest < -.25*minimum
-            or opposite_steps > max(1, (len(prices)-1)//3)):
-        return wait("Primer impulso sin continuidad confirmada para " + candidate)
+    travel = sum(abs(y-x) for x,y in zip(prices, prices[1:]))
+    efficiency = net / max(travel, 1e-8)
+    minimum = max(1.5, 0.055*atr)
+    if net < minimum or efficiency < .28:
+        return wait("Sin continuidad reciente para " + side)
+    # Si el precio revierte bruscamente en la última lectura, no autorizar.
+    if sign*(prices[-1]-prices[-2]) < -max(1.0, .06*atr):
+        return wait("Retroceso contrario reciente a " + side)
+    # La reacción en soporte/resistencia ya votó como familia independiente;
+    # no imponer otra puerta de ruptura después del consenso.
     state["opening_conflict"] = None
-    return candidate
+    return side
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
@@ -2648,9 +2635,13 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     """
     # A candidate is not a confirmation when the available directional
     # evidence contradicts it. Keep the active signal while reassessing.
-    if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
+    if state.get("first_direction") not in ("UP", "DOWN"):
+        # Una sola evaluación de apertura. Las rutas anteriores no tienen
+        # voto de bloqueo ni de autorización independiente.
+        candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    elif candidate in ("UP", "DOWN") and not _direction_consistent(
+            candidate, signal, state.get("active_direction")):
         candidate = None
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
@@ -4714,9 +4705,9 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "coherent_consensus_v7":
+    if state.get("signal_engine_revision") != "coherent_consensus_v8":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "coherent_consensus_v7"
+        state["signal_engine_revision"] = "coherent_consensus_v8"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None, active_direction=None,
@@ -4731,7 +4722,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"coherent_consensus_v7", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"coherent_consensus_v8", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
