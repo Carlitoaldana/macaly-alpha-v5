@@ -547,6 +547,20 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .rconf{display:inline-block;margin-top:11px;border:1.5px solid var(--accent);border-radius:18px;padding:5px 17px;color:#fff;font-size:10px;font-weight:900;box-shadow:0 0 10px var(--soft)}
 .rgrid{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:2px}
 .rcard{background:linear-gradient(180deg,#0d1823,#09131c);border:1px solid #203348;border-radius:8px}
+
+/* Acabado visual ALPHA EDGE: franjas dentro de todos los cuadros */
+.rcard, .rgrid > div, .finalcard, .analysisbox, .probbox,
+.finalclose, .finalanalysis, .weakness-inline, .prebox,
+.rnav, .techrow > div, .motionrow > div {
+ background-image:
+ repeating-linear-gradient(128deg,transparent 0px,transparent 18px,rgba(255,232,173,.12) 19px,rgba(255,232,173,.045) 31px,transparent 40px,transparent 78px),
+ linear-gradient(145deg,#0c1c27,#07151e) !important;
+ background-blend-mode:screen,normal;
+}
+.rcard {border-color:rgba(228,190,120,.78)!important;box-shadow:inset 0 1px 0 rgba(255,227,170,.18),0 0 8px rgba(215,166,79,.14);}
+.keycard .targeticon,.keycard .clock{width:37px;height:40px;flex:none;display:flex;align-items:center;justify-content:center;filter:drop-shadow(0 1px 3px rgba(249,190,68,.58));}
+.keycard .targeticon svg,.keycard .clock svg{width:37px;height:37px;display:block;}
+
 .keycard{height:68px;padding:8px 9px;display:flex;align-items:center;gap:8px}
 .bigicon{font-size:31px;font-weight:900;line-height:1}.btcicon{color:#ff9d00}.targeticon{color:#8acfc3}
 .rlabel{font-size:8px;color:#b9c9dc;letter-spacing:.4px}.rvalue{font-size:19px;font-weight:900;line-height:1.05;margin-top:2px}.rdelta{font-size:9px;font-weight:900;margin-top:2px}
@@ -874,6 +888,54 @@ section.main .block-container > * {
   z-index: 1 !important;
 }
 
+
+/* ALPHA EDGE: franjas interiores en TODOS los cuadros del panel.
+   La capa es puramente decorativa y no intercepta clics. */
+.rcard,
+.presignal,
+.probs,
+.finalclose,
+.finalcard,
+.finalanalysis,
+.probbox,
+.ra93-panel,
+.chartbox,
+.history-stat,
+.sq-box,
+.panel,
+.card,
+.metric,
+.motionrow > div,
+.finalgrid > div,
+.metrics > div,
+.cards > div,
+.rgrid > div,
+.history-stats > div,
+.sq-item {
+  position:relative;
+  isolation:isolate;
+  overflow:hidden;
+}
+.rcard::before, .presignal::before, .probs::before, .finalclose::before, .finalcard::before, .finalanalysis::before, .probbox::before, .ra93-panel::before, .chartbox::before, .history-stat::before, .sq-box::before, .panel::before, .card::before, .metric::before, .motionrow > div::before, .finalgrid > div::before, .metrics > div::before, .cards > div::before, .rgrid > div::before, .history-stats > div::before, .sq-item::before {
+  content:"";
+  position:absolute;
+  inset:0;
+  z-index:0;
+  pointer-events:none;
+  border-radius:inherit;
+  background:repeating-linear-gradient(128deg,
+    transparent 0px,
+    transparent 20px,
+    rgba(255,232,169,.15) 21px,
+    rgba(255,232,169,.085) 30px,
+    transparent 39px,
+    transparent 79px);
+  opacity:.85;
+}
+.rcard > *, .presignal > *, .probs > *, .finalclose > *, .finalcard > *, .finalanalysis > *, .probbox > *, .ra93-panel > *, .chartbox > *, .history-stat > *, .sq-box > *, .panel > *, .card > *, .metric > *, .motionrow > div > *, .finalgrid > div > *, .metrics > div > *, .cards > div > *, .rgrid > div > *, .history-stats > div > *, .sq-item > * {
+  position:relative;
+  z-index:1;
+}
 </style>
 """,
     unsafe_allow_html=True,
@@ -2473,6 +2535,72 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     return candidate
 
 
+def _lateral_risk_for_entry(signal):
+    """Conservative sideways-risk guard, only for a FIRST official signal.
+    Uses existing indicators; it does not alter the signal engine.
+    """
+    if not isinstance(signal, dict) or signal.get("data_valid") is False:
+        return False
+    try:
+        adx = float(signal.get("adx") or 0)
+        vwap_distance = abs(float(signal.get("vwap_atr") or 0))
+        target_distance = abs(float(signal.get("target_atr") or 0))
+        mom3 = abs(float(signal.get("mom3") or 0))
+        mom5 = abs(float(signal.get("mom5") or 0))
+        trend3, trend5 = signal.get("trend3"), signal.get("trend5")
+        # Require multiple signs of chop rather than vetoing a single slow indicator.
+        return (adx < 19 and vwap_distance < 0.40
+                and target_distance < 0.65 and mom3 < 0.10 and mom5 < 0.15
+                and (trend3 != trend5 or trend3 == "NEUTRAL"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _kalshi_exit_quote(market, side):
+    """Best displayed bid in dollars (not a guaranteed execution price)."""
+    if not isinstance(market, dict):
+        return None
+    prefix = "yes" if side == "UP" else "no"
+    quote = numeric_kalshi_price(market.get(prefix + "_bid_dollars"),
+                                 market.get(prefix + "_bid"))
+    return quote if quote is not None and 0 <= quote <= 1 else None
+
+
+def _update_public_profit_alert(state, signal, market, seconds_left):
+    """Round-level advisory; no user entry price, trading, or official signal changes."""
+    side = state.get("active_direction")
+    if side not in ("UP", "DOWN") or seconds_left is None or seconds_left <= 0:
+        state["public_profit_alert"] = None
+        return
+    quote = _kalshi_exit_quote(market, side)
+    if quote is None:
+        state["public_profit_alert"] = None
+        return
+    # No extrapolation from the ask, BTC target, or the engine's support %.
+    previous_peak = state.get("public_profit_peak")
+    if state.get("public_profit_side") != side:
+        previous_peak = None
+    peak = max(float(previous_peak or 0), quote)
+    state["public_profit_side"] = side
+    state["public_profit_peak"] = peak
+    try:
+        short_momentum = float(signal.get("mom3") or 0)
+        vwap_atr = float(signal.get("vwap_atr") or 0)
+        probability = float(signal.get("up_probability") if side == "UP" else signal.get("down_probability"))
+        direction = 1 if side == "UP" else -1
+        weakening = (direction * short_momentum < 0 or direction * vwap_atr < -0.12
+                     or probability < 55)
+    except (TypeError, ValueError):
+        weakening = False
+    pullback = peak - quote >= 0.05
+    # A high quote is not automatically a profit for every viewer.
+    state["public_profit_alert"] = (
+        {"side": side, "bid": round(quote * 100), "peak": round(peak * 100),
+         "risk": bool(weakening or pullback)}
+        if peak >= 0.80 and (weakening or pullback) else None
+    )
+
+
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
     """One confirmation path for foreground and background. Neutral readings
     cancel pending candidates, never erase a confirmed active direction.
@@ -2482,6 +2610,12 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
         candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    # Sideways protection only BEFORE the first signal; existing signal engine unchanged.
+    if state.get("first_direction") is None and candidate in ("UP", "DOWN") and _lateral_risk_for_entry(signal):
+        state["lateral_protection"] = "MERCADO LATERAL · SIN VENTAJA CLARA"
+        candidate = None
+    else:
+        state["lateral_protection"] = None
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
     close_time = (market or {}).get("close_time")
@@ -2499,6 +2633,19 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                     "active_direction", "active_since"):
             state[key] = None
         state["pending_count"] = 0
+        return
+    # OBSERVACIÓN INICIAL: durante el primer minuto de cada ronda de 15m,
+    # seguir calculando indicadores y recogiendo precios, pero sin confirmar
+    # ni dejar pendiente una primera señal. El reloj viene del cierre real
+    # del mercado, no de cuándo abrió el usuario la pantalla.
+    if (state.get("first_direction") is None
+            and (seconds_left is None or seconds_left > 14 * 60)):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        state["pending_price_source"] = None
+        state["opening_conflict"] = "Analizando el primer minuto de la ronda"
         return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
@@ -3960,6 +4107,18 @@ def live_dashboard():
         else None
     )
 
+    # Read-only notices. These do not alter the official UP/DOWN or trading.
+    if state and state.get("lateral_protection") and not state.get("first_direction"):
+        st.info("🛑 MERCADO LATERAL · Sin ventaja clara. Analizando antes de dar señal.")
+    if state and isinstance(state.get("public_profit_alert"), dict):
+        notice = state["public_profit_alert"]
+        st.warning(
+            f"💰 ASEGURAR GANANCIAS · POSIBLE RETROCESO | "
+            f"{notice['side']} · Mejor oferta de compra Kalshi: {notice['bid']}¢ "
+            f"(máximo observado: {notice['peak']}¢). "
+            "Aviso general; no equivale a ganancia personal ni garantiza venta."
+        )
+
     # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
     try:
         order_book = get_coinbase_order_book()
@@ -4217,7 +4376,7 @@ def live_dashboard():
       <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="bigicon targeticon">◎</div>
+      <div class="bigicon targeticon"><svg viewBox="0 0 64 64" aria-label="Target dorado" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="tgGold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff4b5"/><stop offset=".45" stop-color="#ffc84e"/><stop offset="1" stop-color="#9b5b12"/></linearGradient></defs><circle cx="29" cy="36" r="23" fill="none" stroke="url(#tgGold)" stroke-width="5"/><circle cx="29" cy="36" r="14" fill="none" stroke="url(#tgGold)" stroke-width="4"/><circle cx="29" cy="36" r="5" fill="#ffcf59"/><path d="M29 36L51 13M45 8l7 5 6-1-6 7-1 7-5-7" fill="none" stroke="#ffd36a" stroke-width="4" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
       <div><div class="rlabel">TARGET</div><div class="rvalue">{target_text}</div></div>
     </div>
     <div class="rcard keycard">
@@ -4226,7 +4385,7 @@ def live_dashboard():
       <div class="rdelta" style="color:{distance_color}">{distance_sub}</div></div>
     </div>
     <div class="rcard keycard">
-      <div class="clock">◷</div>
+      <div class="clock"><svg viewBox="0 0 64 64" aria-label="Cronómetro dorado" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="clGold" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fff4b5"/><stop offset=".5" stop-color="#ffca50"/><stop offset="1" stop-color="#99580e"/></linearGradient></defs><path d="M26 4h13v6H26zM44 14l6-6 6 6-6 6" fill="#f4b83c"/><circle cx="32" cy="37" r="23" fill="#14232c" stroke="url(#clGold)" stroke-width="5"/><path d="M32 19v18l-9 7" stroke="#ffd469" stroke-width="4" stroke-linecap="round" fill="none"/><circle cx="32" cy="37" r="4" fill="#ffe49b"/></svg></div>
       <div class="timecontent"><div class="rlabel">TIEMPO RESTANTE</div><div class="rvalue">{countdown}</div>
       <div class="timebar"><b style="width:{time_pct}%"></b></div></div>
     </div>
@@ -4556,6 +4715,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     if not isinstance(state.get("exit_plan"), dict) and state.get("first_direction") in ("UP", "DOWN"):
         state["exit_plan"] = make_exit_plan(state, signal, seconds_left, now)
     update_exit_plan(state, signal, seconds_left, now)
+    _update_public_profit_alert(state, signal, market, seconds_left)
     _capture_recent_alert(state, signal, market, now)
 
     try:
