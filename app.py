@@ -971,6 +971,25 @@ section.main .block-container > * {
     left: 0 !important;
     transform: none !important;
   }
+  /* Los siete botones nativos de st.radio, únicamente en tablet. */
+  [data-testid="stRadio"] [role="radiogroup"],
+  .stRadio [role="radiogroup"] {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    width: 100% !important;
+    justify-content: space-between !important;
+    gap: 8px !important;
+    box-sizing: border-box !important;
+  }
+  [data-testid="stRadio"] [role="radiogroup"] > label,
+  .stRadio [role="radiogroup"] > label {
+    flex: 1 1 0 !important;
+    min-width: 0 !important;
+    justify-content: center !important;
+    text-align: center !important;
+    margin: 0 !important;
+  }
 }
 </style>
 """,
