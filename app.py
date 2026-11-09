@@ -34,7 +34,7 @@ NEW_ENTRY_LOCK = 75
 
 # Dos lecturas coherentes, separadas por al menos 2 s (mínimo 2 s).
 # Confirmación consistente: varias lecturas separadas; no basta un tick aislado.
-SIGNAL_CONFIRM_READINGS = 3
+SIGNAL_CONFIRM_READINGS = 1
 SIGNAL_CONFIRM_INTERVAL = 2.5
 # Una pausa prolongada invalida la secuencia pendiente.
 SIGNAL_CONFIRM_MAX_GAP = 10.0
@@ -1100,7 +1100,7 @@ def new_round_state(ticker, seconds_left):
 # =========================================================
 
 LEGACY_ROUND_STATE_DB = 'btc_signal_round_state.db'
-ROUND_STATE_DB = 'btc_signal_round_state_v2.db'
+ROUND_STATE_DB = 'btc_signal_round_state_single_writer_v10.db'
 _ROUND_TRANSACTION = threading.local()
 
 
@@ -1127,14 +1127,8 @@ def _load_state_from_connection(conn, ticker):
     row = conn.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
     if row:
         return _decode_round_payload(row[0])
-    # La primera lectura conserva la ronda anterior, sin permitir que un trabajador
-    # antiguo escriba en la nueva base coordinada.
-    try:
-        with sqlite3.connect('file:' + LEGACY_ROUND_STATE_DB + '?mode=ro', uri=True, timeout=1) as legacy:
-            row = legacy.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
-        return _decode_round_payload(row[0]) if row else None
-    except Exception:
-        return None
+    # No importar una confirmación creada por motores anteriores.
+    return None
 
 
 def load_round_state(ticker):
@@ -1204,14 +1198,45 @@ def _run_round_transaction(action):
 
 
 def process_round_signal(ticker, sig, market, seconds_left):
+    """Vista de solo lectura: NUNCA confirma ni escribe señales.
+
+    El registrador autónomo es el único escritor del estado de ronda.
+    Tanto las alertas como la pantalla usan su confirmación persistida.
+    """
     if not ticker or ticker == '--':
-        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
-    def apply():
-        latest = load_round_state(ticker)
-        if latest is not None:
-            st.session_state.rounds[ticker] = latest
-        return _process_round_signal_without_coordinator(ticker,sig,market,seconds_left)
-    return _run_round_transaction(apply)
+        return {"decision":"NO TRADE","signal":"SIN RONDA","icon":"•",
+                "color":"#fbbf24","round_state":None,"reversal":False,
+                "reversal_text":"","entry_price":None,
+                "entry_quality":"SIN DATOS","entry_quality_color":"#94a3b8"}
+    state = load_round_state(ticker)
+    if state is None:
+        state = new_round_state(ticker, seconds_left)
+    state.pop('_restored_from_disk', None)
+    st.session_state.rounds[ticker] = state
+    st.session_state.active_ticker = ticker
+    active = state.get('active_direction')
+    first = state.get('first_direction')
+    if active == 'UP':
+        decision, label, icon, color = 'UP', 'SEÑAL UP', '⬆', '#00dfb5'
+        entry = get_yes_ask(market)
+    elif active == 'DOWN':
+        decision, label, icon, color = 'DOWN', 'SEÑAL DOWN', '⬇', '#e64b4b'
+        entry = get_no_ask(market)
+    else:
+        decision, icon, color, entry = 'ESPERANDO', '•', '#38bdf8', None
+        if first in ('UP','DOWN'):
+            label = 'SEÑAL ' + first + ' RETIRADA'
+        elif state.get('pending_direction') in ('UP','DOWN'):
+            label = 'CONFIRMANDO ' + state['pending_direction']
+        else:
+            label = state.get('opening_conflict') or 'SIN CONFIRMACIÓN'
+    quality, quality_color = entry_quality(entry, seconds_left)
+    return {"decision":decision,"signal":label,"icon":icon,"color":color,
+            "round_state":state,
+            "reversal":bool(state.get('reversal_warning')),
+            "reversal_text":state.get('reversal_text') or '',
+            "entry_price":entry,"entry_quality":quality,
+            "entry_quality_color":quality_color}
 
 
 def _background_update_state(state, sig, market, seconds_left):
@@ -1231,7 +1256,7 @@ def _background_update_state(state, sig, market, seconds_left):
 # =========================================================
 
 LEGACY_HISTORY_DB = "btc_signal_history.db"
-HISTORY_DB = "btc_signal_history_v2.db"
+HISTORY_DB = "btc_signal_history_single_writer_v10.db"
 
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
@@ -2671,77 +2696,25 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state["active_direction"] = None
             state["active_since"] = None
         return
-    source = signal.get("price_source") if signal else None
-    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
-        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
-            # Tres lecturas deben pertenecer a una misma referencia de precio.
-            state["pending_direction"] = None
-            state["pending_count"] = 0
-            state["pending_since"] = None
-            state["pending_last_at"] = None
-        state["pending_price_source"] = source
-    if candidate not in ("UP", "DOWN"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        _review_active_retention(state, signal, seconds_left, now)
-        return
-
+    # Una única decisión autorizada por el consenso y el movimiento reciente.
+    # No se exige otra serie de tres confirmaciones después de la evaluación.
+    # El estado pendiente se limpia siempre para evitar "CONFIRMANDO" eterno.
+    state["pending_direction"] = None
+    state["pending_count"] = 0
+    state["pending_since"] = None
+    state["pending_last_at"] = None
+    state["pending_price_source"] = None
     _review_active_retention(state, signal, seconds_left, now)
-    if candidate == state.get("active_direction"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    if candidate not in ("UP", "DOWN") or candidate == state.get("active_direction"):
         return
-
-    last = state.get("pending_last_at")
-    if isinstance(last, str):
-        try:
-            last = datetime.fromisoformat(last)
-        except ValueError:
-            last = None
-    since = state.get("pending_since")
-    if isinstance(since, str):
-        try:
-            since = datetime.fromisoformat(since)
-        except ValueError:
-            since = None
-
-    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
-                              or (now - last).total_seconds() < 0)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        last = since = None
-    if state.get("pending_direction") != candidate:
-        state["pending_direction"] = candidate
-        state["pending_count"] = 1
-        state["pending_since"] = now.isoformat()
-        state["pending_last_at"] = now.isoformat()
-        return
-
-    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] = int(state.get("pending_count", 0)) + 1
-        state["pending_last_at"] = now.isoformat()
-
-    elapsed = (now - since).total_seconds() if since else 0
-    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
-        state["active_direction"] = candidate
-        state["active_since"] = now
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    state["active_direction"] = candidate
+    state["active_since"] = now
+    if state.get("first_direction") is None:
+        state["first_direction"] = candidate
+        state["first_signal_time"] = now
+        state["first_signal_seconds"] = seconds_left
+        state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                       else get_no_ask(market))
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -2877,7 +2850,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_multi_indicator49_v1"
+BACKGROUND_DATA_REVISION = "single_writer_history_v10"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -2977,6 +2950,7 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     state["previous_score"] = float(state.get("last_score", 0.0))
     state["last_score"] = float(sig.get("final_score", 0.0))
     confirm_round_candidate(state, sig.get("candidate"), market, seconds_left, now, sig)
+    state["writer_updated_at"] = now.isoformat()
     save_round_state(state)
     _shadow_capture(state.get("ticker"), sig, state, seconds_left)
     return state
@@ -4114,9 +4088,14 @@ def live_dashboard():
     # No se consulta por segunda vez ni modifica las confirmaciones temporales.
 
     state = round_signal.get("round_state")
+    # Never represent historical persisted state as currently live if the worker
+    # stopped receiving fresh data. The first confirmed signal remains in history.
+    updated = _recent_alert_time(state.get("writer_updated_at")) if state else None
+    writer_stale = (updated is None or
+                    (datetime.now(timezone.utc) - updated).total_seconds() > 25)
     active = (
         state.get("active_direction")
-        if state and btc_ok
+        if state and btc_ok and not writer_stale
         else None
     )
 
@@ -4169,7 +4148,7 @@ def live_dashboard():
     if first_display is not None and first_display[0] != ticker:
         st.session_state.pop("first_signal_display")
         first_display = None
-    if first_display is None and active in ("UP", "DOWN") and state.get("ticker") == ticker:
+    if first_display is None and state and state.get("ticker") == ticker:
         side = state.get("first_direction")
         signal_dt = state.get("first_signal_time")
         if side in ("UP", "DOWN") and signal_dt is not None:
@@ -4217,7 +4196,10 @@ def live_dashboard():
         hero_arrow, hero_word = "", "DOWN"
         btc_delta = f"{sig['mom3']:+.2f}%"
     else:
-        hero_arrow, hero_word = "•", "ESPERANDO"
+        first_side = (state or {}).get("first_direction")
+        hero_arrow = "•"
+        hero_word = ("SIN DATOS ACTUALES" if writer_stale else
+                     (first_side + " RETIRADA") if first_side in ("UP", "DOWN") else "ESPERANDO")
         btc_delta = f"{sig['mom3']:+.2f}%"
 
     ema_class = "green" if sig["ema"] == "BULL" else "red"
@@ -4705,9 +4687,9 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "coherent_consensus_v8":
+    if state.get("signal_engine_revision") != "single_writer_v10_one_decision":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "coherent_consensus_v8"
+        state["signal_engine_revision"] = "single_writer_v10_one_decision"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None, active_direction=None,
@@ -4722,7 +4704,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"coherent_consensus_v8", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"single_writer_v10_one_decision", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
