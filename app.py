@@ -4417,10 +4417,8 @@ def live_dashboard():
 
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
-        # Selector reconstruido: sustituye el antiguo st.radio por un control
-        # nativo que ocupa todo el ancho disponible, sin CSS adicional.
-        # Selector de temporalidad: tarjetas neón como los demás cuadros.
-        # Reemplaza el estilo del control completo, no solo el botón interior.
+        # Selector de temporalidad: mismo acabado dorado y franjas que las tarjetas.
+        # Mantener el control nativo para preservar el estado y el ancho distribuido.
         st.markdown("""
         <style>
         @media (min-width: 600px) and (max-width: 1199px) {
@@ -4438,47 +4436,41 @@ def live_dashboard():
           .st-key-chart_timeframe [data-testid="stSegmentedControl"] > div {
             display: flex !important;
             width: 100% !important;
-            gap: 8px !important;
+            gap: 6px !important;
             justify-content: space-between !important;
           }
-          .st-key-chart_timeframe button,
-          .st-key-chart_timeframe [role="radio"],
-          .st-key-chart_timeframe label {
+          .st-key-chart_timeframe button {
             flex: 1 1 0 !important;
             min-width: 0 !important;
-            min-height: 45px !important;
+            min-height: 47px !important;
             padding: 8px 2px !important;
             margin: 0 !important;
-            background: linear-gradient(145deg, #16354a 0%, #0b1a30 100%) !important;
-            background-color: #0b1a30 !important;
-            color: #e8fcff !important;
-            border: 2px solid #65d9d4 !important;
-            border-radius: 12px !important;
-            box-shadow: inset 0 0 10px #21d4ce33, 0 0 5px #25d4ce55 !important;
+            background-image:
+              repeating-linear-gradient(128deg,transparent 0px,transparent 18px,rgba(255,232,173,.12) 19px,rgba(255,232,173,.045) 31px,transparent 40px,transparent 78px),
+              linear-gradient(145deg,#0c1c27,#07151e) !important;
+            background-color: #09151f !important;
+            background-blend-mode: screen,normal !important;
+            color: #f2e7d6 !important;
+            border: 1px solid rgba(228,190,120,.78) !important;
+            border-radius: 9px !important;
+            box-shadow: inset 0 1px 0 rgba(255,227,170,.18),0 0 8px rgba(215,166,79,.14) !important;
             font-size: 14px !important;
-            font-weight: 750 !important;
+            font-weight: 800 !important;
             opacity: 1 !important;
           }
-          .st-key-chart_timeframe button *,
-          .st-key-chart_timeframe [role="radio"] *,
-          .st-key-chart_timeframe label * {
-            color: #e8fcff !important;
+          .st-key-chart_timeframe button * {
+            color: inherit !important;
             opacity: 1 !important;
           }
           .st-key-chart_timeframe button[aria-pressed="true"],
           .st-key-chart_timeframe button[aria-checked="true"],
-          .st-key-chart_timeframe button[data-state="active"],
-          .st-key-chart_timeframe [role="radio"][aria-checked="true"] {
-            background: linear-gradient(145deg, #532233, #211522) !important;
-            background-color: #532233 !important;
-            border-color: #ff5878 !important;
-            box-shadow: inset 0 0 10px #ff587844, 0 0 7px #ff587888 !important;
-            color: #ffa5b5 !important;
-          }
-          .st-key-chart_timeframe button[aria-pressed="true"] *,
-          .st-key-chart_timeframe button[aria-checked="true"] *,
-          .st-key-chart_timeframe [role="radio"][aria-checked="true"] * {
-            color: #ffa5b5 !important;
+          .st-key-chart_timeframe button[data-state="active"] {
+            background-image:
+              repeating-linear-gradient(128deg,transparent 0px,transparent 18px,rgba(255,180,180,.10) 19px,rgba(255,180,180,.035) 31px,transparent 40px,transparent 78px),
+              linear-gradient(145deg,#43212b,#1a1821) !important;
+            border-color: #f47786 !important;
+            color: #ffc3c9 !important;
+            box-shadow: inset 0 1px 0 rgba(255,195,195,.2),0 0 7px rgba(244,119,134,.35) !important;
           }
         }
         </style>
