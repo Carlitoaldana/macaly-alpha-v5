@@ -4419,6 +4419,47 @@ def live_dashboard():
     if btc_ok:
         # Selector reconstruido: sustituye el antiguo st.radio por un control
         # nativo que ocupa todo el ancho disponible, sin CSS adicional.
+        # Estilo del selector nuevo: solo iPad/tablet, conserva las siete columnas.
+        st.markdown("""
+        <style>
+        @media (min-width: 600px) and (max-width: 1199px) {
+          .st-key-chart_timeframe [data-testid="stSegmentedControl"] button,
+          .st-key-chart_timeframe [data-baseweb="button-group"] button,
+          .st-key-chart_timeframe [role="group"] button {
+            background: linear-gradient(145deg, #102a3c, #0a172a) !important;
+            color: #f2f8ff !important;
+            border: 2px solid #48d9d2 !important;
+            border-radius: 999px !important;
+            box-shadow: inset 0 0 8px #21b8b43d, 0 0 5px #27d3cf44 !important;
+            font-weight: 750 !important;
+            min-height: 40px !important;
+            margin: 0 3px !important;
+          }
+          .st-key-chart_timeframe [data-testid="stSegmentedControl"] button[aria-pressed="true"],
+          .st-key-chart_timeframe [data-testid="stSegmentedControl"] button[data-state="active"],
+          .st-key-chart_timeframe [data-baseweb="button-group"] button[aria-pressed="true"],
+          .st-key-chart_timeframe [role="group"] button[aria-pressed="true"] {
+            background: linear-gradient(145deg, #532033, #231526) !important;
+            color: #ff8c9f !important;
+            border-color: #ff4d6b !important;
+            box-shadow: inset 0 0 8px #ff4d6b55, 0 0 7px #ff4d6b77 !important;
+          }
+          .st-key-chart_timeframe [data-testid="stSegmentedControl"] > div,
+          .st-key-chart_timeframe [data-baseweb="button-group"],
+          .st-key-chart_timeframe [role="group"] {
+            width: 100% !important;
+            display: flex !important;
+            justify-content: space-between !important;
+            background: transparent !important;
+            gap: 3px !important;
+          }
+          .st-key-chart_timeframe [data-testid="stSegmentedControl"] button,
+          .st-key-chart_timeframe [data-baseweb="button-group"] button {
+            flex: 1 1 0 !important;
+          }
+        }
+        </style>
+        """, unsafe_allow_html=True)
         chart_timeframe = st.segmented_control(
             "Temporalidad del gráfico",
             ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
