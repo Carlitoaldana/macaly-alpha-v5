@@ -4417,30 +4417,14 @@ def live_dashboard():
 
     # Panel neón: capa visual independiente. No altera el motor de señales.
     if btc_ok:
-        st.markdown("""<style>
-        /* Únicamente tablet; el selector se aplica a la fila real del gráfico. */
-        @media (min-width: 600px) and (max-width: 1200px) {
-          .st-key-alpha_timeframe_center [data-testid="stRadio"] [role="radiogroup"] {
-            display: flex !important;
-            flex-direction: row !important;
-            justify-content: center !important;
-            align-items: center !important;
-            flex-wrap: nowrap !important;
-            width: 100% !important;
-            gap: clamp(8px, 1.5vw, 20px) !important;
-          }
-          .st-key-alpha_timeframe_center [data-testid="stRadio"] {
-            width: 100% !important;
-          }
-        }
-        </style>""", unsafe_allow_html=True)
-        # Fila de temporalidades: un contenedor propio para centrarla en iPad.
-        with st.container(key="alpha_timeframe_center"):
-            chart_timeframe = st.radio(
-                "Temporalidad del gráfico",
-                ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
-                horizontal=True, key="chart_timeframe", label_visibility="collapsed",
-            )
+        # Selector reconstruido: sustituye el antiguo st.radio por un control
+        # nativo que ocupa todo el ancho disponible, sin CSS adicional.
+        chart_timeframe = st.segmented_control(
+            "Temporalidad del gráfico",
+            ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
+            default="1m", key="chart_timeframe", label_visibility="collapsed",
+            selection_mode="single", width="stretch",
+        )
         try:
             chart_df = btc_df if chart_timeframe in ("1m", "3m", "5m") else _neon_chart_history(chart_timeframe)
             chart_html = render_neon_chart(
