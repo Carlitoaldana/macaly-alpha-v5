@@ -2528,9 +2528,17 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     efficiency = net/max(travel, 1e-8)
     minimum = max(2.0, .10*atr)
     latest = sign*(prices[-1]-prices[-2])
-    if (net < minimum or recent < .5*minimum or efficiency < .60
-            or latest < -.25*minimum):
-        return wait("Sin fuerza actual suficiente para " + candidate)
+    # La primera señal requiere continuidad en ambas mitades de la
+    # observación; una caída/subida inicial seguida de rebote no basta.
+    early = sign*(prices[split]-prices[0])
+    opposite_steps = sum(
+        1 for a, b in zip(prices, prices[1:])
+        if sign*(b-a) < -0.15*minimum
+    )
+    if (net < minimum or recent < .5*minimum or early <= 0
+            or efficiency < .60 or latest < -.25*minimum
+            or opposite_steps > max(1, (len(prices)-1)//3)):
+        return wait("Primer impulso sin continuidad confirmada para " + candidate)
     state["opening_conflict"] = None
     return candidate
 
