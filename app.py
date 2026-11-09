@@ -716,6 +716,22 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .targeticon,.clock{color:#8acfc3!important}.btcicon{filter:drop-shadow(0 0 7px #ff9d0044)}
 .stRadio [role="radiogroup"]{gap:8px!important;flex-wrap:wrap;padding:8px 0}
 .stRadio label{border:1px solid #23685e;border-radius:18px;padding:6px 10px!important;background:#110e20;color:#ded9f4!important}
+/* Solo tablet: centrar y distribuir los siete botones de temporalidad. */
+@media screen and (min-width: 601px) and (max-width: 1199px) {
+  .stRadio [role="radiogroup"] {
+    display: flex !important;
+    width: 100% !important;
+    justify-content: space-evenly !important;
+    align-items: center !important;
+    flex-wrap: nowrap !important;
+    gap: 6px !important;
+  }
+  .stRadio [role="radiogroup"] > label {
+    flex: 0 1 auto !important;
+    margin: 0 !important;
+  }
+}
+
 [data-testid="stButton"] button{border-color:#23685e;color:#ece3ff;background:#141022;border-radius:12px}
 [data-testid="stButton"] button:hover{border-color:#00dfb5;box-shadow:0 0 13px #00dfb533}
 [data-testid="stMetricValue"]{color:#00eaff;text-shadow:0 0 10px #00eaff28}
