@@ -716,22 +716,6 @@ div[data-testid="stVerticalBlock"] {gap:.55rem;}
 .targeticon,.clock{color:#8acfc3!important}.btcicon{filter:drop-shadow(0 0 7px #ff9d0044)}
 .stRadio [role="radiogroup"]{gap:8px!important;flex-wrap:wrap;padding:8px 0}
 .stRadio label{border:1px solid #23685e;border-radius:18px;padding:6px 10px!important;background:#110e20;color:#ded9f4!important}
-/* Solo tablet: centrar y distribuir los siete botones de temporalidad. */
-@media screen and (min-width: 601px) and (max-width: 1199px) {
-  .stRadio [role="radiogroup"] {
-    display: flex !important;
-    width: 100% !important;
-    justify-content: space-evenly !important;
-    align-items: center !important;
-    flex-wrap: nowrap !important;
-    gap: 6px !important;
-  }
-  .stRadio [role="radiogroup"] > label {
-    flex: 0 1 auto !important;
-    margin: 0 !important;
-  }
-}
-
 [data-testid="stButton"] button{border-color:#23685e;color:#ece3ff;background:#141022;border-radius:12px}
 [data-testid="stButton"] button:hover{border-color:#00dfb5;box-shadow:0 0 13px #00dfb533}
 [data-testid="stMetricValue"]{color:#00eaff;text-shadow:0 0 10px #00eaff28}
@@ -970,25 +954,6 @@ section.main .block-container > * {
     width: 100% !important;
     left: 0 !important;
     transform: none !important;
-  }
-  /* Los siete botones nativos de st.radio, únicamente en tablet. */
-  [data-testid="stRadio"] [role="radiogroup"],
-  .stRadio [role="radiogroup"] {
-    display: flex !important;
-    flex-direction: row !important;
-    flex-wrap: nowrap !important;
-    width: 100% !important;
-    justify-content: space-between !important;
-    gap: 8px !important;
-    box-sizing: border-box !important;
-  }
-  [data-testid="stRadio"] [role="radiogroup"] > label,
-  .stRadio [role="radiogroup"] > label {
-    flex: 1 1 0 !important;
-    min-width: 0 !important;
-    justify-content: center !important;
-    text-align: center !important;
-    margin: 0 !important;
   }
 }
 </style>
@@ -4457,6 +4422,31 @@ def live_dashboard():
             ["1m", "3m", "5m", "15m", "1h", "4h", "1D"],
             horizontal=True, key="chart_timeframe", label_visibility="collapsed",
         )
+        # SOLO TABLET: distribuir los 7 controles nativos del radio de temporalidad.
+        # CSS inyectado junto al widget (no modifica su valor ni su callback).
+        st.markdown("""<style>
+        @media screen and (min-width: 601px) and (max-width: 1199px) {
+          div[data-testid="stRadio"] {width:100% !important;}
+          div[data-testid="stRadio"] div[role="radiogroup"] {
+            display:grid !important;
+            grid-template-columns:repeat(7,minmax(0,1fr)) !important;
+            width:100% !important;
+            max-width:none !important;
+            gap:8px !important;
+            flex-wrap:nowrap !important;
+            box-sizing:border-box !important;
+          }
+          div[data-testid="stRadio"] div[role="radiogroup"] > label {
+            display:flex !important;
+            width:100% !important;
+            min-width:0 !important;
+            box-sizing:border-box !important;
+            justify-content:center !important;
+            margin:0 !important;
+            padding:6px 3px !important;
+          }
+        }
+        </style>""", unsafe_allow_html=True)
         try:
             chart_df = btc_df if chart_timeframe in ("1m", "3m", "5m") else _neon_chart_history(chart_timeframe)
             chart_html = render_neon_chart(
