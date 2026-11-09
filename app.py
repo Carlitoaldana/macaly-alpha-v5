@@ -2245,6 +2245,11 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
+    # Niveles de velas anteriores (sin incluir la vela actual en formación).
+    # Se calculan en el mismo marco de 1 minuto usado por el motor.
+    previous = one.iloc[-21:-1]
+    opening_support = float(previous["low"].min()) if len(previous) >= 10 else None
+    opening_resistance = float(previous["high"].max()) if len(previous) >= 10 else None
     def direction(row):
         bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
         bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
@@ -2288,7 +2293,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr,"opening_support":opening_support,"opening_resistance":opening_resistance,"target":target}
 
 
 def build_presignal(sig, seconds_left):
@@ -2531,6 +2536,20 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     minus_di = _plan_number(signal.get("minus_di"))
     if plus_di is None or minus_di is None or sign * (plus_di-minus_di) < 0:
         return wait("Presión direccional sin respaldo para " + candidate)
+    # Antes de la primera confirmación, comprobar si el TARGET está
+    # cerca de una barrera estructural en la dirección propuesta.
+    # No usar el nivel como señal: exigir ruptura efectiva con margen
+    # proporcional a la volatilidad y momentum que la respalde.
+    target = _plan_number(signal.get("target"))
+    boundary = _plan_number(signal.get("opening_support" if candidate == "DOWN" else "opening_resistance"))
+    if boundary is not None and target is not None:
+        near_target = abs(target-boundary) <= 0.6*atr
+        near_price = abs(price-boundary) <= 1.0*atr
+        if near_target and near_price:
+            breakout = sign*(price-boundary) >= 0.20*atr
+            momentum = _plan_number(signal.get("mom3"))
+            if not breakout or momentum is None or sign*momentum <= 0:
+                return wait("Esperando ruptura confirmada de soporte/resistencia para " + candidate)
     if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
         return wait("Observando movimiento actual antes de la primera señal")
     prices = [float(x[1]) for x in tape]
