@@ -15,7 +15,7 @@ from email.utils import parsedate_to_datetime
 
 # =========================================================
 # MACALY + ALPHA BOT v4.6.1 • MOBILE PRO UI
-# BTC 15 MIN • SAME v4.6.1 SIGNAL ENGINE
+# BTC 15 MIN • COHERENT CONSENSUS DECISION ENGINE v7
 # =========================================================
 
 st.set_page_config(
@@ -33,9 +33,10 @@ NEW_ROUND_WAIT = 8
 NEW_ENTRY_LOCK = 75
 
 # Dos lecturas coherentes, separadas por al menos 2 s (mínimo 2 s).
-SIGNAL_CONFIRM_READINGS = 2
-SIGNAL_CONFIRM_INTERVAL = 2.0
-# Caducidad operativa: una pausa >10s reinicia las lecturas pendientes.
+# Confirmación consistente: varias lecturas separadas; no basta un tick aislado.
+SIGNAL_CONFIRM_READINGS = 3
+SIGNAL_CONFIRM_INTERVAL = 2.5
+# Una pausa prolongada invalida la secuencia pendiente.
 SIGNAL_CONFIRM_MAX_GAP = 10.0
 LIVE_PRICE_MAX_AGE = 30.0
 _PRICE_OBSERVATIONS = threading.local()
@@ -2432,50 +2433,113 @@ def _reset_withdrawal(state):
 
 
 def _review_active_retention(state, signal, seconds_left, now):
-    """Report weakening without silently withdrawing a confirmed direction.
+    """Retire a stale official direction when independent evidence turns against it.
 
-    Direction changes are handled by the same confirmation path as entries.
+    A confirmed direction is not allowed to remain displayed as the official
+    call while the live evidence has materially reversed. We first require
+    multiple independent families to oppose it; then the UI returns to
+    ESPERANDO while the opposite candidate completes its own confirmation.
+    The historical first signal is preserved for audit/history.
     """
     side = state.get("active_direction")
     if side not in ("UP", "DOWN"):
         _reset_withdrawal(state)
         return
-    support, contrary = _retention_assessment(state, signal)
-    _reset_withdrawal(state)
-    if contrary > support and contrary >= 2:
-        state["retention_warning"] = side + " PERDIENDO FUERZA • REEVALUANDO RESPALDO"
+    families = _direction_evidence(signal)
+    support = sum(v == side for v in families.values())
+    contrary = sum(v != side for v in families.values())
+    state["retention_support"] = support
+    state["retention_contrary"] = contrary
+    if contrary >= 2 and contrary > support:
+        state["retention_warning"] = side + " PERDIENDO RESPALDO • REEVALUANDO DIRECCIÓN"
+    else:
+        state["retention_warning"] = None
+    # No sostener una llamada oficial vieja cuando el consenso independiente
+    # ya se ha desplazado claramente al lado contrario.
+    if contrary >= 3 and support <= 1:
+        state["active_direction"] = None
+        state["active_since"] = None
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        state["pending_price_source"] = None
 
 
 def _direction_evidence(signal):
-    """Independent evidence families; price relative to target is NOT a trend vote."""
+    """Independent, non-duplicated live evidence families for both directions.
+
+    The price/target location is deliberately not counted as a trend vote.
+    Support/resistance reaction is a separate family and only votes when price
+    is genuinely near a level and the live move confirms bounce/rejection.
+    """
     if not isinstance(signal, dict) or signal.get("data_valid") is False:
         return {}
     families = {}
     ema = signal.get("ema")
     if ema in ("BULL", "BEAR"):
         families["trend"] = "UP" if ema == "BULL" else "DOWN"
-    # Short and medium trend belong to one family; disagreement abstains.
+
     trends = [signal.get(k) for k in ("trend3", "trend5")]
     trends = [v for v in trends if v in ("UP", "DOWN")]
-    if trends and len(set(trends)) == 1:
+    if len(trends) == 2 and trends[0] == trends[1]:
         families["structure"] = trends[0]
+
     rsi = _plan_number(signal.get("rsi"))
-    if rsi is not None and abs(rsi - 50) >= 3:
-        families["oscillator"] = "UP" if rsi > 50 else "DOWN"
-    momentum = [_plan_number(signal.get(k)) for k in ("mom3", "mom5")]
-    momentum = [v for v in momentum if v is not None and v != 0]
-    if momentum and all(v > 0 for v in momentum):
-        families["momentum"] = "UP"
-    elif momentum and all(v < 0 for v in momentum):
-        families["momentum"] = "DOWN"
+    rsi3 = _plan_number(signal.get("rsi3"))
+    if rsi is not None and rsi3 is not None:
+        if rsi >= 53 and rsi3 >= 50:
+            families["oscillator"] = "UP"
+        elif rsi <= 47 and rsi3 <= 50:
+            families["oscillator"] = "DOWN"
+
+    mom3 = _plan_number(signal.get("mom3"))
+    mom5 = _plan_number(signal.get("mom5"))
+    if mom3 is not None and mom5 is not None:
+        if mom3 > 0.015 and mom5 > 0:
+            families["momentum"] = "UP"
+        elif mom3 < -0.015 and mom5 < 0:
+            families["momentum"] = "DOWN"
+
+    macd1 = _plan_number(signal.get("macd1"))
+    macd3 = _plan_number(signal.get("macd3"))
+    macd5 = _plan_number(signal.get("macd5"))
+    if all(v is not None for v in (macd1, macd3, macd5)):
+        if macd1 > 0 and macd3 > 0 and macd5 >= 0:
+            families["macd"] = "UP"
+        elif macd1 < 0 and macd3 < 0 and macd5 <= 0:
+            families["macd"] = "DOWN"
+
+    plus_di = _plan_number(signal.get("plus_di"))
+    minus_di = _plan_number(signal.get("minus_di"))
+    if plus_di is not None and minus_di is not None:
+        gap = plus_di - minus_di
+        if gap >= 2.0:
+            families["directional_pressure"] = "UP"
+        elif gap <= -2.0:
+            families["directional_pressure"] = "DOWN"
+
+    # Estructura cercana: soporte defendido => UP; resistencia rechazada => DOWN.
+    price = _plan_number(signal.get("price"))
+    atr = _plan_number(signal.get("atr"))
+    support = _plan_number(signal.get("opening_support"))
+    resistance = _plan_number(signal.get("opening_resistance"))
+    if price is not None and atr is not None and atr > 0 and mom3 is not None:
+        near_support = support is not None and abs(price - support) <= 0.65 * atr
+        near_resistance = resistance is not None and abs(resistance - price) <= 0.65 * atr
+        if near_support and mom3 > 0.025:
+            families["level_reaction"] = "UP"
+        elif near_resistance and mom3 < -0.025:
+            families["level_reaction"] = "DOWN"
+
     return families
 
 
 def _direction_consistent(candidate, signal, active=None):
-    """Single policy for entry and reversal, using nonduplicated families.
+    """Require broad agreement; reversal needs stronger clean consensus.
 
-    Reversal requires stronger consensus than first entry; a transient
-    oscillation cannot override a previously confirmed signal.
+    Missing/neutral families abstain, but no observed family may oppose the
+    proposed direction. Reversal requires at least four agreeing families.
     """
     if candidate not in ("UP", "DOWN"):
         return False
@@ -2483,10 +2547,12 @@ def _direction_consistent(candidate, signal, active=None):
     if len(families) < 3:
         return False
     agree = sum(v == candidate for v in families.values())
-    oppose = len(families) - agree
+    oppose = sum(v != candidate for v in families.values())
+    if oppose:
+        return False
     if active in ("UP", "DOWN") and active != candidate:
-        return agree >= 3 and oppose == 0
-    return agree >= 3 and agree > oppose
+        return agree >= 4
+    return agree >= 3
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
@@ -4648,12 +4714,13 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "unified_evidence_v6":
+    if state.get("signal_engine_revision") != "coherent_consensus_v7":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "unified_evidence_v6"
+        state["signal_engine_revision"] = "coherent_consensus_v7"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
-                     pending_price_source=None)
+                     pending_price_source=None, active_direction=None,
+                     active_since=None)
         state.setdefault("opening_live_tapes", {})
         _reset_withdrawal(state)
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
@@ -4664,7 +4731,7 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
     _capture_recent_alert(state, signal, market, now)
 
     try:
-        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"limited_retention_exit_plan_v1", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
+        payload = {"candidate":candidate, "seconds_left":seconds_left, "now":now, "before":before, "after":dict(state), "engine_variant":"coherent_consensus_v7", "quotes":{"yes":get_yes_ask(market), "no":get_no_ask(market)}}
         payload["data_revision"] = BACKGROUND_DATA_REVISION
         payload["price_source"] = signal.get("price_source") if signal else None
         if signal is not None and signal.get("data_valid") is False:
