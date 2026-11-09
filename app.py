@@ -4419,43 +4419,66 @@ def live_dashboard():
     if btc_ok:
         # Selector reconstruido: sustituye el antiguo st.radio por un control
         # nativo que ocupa todo el ancho disponible, sin CSS adicional.
-        # Estilo del selector nuevo: solo iPad/tablet, conserva las siete columnas.
+        # Selector de temporalidad: tarjetas neón como los demás cuadros.
+        # Reemplaza el estilo del control completo, no solo el botón interior.
         st.markdown("""
         <style>
         @media (min-width: 600px) and (max-width: 1199px) {
-          .st-key-chart_timeframe [data-testid="stSegmentedControl"] button,
-          .st-key-chart_timeframe [data-baseweb="button-group"] button,
-          .st-key-chart_timeframe [role="group"] button {
-            background: linear-gradient(145deg, #102a3c, #0a172a) !important;
-            color: #f2f8ff !important;
-            border: 2px solid #48d9d2 !important;
-            border-radius: 999px !important;
-            box-shadow: inset 0 0 8px #21b8b43d, 0 0 5px #27d3cf44 !important;
-            font-weight: 750 !important;
-            min-height: 40px !important;
-            margin: 0 3px !important;
-          }
-          .st-key-chart_timeframe [data-testid="stSegmentedControl"] button[aria-pressed="true"],
-          .st-key-chart_timeframe [data-testid="stSegmentedControl"] button[data-state="active"],
-          .st-key-chart_timeframe [data-baseweb="button-group"] button[aria-pressed="true"],
-          .st-key-chart_timeframe [role="group"] button[aria-pressed="true"] {
-            background: linear-gradient(145deg, #532033, #231526) !important;
-            color: #ff8c9f !important;
-            border-color: #ff4d6b !important;
-            box-shadow: inset 0 0 8px #ff4d6b55, 0 0 7px #ff4d6b77 !important;
-          }
+          .st-key-chart_timeframe,
+          .st-key-chart_timeframe [data-testid="stSegmentedControl"],
           .st-key-chart_timeframe [data-testid="stSegmentedControl"] > div,
-          .st-key-chart_timeframe [data-baseweb="button-group"],
-          .st-key-chart_timeframe [role="group"] {
-            width: 100% !important;
-            display: flex !important;
-            justify-content: space-between !important;
+          .st-key-chart_timeframe [role="group"],
+          .st-key-chart_timeframe [data-baseweb="button-group"] {
             background: transparent !important;
-            gap: 3px !important;
+            border: 0 !important;
+            box-shadow: none !important;
           }
-          .st-key-chart_timeframe [data-testid="stSegmentedControl"] button,
-          .st-key-chart_timeframe [data-baseweb="button-group"] button {
+          .st-key-chart_timeframe [role="group"],
+          .st-key-chart_timeframe [data-baseweb="button-group"],
+          .st-key-chart_timeframe [data-testid="stSegmentedControl"] > div {
+            display: flex !important;
+            width: 100% !important;
+            gap: 8px !important;
+            justify-content: space-between !important;
+          }
+          .st-key-chart_timeframe button,
+          .st-key-chart_timeframe [role="radio"],
+          .st-key-chart_timeframe label {
             flex: 1 1 0 !important;
+            min-width: 0 !important;
+            min-height: 45px !important;
+            padding: 8px 2px !important;
+            margin: 0 !important;
+            background: linear-gradient(145deg, #16354a 0%, #0b1a30 100%) !important;
+            background-color: #0b1a30 !important;
+            color: #e8fcff !important;
+            border: 2px solid #65d9d4 !important;
+            border-radius: 12px !important;
+            box-shadow: inset 0 0 10px #21d4ce33, 0 0 5px #25d4ce55 !important;
+            font-size: 14px !important;
+            font-weight: 750 !important;
+            opacity: 1 !important;
+          }
+          .st-key-chart_timeframe button *,
+          .st-key-chart_timeframe [role="radio"] *,
+          .st-key-chart_timeframe label * {
+            color: #e8fcff !important;
+            opacity: 1 !important;
+          }
+          .st-key-chart_timeframe button[aria-pressed="true"],
+          .st-key-chart_timeframe button[aria-checked="true"],
+          .st-key-chart_timeframe button[data-state="active"],
+          .st-key-chart_timeframe [role="radio"][aria-checked="true"] {
+            background: linear-gradient(145deg, #532233, #211522) !important;
+            background-color: #532233 !important;
+            border-color: #ff5878 !important;
+            box-shadow: inset 0 0 10px #ff587844, 0 0 7px #ff587888 !important;
+            color: #ffa5b5 !important;
+          }
+          .st-key-chart_timeframe button[aria-pressed="true"] *,
+          .st-key-chart_timeframe button[aria-checked="true"] *,
+          .st-key-chart_timeframe [role="radio"][aria-checked="true"] * {
+            color: #ffa5b5 !important;
           }
         }
         </style>
