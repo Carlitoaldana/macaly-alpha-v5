@@ -4655,10 +4655,9 @@ _RECENT_ALERTS_HOST = r'''
 def _engine_policy_fingerprint():
     import hashlib
     import marshal
-    names = ("_indicator_frame", "_entry_route_checks", "_internal_impulse_context",
-             "_signal_engine_without_trace", "_direction_evidence", "_direction_consistent",
-             "_round_opening_crosscheck", "_reversal_assessment", "_confirmation_without_trace",
-             "confirm_round_candidate", "build_signal", "_background_history_loop")
+    names = ("_indicator_frame", "_signal_engine_without_trace",
+             "_confirmation_without_trace", "confirm_round_candidate",
+             "build_signal", "_background_history_loop")
     digest = hashlib.sha256()
     digest.update(repr((BACKGROUND_DATA_REVISION, SIGNAL_CONFIRM_READINGS,
                         SIGNAL_CONFIRM_INTERVAL, SIGNAL_CONFIRM_MAX_GAP,
