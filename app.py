@@ -2431,6 +2431,67 @@ def _opening_level_gate(df, price, atr, rvol):
     return result
 
 
+def _kalshi_target_level_gate(df, price, target, seconds_left, atr, rvol, opening_levels):
+    """Risk-aware settlement-level filter shared by all official entry routes.
+
+    Compare the Kalshi target with historical boundaries, not only the live
+    price. Distances are volatility-scaled, never fixed BTC dollar thresholds.
+    A remote boundary is not an automatic veto; a confirmed break releases it.
+    """
+    result = {"blocked": [], "reason": "NONE", "support": opening_levels.get("support"),
+              "resistance": opening_levels.get("resistance"), "target": target}
+    if target is None or seconds_left is None or not np.isfinite(float(price)):
+        result.update(blocked=["UP", "DOWN"], reason="TARGET_OR_TIME_UNAVAILABLE")
+        return result
+    try:
+        target = float(target)
+        remaining = max(0.0, min(900.0, float(seconds_left)))
+        atr = float(atr)
+    except (ValueError, TypeError):
+        result.update(blocked=["UP", "DOWN"], reason="INVALID_LEVEL_INPUT")
+        return result
+    if not np.isfinite(target) or not np.isfinite(atr) or atr <= 0 or remaining <= 0:
+        result.update(blocked=["UP", "DOWN"], reason="INVALID_TARGET_OR_VOLATILITY")
+        return result
+    # Observed one-minute candle movement and ATR give a conservative travel
+    # envelope; elapsed time reduces the possible remaining excursion.
+    recent = df["close"].astype(float).diff().abs().tail(12).dropna()
+    observed = float(recent.median()) if len(recent) else atr * .5
+    typical_minute = max(atr * .35, observed)
+    possible_travel = typical_minute * (remaining / 60.0) ** .5 * 1.8
+    # Allow for a meaningful counter-move after touching a boundary. A level
+    # outside the remaining travel envelope cannot veto the entry.
+    reversal_room = max(atr * 1.1, typical_minute * min(remaining / 60.0, 3.0) ** .5)
+    risk_band = max(atr * .45, reversal_room)
+    blocked = []
+    for side, level_key, breakout_key in (("UP", "resistance", "break_up"),
+                                          ("DOWN", "support", "break_down")):
+        level = opening_levels.get(level_key)
+        if level is None or opening_levels.get(breakout_key):
+            continue
+        level = float(level)
+        if not np.isfinite(level):
+            continue
+        # Resistance must be above target to threaten UP; support below target
+        # threatens DOWN. A level already cleared is handled by the breakout gate.
+        ahead_of_target = level >= target if side == "UP" else level <= target
+        ahead_of_price = level >= price if side == "UP" else level <= price
+        if not (ahead_of_target and ahead_of_price):
+            continue
+        distance_to_level = abs(level - price)
+        distance_from_target = abs(level - target)
+        can_test = distance_to_level <= possible_travel
+        can_reverse_across_target = distance_from_target <= risk_band
+        if can_test and can_reverse_across_target:
+            blocked.append(side)
+    result["blocked"] = blocked
+    if blocked:
+        result["reason"] = "TARGET_LEVEL_REJECTION_RISK"
+    result["travel_envelope"] = round(possible_travel, 2)
+    result["reversal_band"] = round(risk_band, 2)
+    return result
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -2492,7 +2553,10 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     # of route scoring or EMA momentum. Presignal is untouched.
     opening_levels = _opening_level_gate(df, price, atr, rvol)
     structure["opening_level_gate"] = opening_levels
-    for blocked_side in opening_levels["blocked"]:
+    target_level_gate = _kalshi_target_level_gate(
+        df, price, target, seconds_left, atr, rvol, opening_levels)
+    structure["target_level_gate"] = target_level_gate
+    for blocked_side in set(opening_levels["blocked"] + target_level_gate["blocked"]):
         eligible[blocked_side] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
@@ -2809,7 +2873,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
-    if candidate in level_gate.get("blocked", []):
+    target_gate = ((signal or {}).get("structure_internal") or {}).get("target_level_gate") or {}
+    if candidate in level_gate.get("blocked", []) or candidate in target_gate.get("blocked", []):
         candidate = None
 
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
