@@ -2387,70 +2387,41 @@ def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvo
 
 
 def _opening_level_gate(df, price, atr, rvol, target=None):
-    """Hard gate for fresh official signals near historical support/resistance.
+    """Opening protection based on the SAME previous 20 candles as the chart.
 
-    Uses only candles preceding the latest two observations to avoid treating
-    the current test as an already confirmed breakout. ATR sets zone width.
+    Block chasing a boundary, not a confirmed counter-direction rejection.
+    A verified break can authorize continuation. This is an opening-entry
+    gate, not a prohibition throughout the entire round.
     """
-    result = {"blocked": [], "reason": "NONE", "support": None,
-              "resistance": None, "break_up": False, "break_down": False}
-    if len(df) < 24 or not np.isfinite(atr) or atr <= 0:
-        result.update(blocked=["UP", "DOWN"], reason="LEVEL_DATA_INSUFFICIENT")
+    result = {"blocked": ["UP", "DOWN"], "reason": "LEVEL_DATA_INSUFFICIENT",
+              "support": None, "resistance": None,
+              "break_up": False, "break_down": False}
+    if (df is None or len(df) < 21 or price is None or target is None
+            or not np.isfinite(float(price)) or not np.isfinite(float(target))
+            or not np.isfinite(float(atr)) or float(atr) <= 0):
         return result
-    history = df.iloc[-62:-2]
-    if len(history) < 20:
-        result.update(blocked=["UP", "DOWN"], reason="LEVEL_DATA_INSUFFICIENT")
+    ctx = _structure_context(df, float(price), float(atr), rvol)
+    if not ctx.get("available"):
         return result
-    # Same 20 preceding candles used by the visible chart's support/resistance.
-    chart_history = df.iloc[-21:-1]
-    chart_support = float(chart_history["low"].min())
-    chart_resistance = float(chart_history["high"].max())
-    support = float(history["low"].min())
-    resistance = float(history["high"].max())
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    close, previous = float(last["close"]), float(prev["close"])
-    op = float(last["open"])
-    width = max(float(atr) * .65, abs(close - previous) * .5)
-    # A single wick or one unconfirmed candle is not a breakout.
-    break_up = (close > resistance + width * .25 and
-                previous > resistance and close > op and
-                (rvol >= 1.05 or close > previous))
-    break_down = (close < support - width * .25 and
-                  previous < support and close < op and
-                  (rvol >= 1.05 or close < previous))
-    # Near either boundary, do not issue an official direction before a
-    # confirmed break. The opposite direction may still be evaluated normally.
-    near_resistance = abs(float(price) - resistance) <= width
-    near_support = abs(float(price) - support) <= width
+    support, resistance = ctx["support"], ctx["resistance"]
+    width = float(atr) * .65
+    near_support = abs(float(target)-support) <= width
+    near_resistance = abs(float(target)-resistance) <= width
     blocked = []
-    if near_resistance and not break_up:
+    if near_resistance and not ctx["break_up"]:
         blocked.append("UP")
-    if near_support and not break_down:
+    if near_support and not ctx["break_down"]:
         blocked.append("DOWN")
-    # The target of a NEW round must not sit on the chart's live boundary
-    # while the official signal assumes that boundary will be crossed.
-    # Only release the affected direction after evidence of a real break.
-    if target is not None and np.isfinite(float(target)):
-        target_near_support = abs(float(target) - chart_support) <= width
-        target_near_resistance = abs(float(target) - chart_resistance) <= width
-        chart_break_down = (close < chart_support - width*.25 and
-                            previous < chart_support and close < op and
-                            (rvol >= 1.05 or close < previous))
-        chart_break_up = (close > chart_resistance + width*.25 and
-                          previous > chart_resistance and close > op and
-                          (rvol >= 1.05 or close > previous))
-        if target_near_support and not chart_break_down and "DOWN" not in blocked:
-            blocked.append("DOWN")
-        if target_near_resistance and not chart_break_up and "UP" not in blocked:
-            blocked.append("UP")
-        result.update(target_near_support=bool(target_near_support),
-                      target_near_resistance=bool(target_near_resistance),
-                      chart_support=chart_support, chart_resistance=chart_resistance)
-    result.update(blocked=blocked, support=support, resistance=resistance,
-                  break_up=bool(break_up), break_down=bool(break_down),
-                  reason="NEAR_RESISTANCE" if "UP" in blocked else
-                         "NEAR_SUPPORT" if "DOWN" in blocked else "NONE")
+    # When the target is clear, a live approach to the boundary also requires
+    # rejection/breakout evidence before chasing through the level.
+    if abs(float(price)-resistance) <= width and not ctx["break_up"]:
+        blocked.append("UP")
+    if abs(float(price)-support) <= width and not ctx["break_down"]:
+        blocked.append("DOWN")
+    result.update(blocked=list(dict.fromkeys(blocked)),
+                  reason="OPENING_LEVEL_CAUTION" if blocked else "NONE",
+                  support=support, resistance=resistance,
+                  break_up=ctx["break_up"], break_down=ctx["break_down"])
     return result
 
 
@@ -2513,7 +2484,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         eligible["DOWN"] = []
     # Mandatory boundary gate on the OFFICIAL entry candidate, independent
     # of route scoring or EMA momentum. Presignal is untouched.
-    opening_levels = _opening_level_gate(df, price, atr, rvol, target=target)
+    opening_levels = _opening_level_gate(df, price, atr, rvol, target)
     structure["opening_level_gate"] = opening_levels
     for blocked_side in opening_levels["blocked"]:
         eligible[blocked_side] = []
@@ -2832,7 +2803,10 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
-    if candidate in level_gate.get("blocked", []):
+    # Opening-only veto. Once the round has a confirmed first direction,
+    # subsequent retention/reversal is governed by its separate checks.
+    if (state.get("first_direction") not in ("UP", "DOWN")
+            and candidate in level_gate.get("blocked", ["UP", "DOWN"])):
         candidate = None
 
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
