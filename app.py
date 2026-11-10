@@ -2492,54 +2492,44 @@ def _kalshi_target_level_gate(df, price, target, seconds_left, atr, rvol, openin
     return result
 
 
-def _target_indecision_gate(one, price, target, seconds_left, atr, d3, d5, rsi1, mom3, mom5):
-    """Prevent official entries when settlement direction is not established.
+def _settlement_space_gate(df, price, target, seconds_left, atr, opening_levels):
+    """Priority-one abstention gate: price/target/room before indicators.
 
-    Uses recent 1m closes and live price; no fixed BTC-dollar thresholds.
-    This is an entry veto, not a reversal or an artificial signal.
+    Uses volatility-relative distances, not fixed dollar thresholds. A narrow
+    range or a target too close to price with ample time remaining vetoes both
+    directions; breakout exceptions require a confirmed historical break.
     """
-    result = {"blocked": [], "reason": "NONE"}
-    if target is None or seconds_left is None:
-        return {"blocked": ["UP", "DOWN"], "reason": "MISSING_SETTLEMENT_CONTEXT"}
+    result = {"blocked": ["UP", "DOWN"], "reason": "SPACE_DATA_UNAVAILABLE"}
     try:
-        target, price, atr, seconds_left = map(float, (target, price, atr, seconds_left))
-    except (TypeError, ValueError):
-        return {"blocked": ["UP", "DOWN"], "reason": "INVALID_SETTLEMENT_CONTEXT"}
-    if not all(np.isfinite(x) for x in (target, price, atr, seconds_left)) or atr <= 0 or seconds_left <= 0:
-        return {"blocked": ["UP", "DOWN"], "reason": "INVALID_SETTLEMENT_CONTEXT"}
-    closes = one["close"].astype(float).replace([np.inf, -np.inf], np.nan).dropna().tail(7)
-    if len(closes) < 4:
-        return {"blocked": ["UP", "DOWN"], "reason": "INSUFFICIENT_RECENT_CANDLES"}
-    values = closes.tolist() + [price]
-    # Repeated settlement crossings are indecision, not evidence of a breakout.
-    crossings = sum((a - target) * (b - target) < 0 for a, b in zip(values[:-1], values[1:]))
-    typical_move = float(closes.diff().abs().dropna().median())
-    # How much movement is material depends on ATR, observed speed and time left.
-    minute_move = max(atr * .30, typical_move)
-    remaining_motion = minute_move * (min(seconds_left, 900.0) / 60.0) ** .5
-    target_band = max(atr * .35, remaining_motion * .45)
-    near_target = abs(price - target) <= target_band
-    last_moves = [values[i] - values[i-1] for i in range(-3, 0)]
-    upward = sum(x > 0 for x in last_moves)
-    downward = sum(x < 0 for x in last_moves)
-    # A direction needs agreement between recent movement, momentum and 3m/5m trend.
-    clear_up = upward >= 2 and mom3 > 0 and mom5 >= 0 and rsi1 >= 50 and (d3 == "UP" or d5 == "UP")
-    clear_down = downward >= 2 and mom3 < 0 and mom5 <= 0 and rsi1 <= 50 and (d3 == "DOWN" or d5 == "DOWN")
+        price, target, remaining, atr = map(float, (price, target, seconds_left, atr))
+        support = float(opening_levels["support"])
+        resistance = float(opening_levels["resistance"])
+    except (TypeError, ValueError, KeyError):
+        return result
+    if not all(np.isfinite(v) for v in (price, target, remaining, atr, support, resistance)) or atr <= 0 or remaining <= 0 or resistance <= support:
+        return result
+    recent_moves = df["close"].astype(float).diff().abs().tail(12).dropna()
+    typical = max(atr * .35, float(recent_moves.median()) if len(recent_moves) else atr * .35)
+    # A conservative movement envelope that grows with time left.
+    expected_swing = max(atr * .8, typical * (max(remaining, 1.0) / 60.0) ** .5)
+    target_gap = abs(price - target)
+    range_width = resistance - support
+    # Inside a compressed range, a small reversal can flip the settlement.
+    compressed = (support <= price <= resistance and range_width <= 2.5 * expected_swing)
+    near_target = target_gap <= expected_swing * .8
+    # For each side, require room before the nearest opposing boundary.
     blocked = []
-    if near_target and (crossings >= 2 or not (clear_up or clear_down)):
-        blocked = ["UP", "DOWN"]
-        result["reason"] = "TARGET_INDECISION"
-    else:
-        if near_target or crossings >= 2:
-            if not clear_up:
-                blocked.append("UP")
-            if not clear_down:
-                blocked.append("DOWN")
-            if blocked:
-                result["reason"] = "DIRECTION_NOT_CONFIRMED"
-    result.update(blocked=blocked, crossings=crossings,
-                  distance_to_target=round(abs(price-target), 2),
-                  dynamic_target_band=round(target_band, 2))
+    for side, level, broken in (("UP", resistance, opening_levels.get("break_up")),
+                                ("DOWN", support, opening_levels.get("break_down"))):
+        ahead = (level > price) if side == "UP" else (level < price)
+        room = abs(level - price) if ahead else float("inf")
+        # A confirmed breakout removes that boundary as an immediate obstacle,
+        # but does not bypass the near-target or compression checks.
+        if (compressed and not broken) or (near_target and remaining >= 60) or (ahead and not broken and room <= expected_swing * .85):
+            blocked.append(side)
+    result.update(blocked=blocked, reason="NO_CLEAR_SETTLEMENT_SPACE" if blocked else "CLEAR_SPACE",
+                  target_gap=round(target_gap, 2), range_width=round(range_width, 2),
+                  expected_swing=round(expected_swing, 2))
     return result
 
 
@@ -2607,10 +2597,9 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     target_level_gate = _kalshi_target_level_gate(
         df, price, target, seconds_left, atr, rvol, opening_levels)
     structure["target_level_gate"] = target_level_gate
-    indecision = _target_indecision_gate(
-        one, price, target, seconds_left, atr, d3, d5, rsi1, mom3, mom5)
-    structure["target_indecision_gate"] = indecision
-    for blocked_side in set(opening_levels["blocked"] + target_level_gate["blocked"] + indecision["blocked"]):
+    settlement_space_gate = _settlement_space_gate(df, price, target, seconds_left, atr, opening_levels)
+    structure["settlement_space_gate"] = settlement_space_gate
+    for blocked_side in set(opening_levels["blocked"] + target_level_gate["blocked"] + settlement_space_gate["blocked"]):
         eligible[blocked_side] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
@@ -2928,7 +2917,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
     target_gate = ((signal or {}).get("structure_internal") or {}).get("target_level_gate") or {}
-    if candidate in level_gate.get("blocked", []) or candidate in target_gate.get("blocked", []):
+    space_gate = ((signal or {}).get("structure_internal") or {}).get("settlement_space_gate") or {}
+    if candidate in level_gate.get("blocked", []) or candidate in target_gate.get("blocked", []) or candidate in space_gate.get("blocked", []):
         candidate = None
 
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
