@@ -29,8 +29,8 @@ st.set_page_config(
 # CONFIGURACIÓN ORIGINAL
 # =========================================================
 
-NEW_ROUND_WAIT = 0
-NEW_ENTRY_LOCK = 0
+NEW_ROUND_WAIT = 8
+NEW_ENTRY_LOCK = 75
 
 # Dos lecturas coherentes, separadas por al menos 2 s (mínimo 2 s).
 SIGNAL_CONFIRM_READINGS = 2
@@ -2793,72 +2793,32 @@ def _direction_evidence(signal):
 
 
 def _direction_consistent(candidate, signal, active=None):
-    """Sin requisito de tres grupos: usa la dirección y el impulso disponibles.
-
-    Un desacuerdo no obliga a esperar a que todos los indicadores se alineen.
-    Un cambio de señal activa requiere evidencia contraria más clara.
-    """
-    if candidate not in ("UP", "DOWN") or not isinstance(signal, dict):
+    """Require independent evidence, with stricter rules for reversals."""
+    if candidate not in ("UP", "DOWN"):
         return False
-    if signal.get("data_valid") is False:
-        return False
-    evidence = _direction_evidence(signal)
-    agree = sum(v == candidate for v in evidence.values())
-    oppose = sum(v != candidate for v in evidence.values())
+    families = _direction_evidence(signal)
+    agree = sum(v == candidate for v in families.values())
+    oppose = sum(v != candidate for v in families.values())
     if active in ("UP", "DOWN") and active != candidate:
-        return agree >= 2 and agree > oppose
-    return agree >= 1 and agree > oppose
+        return agree >= 3 and oppose == 0
+    return agree >= 2 and oppose == 0
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
-    """Require fresh directional evidence before the first entry of this ticker.
-
-    Old candles remain context, never sufficient evidence for an opening entry.
-    Each live feed has a separate short tape. Later reversals are unrestricted.
-    """
+    """No redundant price-tape confirmation; structural gates run separately."""
     if state.get("first_direction") in ("UP", "DOWN"):
         state["opening_conflict"] = None
         return candidate
-    def wait(reason):
-        state["opening_conflict"] = reason
+    if not isinstance(signal, dict) or signal.get("data_valid") is False:
+        state["opening_conflict"] = "Esperando datos actuales para la primera señal"
         return None
-    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
-        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
-    if not signal or signal.get("data_valid") is False:
-        return wait("Esperando datos actuales para la primera señal")
     price = _plan_number(signal.get("price"))
-    atr = _plan_number(signal.get("atr"))
-    source = signal.get("price_source")
-    if (price is None or price <= 0 or atr is None or atr <= 0
-            or source not in ("COINBASE", "KALSHI LIVE")):
-        return wait("Esperando precio en vivo para la primera señal")
-    stamp = now.timestamp()
-    tapes = state.setdefault("opening_live_tapes", {})
-    tape = tapes.get(source, [])
-    if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
-        tape = []
-    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
-    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
-        tape.append([stamp, price])
-    tapes[source] = tape
+    if price is None or price <= 0 or signal.get("price_source") not in ("COINBASE", "KALSHI LIVE"):
+        state["opening_conflict"] = "Esperando precio en vivo para la primera señal"
+        return None
     if candidate not in ("UP", "DOWN"):
-        return wait("Analizando fuerza actual antes de la primera señal")
-    if len(tape) < 2:
-        # No inventar una trayectoria a partir de una sola cotización.
-        # El resto del motor puede seguir mostrando POSIBLE sin señal oficial.
-        return wait("Esperando segunda cotización real")
-    prices = [float(x[1]) for x in tape]
-    sign = 1 if candidate == "UP" else -1
-    split = len(prices)//2
-    net = sign*(prices[-1]-prices[0])
-    recent = sign*(prices[-1]-prices[split])
-    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
-    efficiency = net/max(travel, 1e-8)
-    minimum = max(2.0, .10*atr)
-    latest = sign*(prices[-1]-prices[-2])
-    if (net < minimum or recent < .5*minimum or efficiency < .60
-            or latest < -.25*minimum):
-        return wait("Sin fuerza actual suficiente para " + candidate)
+        state["opening_conflict"] = "Sin candidato oficial: revisar rutas y niveles"
+        return None
     state["opening_conflict"] = None
     return candidate
 
@@ -2977,20 +2937,67 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         return
 
-    # Confirmación inmediata de un candidato que ya pasó las comprobaciones
-    # técnicas, de datos y de niveles. Sin temporizadores ni lecturas obligatorias.
-    state["active_direction"] = candidate
-    state["active_since"] = now
+    last = state.get("pending_last_at")
+    if isinstance(last, str):
+        try:
+            last = datetime.fromisoformat(last)
+        except ValueError:
+            last = None
+    since = state.get("pending_since")
+    if isinstance(since, str):
+        try:
+            since = datetime.fromisoformat(since)
+        except ValueError:
+            since = None
+
+    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
+                              or (now - last).total_seconds() < 0)):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        last = since = None
+    # Primera señal: las evidencias independientes y los niveles ya se comprobaron.
+    # No exigir otra ronda de lecturas después de superar esas puertas.
     if state.get("first_direction") is None:
+        state["active_direction"] = candidate
+        state["active_since"] = now
         state["first_direction"] = candidate
         state["first_signal_time"] = now
         state["first_signal_seconds"] = seconds_left
         state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
                                        else get_no_ask(market))
-    state["pending_direction"] = None
-    state["pending_count"] = 0
-    state["pending_since"] = None
-    state["pending_last_at"] = None
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        return
+    if state.get("pending_direction") != candidate:
+        state["pending_direction"] = candidate
+        state["pending_count"] = 1
+        state["pending_since"] = now.isoformat()
+        state["pending_last_at"] = now.isoformat()
+        return
+
+    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
+        state["pending_count"] = int(state.get("pending_count", 0)) + 1
+        state["pending_last_at"] = now.isoformat()
+
+    elapsed = (now - since).total_seconds() if since else 0
+    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
+            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+        state["active_direction"] = candidate
+        state["active_since"] = now
+        if state.get("first_direction") is None:
+            state["first_direction"] = candidate
+            state["first_signal_time"] = now
+            state["first_signal_seconds"] = seconds_left
+            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                           else get_no_ask(market))
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -4850,6 +4857,170 @@ def _trace_event(kind, payload, ticker=None):
         return
 
 
+
+
+# =========================================================
+# ALPHA AI GATE — supervised, conservative signal filter
+# Learns only from official Kalshi settlements. It can BLOCK a
+# weak UP/DOWN proposal, but it never invents or reverses a signal.
+# =========================================================
+AI_GATE_MIN_ROWS = 80
+AI_GATE_MIN_HOLDOUT = 15
+AI_GATE_MIN_BRIER_GAIN = 0.02
+AI_GATE_BLOCK_BELOW = 0.45
+_AI_GATE_CACHE = {"at": 0.0, "model": None, "status": "sin datos oficiales"}
+
+def _ai_sigmoid(z):
+    z = np.clip(np.asarray(z, dtype=float), -30.0, 30.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+def _ai_feature_vector(features, candidate=None):
+    values = []
+    for name in SHADOW_FEATURES:
+        try:
+            value = float(features.get(name))
+            if not np.isfinite(value):
+                value = np.nan
+        except (TypeError, ValueError, OverflowError):
+            value = np.nan
+        values.append(value)
+    # Direction matters: the same indicator values can mean different odds
+    # for a proposed UP versus DOWN signal.
+    values.append(1.0 if candidate == "UP" else 0.0 if candidate == "DOWN" else np.nan)
+    return np.asarray(values, dtype=float)
+
+def _ai_fit_logistic(X, y, epochs=900, lr=0.035):
+    means = np.nanmean(X, axis=0)
+    means = np.where(np.isfinite(means), means, 0.0)
+    X = np.where(np.isfinite(X), X, means)
+    scales = np.std(X, axis=0)
+    scales = np.where(scales < 1e-8, 1.0, scales)
+    Z = np.clip((X - means) / scales, -8, 8)
+    Z = np.column_stack([np.ones(len(Z)), Z])
+    weights = np.zeros(Z.shape[1], dtype=float)
+    # Full-batch gradient descent with mild L2 regularization.
+    for _ in range(epochs):
+        p = _ai_sigmoid(Z @ weights)
+        grad = (Z.T @ (p - y)) / len(y)
+        grad[1:] += 0.01 * weights[1:]
+        weights -= lr * grad
+    return {"means": means, "scales": scales, "weights": weights}
+
+def _ai_predict_model(model, X):
+    X = np.asarray(X, dtype=float)
+    means, scales = model["means"], model["scales"]
+    X = np.where(np.isfinite(X), X, means)
+    Z = np.clip((X - means) / scales, -8, 8)
+    Z = np.column_stack([np.ones(len(Z)), Z])
+    return _ai_sigmoid(Z @ model["weights"])
+
+def _ai_official_training_rows():
+    """Return only snapshots whose round has an official yes/no settlement."""
+    try:
+        with sqlite3.connect(SHADOW_AI_DB, timeout=2) as shadow:
+            shadow.row_factory = sqlite3.Row
+            shadow.execute("""CREATE TABLE IF NOT EXISTS snapshots (
+                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
+                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
+                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
+            snapshots = shadow.execute(
+                "SELECT ticker, observed_at, candidate, features_json "
+                "FROM snapshots WHERE candidate IN ('UP','DOWN') ORDER BY observed_at"
+            ).fetchall()
+        if not snapshots:
+            return []
+        with _history_db() as history:
+            history.row_factory = sqlite3.Row
+            try:
+                settled = {r["ticker"]: r["official_result"] for r in history.execute(
+                    "SELECT ticker, official_result FROM round_history "
+                    "WHERE verification_status='official' AND lower(official_result) IN ('yes','no')"
+                ).fetchall()}
+            except sqlite3.Error:
+                return []
+        rows = []
+        for row in snapshots:
+            outcome = settled.get(row["ticker"])
+            if outcome not in ("yes", "no"):
+                continue
+            candidate = row["candidate"]
+            won = (candidate == "UP" and outcome == "yes") or (candidate == "DOWN" and outcome == "no")
+            try:
+                features = json.loads(row["features_json"])
+            except (TypeError, ValueError):
+                continue
+            rows.append((_ai_feature_vector(features, candidate), 1.0 if won else 0.0, row["observed_at"]))
+        return rows
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return []
+
+def _ai_gate_model(force=False):
+    now = time.monotonic()
+    if not force and now - _AI_GATE_CACHE["at"] < 60:
+        return _AI_GATE_CACHE["model"], _AI_GATE_CACHE["status"]
+    _AI_GATE_CACHE["at"] = now
+    _AI_GATE_CACHE["model"] = None
+    rows = _ai_official_training_rows()
+    if len(rows) < AI_GATE_MIN_ROWS:
+        status = f"IA en aprendizaje: {len(rows)}/{AI_GATE_MIN_ROWS} rondas con resultado oficial"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+    X = np.vstack([r[0] for r in rows])
+    y = np.asarray([r[1] for r in rows], dtype=float)
+    split = max(int(len(rows) * 0.8), len(rows) - AI_GATE_MIN_HOLDOUT)
+    split = min(split, len(rows) - AI_GATE_MIN_HOLDOUT)
+    if split < 30 or len(np.unique(y[:split])) < 2 or len(np.unique(y[split:])) < 2:
+        status = "IA sin filtro: faltan resultados variados para validar"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+    try:
+        validation_model = _ai_fit_logistic(X[:split], y[:split])
+        predictions = _ai_predict_model(validation_model, X[split:])
+        baseline = float(np.mean(y[:split]))
+        model_brier = float(np.mean((predictions - y[split:]) ** 2))
+        baseline_brier = float(np.mean((baseline - y[split:]) ** 2))
+        gain = baseline_brier - model_brier
+        if gain < AI_GATE_MIN_BRIER_GAIN:
+            status = f"IA en evaluación: no mejora el modelo base (ganancia Brier {gain:.3f}); no bloquea señales"
+            _AI_GATE_CACHE.update(model=None, status=status)
+            return None, status
+        model = _ai_fit_logistic(X, y)
+        status = f"Filtro IA validado en historial: {len(rows)} rondas oficiales; mejora Brier {gain:.3f}"
+        _AI_GATE_CACHE.update(model=model, status=status)
+        return model, status
+    except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
+        status = f"IA sin filtro por validación: {type(exc).__name__}"
+        _AI_GATE_CACHE.update(model=None, status=status)
+        return None, status
+
+def _apply_ai_signal_gate(sig):
+    """Only block a proposed signal when a validated model estimates weak odds."""
+    if not isinstance(sig, dict):
+        return sig
+    candidate = sig.get("candidate")
+    sig["candidate_raw"] = candidate
+    sig["ai_gate_active"] = False
+    sig["ai_win_probability"] = None
+    model, status = _ai_gate_model()
+    sig["ai_gate_status"] = status
+    if candidate not in ("UP", "DOWN") or model is None:
+        return sig
+    features = {name: sig.get(name) for name in SHADOW_FEATURES}
+    vector = _ai_feature_vector(features, candidate).reshape(1, -1)
+    try:
+        p_win = float(_ai_predict_model(model, vector)[0])
+    except (ValueError, TypeError, FloatingPointError):
+        return sig
+    sig["ai_win_probability"] = round(p_win * 100, 1)
+    if p_win < AI_GATE_BLOCK_BELOW:
+        sig["candidate"] = None
+        sig["quality"] = "NO TRADE · FILTRO IA"
+        sig["ai_gate_active"] = True
+        sig["ai_gate_reason"] = f"Probabilidad estimada de acierto {p_win:.1%}, bajo el umbral {AI_GATE_BLOCK_BELOW:.0%}"
+    else:
+        sig["ai_gate_active"] = True
+        sig["ai_gate_reason"] = f"Señal permitida; probabilidad estimada de acierto {p_win:.1%}"
+    return sig
 
 
 def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
