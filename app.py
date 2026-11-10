@@ -2386,7 +2386,7 @@ def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvo
     return ctx
 
 
-def _opening_level_gate(df, price, atr, rvol):
+def _opening_level_gate(df, price, atr, rvol, target=None):
     """Hard gate for fresh official signals near historical support/resistance.
 
     Uses only candles preceding the latest two observations to avoid treating
@@ -2401,6 +2401,10 @@ def _opening_level_gate(df, price, atr, rvol):
     if len(history) < 20:
         result.update(blocked=["UP", "DOWN"], reason="LEVEL_DATA_INSUFFICIENT")
         return result
+    # Same 20 preceding candles used by the visible chart's support/resistance.
+    chart_history = df.iloc[-21:-1]
+    chart_support = float(chart_history["low"].min())
+    chart_resistance = float(chart_history["high"].max())
     support = float(history["low"].min())
     resistance = float(history["high"].max())
     last = df.iloc[-1]
@@ -2424,112 +2428,29 @@ def _opening_level_gate(df, price, atr, rvol):
         blocked.append("UP")
     if near_support and not break_down:
         blocked.append("DOWN")
+    # The target of a NEW round must not sit on the chart's live boundary
+    # while the official signal assumes that boundary will be crossed.
+    # Only release the affected direction after evidence of a real break.
+    if target is not None and np.isfinite(float(target)):
+        target_near_support = abs(float(target) - chart_support) <= width
+        target_near_resistance = abs(float(target) - chart_resistance) <= width
+        chart_break_down = (close < chart_support - width*.25 and
+                            previous < chart_support and close < op and
+                            (rvol >= 1.05 or close < previous))
+        chart_break_up = (close > chart_resistance + width*.25 and
+                          previous > chart_resistance and close > op and
+                          (rvol >= 1.05 or close > previous))
+        if target_near_support and not chart_break_down and "DOWN" not in blocked:
+            blocked.append("DOWN")
+        if target_near_resistance and not chart_break_up and "UP" not in blocked:
+            blocked.append("UP")
+        result.update(target_near_support=bool(target_near_support),
+                      target_near_resistance=bool(target_near_resistance),
+                      chart_support=chart_support, chart_resistance=chart_resistance)
     result.update(blocked=blocked, support=support, resistance=resistance,
                   break_up=bool(break_up), break_down=bool(break_down),
                   reason="NEAR_RESISTANCE" if "UP" in blocked else
                          "NEAR_SUPPORT" if "DOWN" in blocked else "NONE")
-    return result
-
-
-def _kalshi_target_level_gate(df, price, target, seconds_left, atr, rvol, opening_levels):
-    """Risk-aware settlement-level filter shared by all official entry routes.
-
-    Compare the Kalshi target with historical boundaries, not only the live
-    price. Distances are volatility-scaled, never fixed BTC dollar thresholds.
-    A remote boundary is not an automatic veto; a confirmed break releases it.
-    """
-    result = {"blocked": [], "reason": "NONE", "support": opening_levels.get("support"),
-              "resistance": opening_levels.get("resistance"), "target": target}
-    if target is None or seconds_left is None or not np.isfinite(float(price)):
-        result.update(blocked=["UP", "DOWN"], reason="TARGET_OR_TIME_UNAVAILABLE")
-        return result
-    try:
-        target = float(target)
-        remaining = max(0.0, min(900.0, float(seconds_left)))
-        atr = float(atr)
-    except (ValueError, TypeError):
-        result.update(blocked=["UP", "DOWN"], reason="INVALID_LEVEL_INPUT")
-        return result
-    if not np.isfinite(target) or not np.isfinite(atr) or atr <= 0 or remaining <= 0:
-        result.update(blocked=["UP", "DOWN"], reason="INVALID_TARGET_OR_VOLATILITY")
-        return result
-    # Observed one-minute candle movement and ATR give a conservative travel
-    # envelope; elapsed time reduces the possible remaining excursion.
-    recent = df["close"].astype(float).diff().abs().tail(12).dropna()
-    observed = float(recent.median()) if len(recent) else atr * .5
-    typical_minute = max(atr * .35, observed)
-    possible_travel = typical_minute * (remaining / 60.0) ** .5 * 1.8
-    # Allow for a meaningful counter-move after touching a boundary. A level
-    # outside the remaining travel envelope cannot veto the entry.
-    reversal_room = max(atr * 1.1, typical_minute * min(remaining / 60.0, 3.0) ** .5)
-    risk_band = max(atr * .45, reversal_room)
-    blocked = []
-    for side, level_key, breakout_key in (("UP", "resistance", "break_up"),
-                                          ("DOWN", "support", "break_down")):
-        level = opening_levels.get(level_key)
-        if level is None or opening_levels.get(breakout_key):
-            continue
-        level = float(level)
-        if not np.isfinite(level):
-            continue
-        # Resistance must be above target to threaten UP; support below target
-        # threatens DOWN. A level already cleared is handled by the breakout gate.
-        ahead_of_target = level >= target if side == "UP" else level <= target
-        ahead_of_price = level >= price if side == "UP" else level <= price
-        if not (ahead_of_target and ahead_of_price):
-            continue
-        distance_to_level = abs(level - price)
-        distance_from_target = abs(level - target)
-        can_test = distance_to_level <= possible_travel
-        can_reverse_across_target = distance_from_target <= risk_band
-        if can_test and can_reverse_across_target:
-            blocked.append(side)
-    result["blocked"] = blocked
-    if blocked:
-        result["reason"] = "TARGET_LEVEL_REJECTION_RISK"
-    result["travel_envelope"] = round(possible_travel, 2)
-    result["reversal_band"] = round(risk_band, 2)
-    return result
-
-
-def _settlement_space_gate(df, price, target, seconds_left, atr, opening_levels):
-    """Priority-one abstention gate: price/target/room before indicators.
-
-    Uses volatility-relative distances, not fixed dollar thresholds. A narrow
-    range or a target too close to price with ample time remaining vetoes both
-    directions; breakout exceptions require a confirmed historical break.
-    """
-    result = {"blocked": ["UP", "DOWN"], "reason": "SPACE_DATA_UNAVAILABLE"}
-    try:
-        price, target, remaining, atr = map(float, (price, target, seconds_left, atr))
-        support = float(opening_levels["support"])
-        resistance = float(opening_levels["resistance"])
-    except (TypeError, ValueError, KeyError):
-        return result
-    if not all(np.isfinite(v) for v in (price, target, remaining, atr, support, resistance)) or atr <= 0 or remaining <= 0 or resistance <= support:
-        return result
-    recent_moves = df["close"].astype(float).diff().abs().tail(12).dropna()
-    typical = max(atr * .35, float(recent_moves.median()) if len(recent_moves) else atr * .35)
-    # A conservative movement envelope that grows with time left.
-    expected_swing = max(atr * .8, typical * (max(remaining, 1.0) / 60.0) ** .5)
-    target_gap = abs(price - target)
-    range_width = resistance - support
-    # Inside a compressed range, a small reversal can flip the settlement.
-    compressed = (support <= price <= resistance and range_width <= 2.5 * expected_swing)
-    near_target = target_gap <= expected_swing * .8
-    # For each side, require room before the nearest opposing boundary.
-    blocked = []
-    for side, level, broken in (("UP", resistance, opening_levels.get("break_up")),
-                                ("DOWN", support, opening_levels.get("break_down"))):
-        ahead = (level > price) if side == "UP" else (level < price)
-        room = abs(level - price) if ahead else float("inf")
-        # A confirmed breakout removes that boundary as an immediate obstacle,
-        # but does not bypass the near-target or compression checks.
-        if (compressed and not broken) or (near_target and remaining >= 60) or (ahead and not broken and room <= expected_swing * .85):
-            blocked.append(side)
-    result.update(blocked=blocked, reason="NO_CLEAR_SETTLEMENT_SPACE" if blocked else "CLEAR_SPACE",
-                  target_gap=round(target_gap, 2), range_width=round(range_width, 2),
-                  expected_swing=round(expected_swing, 2))
     return result
 
 
@@ -2592,14 +2513,9 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         eligible["DOWN"] = []
     # Mandatory boundary gate on the OFFICIAL entry candidate, independent
     # of route scoring or EMA momentum. Presignal is untouched.
-    opening_levels = _opening_level_gate(df, price, atr, rvol)
+    opening_levels = _opening_level_gate(df, price, atr, rvol, target=target)
     structure["opening_level_gate"] = opening_levels
-    target_level_gate = _kalshi_target_level_gate(
-        df, price, target, seconds_left, atr, rvol, opening_levels)
-    structure["target_level_gate"] = target_level_gate
-    settlement_space_gate = _settlement_space_gate(df, price, target, seconds_left, atr, opening_levels)
-    structure["settlement_space_gate"] = settlement_space_gate
-    for blocked_side in set(opening_levels["blocked"] + target_level_gate["blocked"] + settlement_space_gate["blocked"]):
+    for blocked_side in opening_levels["blocked"]:
         eligible[blocked_side] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
@@ -2793,32 +2709,70 @@ def _direction_evidence(signal):
 
 
 def _direction_consistent(candidate, signal, active=None):
-    """Require independent evidence, with stricter rules for reversals."""
+    """Single policy for entry and reversal, using nonduplicated families.
+
+    Reversal requires stronger consensus than first entry; a transient
+    oscillation cannot override a previously confirmed signal.
+    """
     if candidate not in ("UP", "DOWN"):
         return False
     families = _direction_evidence(signal)
+    if len(families) < 3:
+        return False
     agree = sum(v == candidate for v in families.values())
-    oppose = sum(v != candidate for v in families.values())
+    oppose = len(families) - agree
     if active in ("UP", "DOWN") and active != candidate:
         return agree >= 3 and oppose == 0
-    return agree >= 2 and oppose == 0
+    return agree >= 3 and agree > oppose
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
-    """No redundant price-tape confirmation; structural gates run separately."""
+    """Require fresh directional evidence before the first entry of this ticker.
+
+    Old candles remain context, never sufficient evidence for an opening entry.
+    Each live feed has a separate short tape. Later reversals are unrestricted.
+    """
     if state.get("first_direction") in ("UP", "DOWN"):
         state["opening_conflict"] = None
         return candidate
-    if not isinstance(signal, dict) or signal.get("data_valid") is False:
-        state["opening_conflict"] = "Esperando datos actuales para la primera señal"
+    def wait(reason):
+        state["opening_conflict"] = reason
         return None
+    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
+        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
+    if not signal or signal.get("data_valid") is False:
+        return wait("Esperando datos actuales para la primera señal")
     price = _plan_number(signal.get("price"))
-    if price is None or price <= 0 or signal.get("price_source") not in ("COINBASE", "KALSHI LIVE"):
-        state["opening_conflict"] = "Esperando precio en vivo para la primera señal"
-        return None
+    atr = _plan_number(signal.get("atr"))
+    source = signal.get("price_source")
+    if (price is None or price <= 0 or atr is None or atr <= 0
+            or source not in ("COINBASE", "KALSHI LIVE")):
+        return wait("Esperando precio en vivo para la primera señal")
+    stamp = now.timestamp()
+    tapes = state.setdefault("opening_live_tapes", {})
+    tape = tapes.get(source, [])
+    if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
+        tape = []
+    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
+    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
+        tape.append([stamp, price])
+    tapes[source] = tape
     if candidate not in ("UP", "DOWN"):
-        state["opening_conflict"] = "Sin candidato oficial: revisar rutas y niveles"
-        return None
+        return wait("Analizando fuerza actual antes de la primera señal")
+    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
+        return wait("Observando movimiento actual antes de la primera señal")
+    prices = [float(x[1]) for x in tape]
+    sign = 1 if candidate == "UP" else -1
+    split = len(prices)//2
+    net = sign*(prices[-1]-prices[0])
+    recent = sign*(prices[-1]-prices[split])
+    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
+    efficiency = net/max(travel, 1e-8)
+    minimum = max(2.0, .10*atr)
+    latest = sign*(prices[-1]-prices[-2])
+    if (net < minimum or recent < .5*minimum or efficiency < .60
+            or latest < -.25*minimum):
+        return wait("Sin fuerza actual suficiente para " + candidate)
     state["opening_conflict"] = None
     return candidate
 
@@ -2878,9 +2832,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         candidate = None
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
-    target_gate = ((signal or {}).get("structure_internal") or {}).get("target_level_gate") or {}
-    space_gate = ((signal or {}).get("structure_internal") or {}).get("settlement_space_gate") or {}
-    if candidate in level_gate.get("blocked", []) or candidate in target_gate.get("blocked", []) or candidate in space_gate.get("blocked", []):
+    if candidate in level_gate.get("blocked", []):
         candidate = None
 
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
@@ -2900,6 +2852,19 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                     "active_direction", "active_since"):
             state[key] = None
         state["pending_count"] = 0
+        return
+    # OBSERVACIÓN INICIAL: durante el primer minuto de cada ronda de 15m,
+    # seguir calculando indicadores y recogiendo precios, pero sin confirmar
+    # ni dejar pendiente una primera señal. El reloj viene del cierre real
+    # del mercado, no de cuándo abrió el usuario la pantalla.
+    if (state.get("first_direction") is None
+            and (seconds_left is None or seconds_left > 14 * 60)):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        state["pending_price_source"] = None
+        state["opening_conflict"] = "Analizando el primer minuto de la ronda"
         return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
@@ -2957,21 +2922,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_since"] = None
         state["pending_last_at"] = None
         last = since = None
-    # Primera señal: las evidencias independientes y los niveles ya se comprobaron.
-    # No exigir otra ronda de lecturas después de superar esas puertas.
-    if state.get("first_direction") is None:
-        state["active_direction"] = candidate
-        state["active_since"] = now
-        state["first_direction"] = candidate
-        state["first_signal_time"] = now
-        state["first_signal_seconds"] = seconds_left
-        state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                       else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        return
     if state.get("pending_direction") != candidate:
         state["pending_direction"] = candidate
         state["pending_count"] = 1
