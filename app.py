@@ -2492,6 +2492,57 @@ def _kalshi_target_level_gate(df, price, target, seconds_left, atr, rvol, openin
     return result
 
 
+def _target_indecision_gate(one, price, target, seconds_left, atr, d3, d5, rsi1, mom3, mom5):
+    """Prevent official entries when settlement direction is not established.
+
+    Uses recent 1m closes and live price; no fixed BTC-dollar thresholds.
+    This is an entry veto, not a reversal or an artificial signal.
+    """
+    result = {"blocked": [], "reason": "NONE"}
+    if target is None or seconds_left is None:
+        return {"blocked": ["UP", "DOWN"], "reason": "MISSING_SETTLEMENT_CONTEXT"}
+    try:
+        target, price, atr, seconds_left = map(float, (target, price, atr, seconds_left))
+    except (TypeError, ValueError):
+        return {"blocked": ["UP", "DOWN"], "reason": "INVALID_SETTLEMENT_CONTEXT"}
+    if not all(np.isfinite(x) for x in (target, price, atr, seconds_left)) or atr <= 0 or seconds_left <= 0:
+        return {"blocked": ["UP", "DOWN"], "reason": "INVALID_SETTLEMENT_CONTEXT"}
+    closes = one["close"].astype(float).replace([np.inf, -np.inf], np.nan).dropna().tail(7)
+    if len(closes) < 4:
+        return {"blocked": ["UP", "DOWN"], "reason": "INSUFFICIENT_RECENT_CANDLES"}
+    values = closes.tolist() + [price]
+    # Repeated settlement crossings are indecision, not evidence of a breakout.
+    crossings = sum((a - target) * (b - target) < 0 for a, b in zip(values[:-1], values[1:]))
+    typical_move = float(closes.diff().abs().dropna().median())
+    # How much movement is material depends on ATR, observed speed and time left.
+    minute_move = max(atr * .30, typical_move)
+    remaining_motion = minute_move * (min(seconds_left, 900.0) / 60.0) ** .5
+    target_band = max(atr * .35, remaining_motion * .45)
+    near_target = abs(price - target) <= target_band
+    last_moves = [values[i] - values[i-1] for i in range(-3, 0)]
+    upward = sum(x > 0 for x in last_moves)
+    downward = sum(x < 0 for x in last_moves)
+    # A direction needs agreement between recent movement, momentum and 3m/5m trend.
+    clear_up = upward >= 2 and mom3 > 0 and mom5 >= 0 and rsi1 >= 50 and (d3 == "UP" or d5 == "UP")
+    clear_down = downward >= 2 and mom3 < 0 and mom5 <= 0 and rsi1 <= 50 and (d3 == "DOWN" or d5 == "DOWN")
+    blocked = []
+    if near_target and (crossings >= 2 or not (clear_up or clear_down)):
+        blocked = ["UP", "DOWN"]
+        result["reason"] = "TARGET_INDECISION"
+    else:
+        if near_target or crossings >= 2:
+            if not clear_up:
+                blocked.append("UP")
+            if not clear_down:
+                blocked.append("DOWN")
+            if blocked:
+                result["reason"] = "DIRECTION_NOT_CONFIRMED"
+    result.update(blocked=blocked, crossings=crossings,
+                  distance_to_target=round(abs(price-target), 2),
+                  dynamic_target_band=round(target_band, 2))
+    return result
+
+
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
     one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
@@ -2556,7 +2607,10 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     target_level_gate = _kalshi_target_level_gate(
         df, price, target, seconds_left, atr, rvol, opening_levels)
     structure["target_level_gate"] = target_level_gate
-    for blocked_side in set(opening_levels["blocked"] + target_level_gate["blocked"]):
+    indecision = _target_indecision_gate(
+        one, price, target, seconds_left, atr, d3, d5, rsi1, mom3, mom5)
+    structure["target_indecision_gate"] = indecision
+    for blocked_side in set(opening_levels["blocked"] + target_level_gate["blocked"] + indecision["blocked"]):
         eligible[blocked_side] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
