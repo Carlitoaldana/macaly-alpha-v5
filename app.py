@@ -2827,19 +2827,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state[key] = None
         state["pending_count"] = 0
         return
-    # OBSERVACIÓN INICIAL: durante el primer minuto de cada ronda de 15m,
-    # seguir calculando indicadores y recogiendo precios, pero sin confirmar
-    # ni dejar pendiente una primera señal. El reloj viene del cierre real
-    # del mercado, no de cuándo abrió el usuario la pantalla.
-    if (state.get("first_direction") is None
-            and (seconds_left is None or seconds_left > 14 * 60)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        state["pending_price_source"] = None
-        state["opening_conflict"] = "Analizando el primer minuto de la ronda"
-        return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
         # Una interrupción no demuestra neutralidad ni permite confirmar.
