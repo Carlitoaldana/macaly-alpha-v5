@@ -4,22 +4,38 @@ import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
+from urllib.error import HTTPError, URLError
+
+class RequestException(Exception):
+    """Error de red compatible con el manejo de excepciones existente."""
+
 class Response:
-    def __init__(self, data):
+    def __init__(self, data, status_code=200, headers=None):
         self.data = data
+        self.status_code = status_code
+        self.headers = headers or {}
     def raise_for_status(self):
-        pass  # urlopen has already rejected non-2xx responses.
+        if self.status_code >= 400:
+            raise RequestException(f"HTTP {self.status_code}")
     def json(self):
         return self.data
 
 class requests:
+    RequestException = RequestException
+
     @staticmethod
     def get(url, params=None, headers=None, timeout=8):
         if params:
             url += ('&' if '?' in url else '?') + urlencode(params)
         req = Request(url, headers=headers or {'User-Agent': 'AlphaEdge/1.0'}, method='GET')
-        with urlopen(req, timeout=timeout) as response:
-            return Response(json.load(response))
+        try:
+            with urlopen(req, timeout=timeout) as response:
+                return Response(json.load(response), response.status, dict(response.headers))
+        except HTTPError as exc:
+            # Conservar 429 y Retry-After para que el motor aplique backoff.
+            return Response({}, exc.code, dict(exc.headers or {}))
+        except (URLError, TimeoutError, OSError) as exc:
+            raise RequestException(str(exc)) from exc
 
 import math
 import numpy as np
