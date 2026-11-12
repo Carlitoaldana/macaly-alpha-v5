@@ -2021,10 +2021,6 @@ button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid 
 .sweep{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,transparent 290deg,#34d7cd22 330deg,#9fffea99 359deg,transparent 360deg);animation:sweep 12s linear infinite}
 .radar.paused .sweep{animation-play-state:paused}
 @keyframes sweep{to{transform:rotate(360deg)}}
-.profit-orbit{position:absolute;inset:-4px;width:calc(100% + 8px);height:calc(100% + 8px);pointer-events:none;z-index:4;opacity:0;transition:opacity .35s;color:#34d399}
-.profit-orbit-track{fill:none;stroke:var(--gold);stroke-width:1.6}
-.profit-orbit-value{fill:none;stroke:currentColor;stroke-width:2.5;stroke-linecap:round;stroke-dasharray:100;stroke-dashoffset:100;transform:rotate(-90deg);transform-origin:60px 60px;filter:drop-shadow(0 0 4px currentColor);transition:stroke-dashoffset .7s ease,stroke .25s ease}
-@media(prefers-reduced-motion:reduce){.profit-orbit,.profit-orbit-value{transition:none}}
 .radar-core{position:absolute;inset:35%;border:1px solid var(--gold);border-radius:50%;background:radial-gradient(#1a335c,#080d1e);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2;box-shadow:0 0 25px #071327}
 .radar-core b{font-size:clamp(14px,2.3vw,25px);color:var(--gold);letter-spacing:1px}
 .radar-core small{font-size:9px;letter-spacing:2px}
@@ -2166,10 +2162,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </span>
 </div>
 <div class="radar paused" id="radar">
-<svg class="profit-orbit" id="profitOrbit" viewBox="0 0 120 120" role="progressbar" aria-label="Ganancia o pérdida neta de la operación" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-hidden="true">
-<circle class="profit-orbit-track" cx="60" cy="60" r="58"/>
-<circle class="profit-orbit-value" id="profitOrbitValue" cx="60" cy="60" r="58" pathLength="100"/>
-</svg>
 <div class="sweep">
 </div>
 <span class="rnum n">00</span>
@@ -2434,48 +2426,18 @@ const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textCont
 form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
 $('#testApi').onclick=()=>{const key_id=$('#apiKey').value.trim(),pem=$('#privateKey').value;if(!key_id||!pem.trim()){toast('Para REAL completa el API Key ID y la clave privada PEM.');return}action('verify_demo',{environment:'live',accept_real:true,key_id,pem})};
 $('#exportCSV').onclick=()=>action('export');
-function operationRingState(s,net,marked,fresh){
- const positions=s.positions||[];
- let value,paid,closed=false;
- if(positions.length){
-  if(!fresh||!marked||!Number.isFinite(net))return {state:'unavailable'};
-  value=net;
-  paid=positions.reduce((sum,p)=>sum+p.entry*p.quantity/100+p.entry_fee,0);
- }else{
-  const last=(s.trades||[]).filter(t=>t.closed&&Number.isFinite(t.pnl)&&t.id>(s.totals?.account_start_id||0))
-    .sort((a,b)=>Date.parse(b.closed)-Date.parse(a.closed)||b.id-a.id)[0];
-  if(!last)return {state:'idle'};
-  value=last.pnl;paid=last.entry*last.quantity/100+last.entry_fee;closed=true;
- }
- if(!Number.isFinite(paid)||paid<=0||!Number.isFinite(value))return {state:'unavailable'};
- const pct=value/paid*100;
- return {state:closed?'closed':'open',net:value,pct,
-   progress:Math.max(0,Math.min(100,pct)),color:'#34d399'};
-}
-function updateProfitRing(s,net,marked,fresh){
- const result=operationRingState(s,net,marked,fresh);
- const visible=(result.state==='open'||result.state==='closed')&&result.net>0;
- const orbit=$('#profitOrbit');
- orbit.style.opacity=visible?'1':'0';
- orbit.style.color='#34d399';
- orbit.dataset.state=result.state;
- orbit.setAttribute('aria-hidden',visible?'false':'true');
- orbit.setAttribute('aria-valuenow',String(visible?result.progress:0));
- $('#profitOrbitValue').style.strokeDashoffset=String(100-(visible?result.progress:0));
- orbit.setAttribute('aria-valuetext',visible?'Ganancia neta '+result.pct.toFixed(1)+'%':'Sin ganancia positiva verificable');
-}
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'REAL')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent=s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL';$('#start').disabled=!linked;$('#executionModeLabel').textContent='● '+(s.mode||'REAL');$('#executionFooter').textContent=s.mode||'ENTORNO REAL';$('#accountTypeLabel').textContent=s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar');for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-updateProfitRing(s,net,marked,fresh);$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+(s.execution_mode==='live'?' · Cuenta: '+money(s.account_balance):' · virtual');
+$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+(s.execution_mode==='live'?' · Cuenta: '+money(s.account_balance):' · virtual');
 if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}el.value=String(value)}}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:'');height();tick()}
-function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){if(current.positions?.length)updateProfitRing(current,NaN,false,false);$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
+function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
 window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
