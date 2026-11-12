@@ -1926,56 +1926,61 @@ def _radar_asset(m):
 
 
 def _radar_open_markets(feed):
-    """Consulta cada serie por separado para no perder monedas por paginación global."""
+    """Radar escalonado: evita nueve peticiones simultáneas y descarta datos viejos."""
     now = utcnow()
-    cache = getattr(feed, '_multicrypto_radar_cache', None)
-    if cache and time.monotonic() - cache['at'] < 15:
-        return cache['rows'], cache['missing']
-
-    by_asset = {}
-    missing = {}
-    for asset in RADAR_ASSETS:
+    tick = time.monotonic()
+    state = getattr(feed, '_multi_radar_state', None)
+    if state is None:
+        state = {'cursor': 0, 'last_request': 0.0, 'observations': {}, 'errors': {}}
+        feed._multi_radar_state = state
+    # Consultar una sola serie cada 2.5 segundos; una vuelta completa ~23 s.
+    if tick - state['last_request'] >= 2.5:
+        asset = RADAR_ASSETS[state['cursor'] % len(RADAR_ASSETS)]
+        state['cursor'] += 1
+        state['last_request'] = tick
         series = 'KX' + asset + '15M'
         try:
-            data = feed.get('/markets', {
-                'series_ticker': series, 'status': 'open', 'limit': 100,
-            })
+            data = feed.get('/markets', {'series_ticker': series, 'limit': 100})
             if data.get('error'):
-                raise ValueError(str(data.get('message') or data.get('error') or data.get('code'))[:100])
-            if not data.get('markets'):
-                missing[asset] = 'La API no devolvió mercados para '+series
+                raise ValueError(str(data.get('message') or data['error']))
+            eligible = []
             for m in data.get('markets', []):
-                if _radar_asset(m) != asset:
+                if _radar_asset(m) != asset or m.get('status') not in ('open', 'active'):
                     continue
                 try:
                     end = datetime.fromisoformat(str(m['close_time']).replace('Z', '+00:00'))
                     left = (end - now).total_seconds()
-                    if not (0 < left <= 900):
+                    if not 0 < left <= 900:
                         continue
-                    # Kalshi puede abrir mercados antes del inicio de su ventana
-                    # negociable: no usar open_time como inicio de la ronda.
                     ya, na = get_yes_ask(m), get_no_ask(m)
                     if ya is None or na is None or not (0 < ya <= 1 and 0 < na <= 1):
                         continue
-                    row = {
-                        'asset': asset, 'ticker': m['ticker'], 'market': m,
-                        'yes_cents': round(100 * ya, 2),
-                        'no_cents': round(100 * na, 2),
-                        'seconds_left': round(left),
-                        'favorite': 'UP' if ya > na else 'DOWN',
-                    }
-                    previous = by_asset.get(asset)
-                    if previous is None or row['seconds_left'] < previous['seconds_left']:
-                        by_asset[asset] = row
-                except (KeyError, ValueError, TypeError, OverflowError):
+                    eligible.append({'asset': asset, 'ticker': m['ticker'], 'market': m,
+                        'yes_cents': round(100*ya, 2), 'no_cents': round(100*na, 2),
+                        'seconds_left': round(left), 'favorite': 'UP' if ya > na else 'DOWN',
+                        '_seen': tick})
+                except (KeyError, TypeError, ValueError, OverflowError):
                     continue
-            if asset not in by_asset:
-                missing[asset] = 'Sin mercado activo cotizado o serie no disponible'
+            if eligible:
+                state['observations'][asset] = min(eligible, key=lambda r:r['seconds_left'])
+                state['errors'].pop(asset, None)
+            else:
+                state['observations'].pop(asset, None)
+                state['errors'][asset] = 'Sin mercado activo con cotización verificable ('+series+')'
         except Exception as exc:
-            missing[asset] = 'Consulta no disponible: ' + type(exc).__name__ + ' · ' + str(exc)[:130]
-    rows = [by_asset[a] for a in RADAR_ASSETS if a in by_asset]
-    # No reutilizar cotizaciones viejas para decisiones ni entradas.
-    feed._multicrypto_radar_cache = {'at': time.monotonic(), 'rows': rows, 'missing': missing}
+            state['observations'].pop(asset, None)
+            state['errors'][asset] = type(exc).__name__ + ': ' + str(exc)[:110]
+    # Datos con más de 35 s se muestran como ausentes; no se usan para operar.
+    rows = []
+    missing = {}
+    for asset in RADAR_ASSETS:
+        item = state['observations'].get(asset)
+        if item and tick-item['_seen'] <= 35 and item['seconds_left']-(tick-item['_seen']) > 0:
+            row = dict(item)
+            row['seconds_left'] = max(0, round(item['seconds_left']-(tick-item['_seen'])))
+            rows.append(row)
+        else:
+            missing[asset] = state['errors'].get(asset, 'Esperando consulta escalonada' if state['cursor'] < len(RADAR_ASSETS) else 'Cotización no disponible o vencida')
     return rows, missing
 
 
@@ -2020,6 +2025,7 @@ def _paper_multicrypto_step(self):
             existing = self.db.execute('SELECT COUNT(*) FROM trades WHERE opened IS NOT NULL AND ticker IN ('+
                 ','.join('?' for _ in rows)+')',tuple(r['ticker'] for r in rows)).fetchone()[0] if rows else 0
         for item in candidates:
+            if time.monotonic()-item.get('_seen',0) > 10: continue
             if existing >= RADAR_MAX_POSITIONS_PER_ROUND: break
             with self.lock:
                 if any(p['ticker']==item['ticker'] for p in self.positions()):continue
@@ -2059,8 +2065,8 @@ def _paper_multicrypto_step(self):
                      f"UP fuertes {up}, DOWN fuertes {down} · "
                      + ('Entradas: '+', '.join(notes) if notes else 'Observando contratos baratos')),
             market=rows[0]['market'] if rows else None,
-            signal=None,radar=[{k:v for k,v in r.items() if k!='market'} for r in rows],
-            radar_candidates=[{k:v for k,v in r.items() if k!='market'} for r in candidates],
+            signal=None,radar=[{k:v for k,v in r.items() if k not in ('market','_seen')} for r in rows],
+            radar_candidates=[{k:v for k,v in r.items() if k not in ('market','_seen')} for r in candidates],
             radar_majority=majority,radar_up=up,radar_down=down,radar_missing=missing,updated=stamp())
 
 # El modo virtual usa exclusivamente el cerebro multimoneda.
