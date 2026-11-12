@@ -1929,7 +1929,7 @@ def _radar_open_markets(feed):
     """Consulta cada serie por separado para no perder monedas por paginación global."""
     now = utcnow()
     cache = getattr(feed, '_multicrypto_radar_cache', None)
-    if cache and time.monotonic() - cache['at'] < 12:
+    if cache and time.monotonic() - cache['at'] < 25:
         return cache['rows'], cache['missing']
 
     by_asset = {}
@@ -1942,6 +1942,10 @@ def _radar_open_markets(feed):
                 'min_close_ts': int(now.timestamp()),
                 'max_close_ts': int(now.timestamp()) + 901,
             })
+            if data.get('error') or data.get('code'):
+                raise ValueError(str(data.get('message') or data.get('error') or data.get('code'))[:100])
+            if not data.get('markets'):
+                missing[asset] = 'La API no devolvió mercados para '+series
             for m in data.get('markets', []):
                 if _radar_asset(m) != asset:
                     continue
@@ -1972,6 +1976,7 @@ def _radar_open_markets(feed):
         except Exception as exc:
             missing[asset] = 'Consulta no disponible: ' + type(exc).__name__
     rows = [by_asset[a] for a in RADAR_ASSETS if a in by_asset]
+    # No reutilizar cotizaciones viejas para decisiones ni entradas.
     feed._multicrypto_radar_cache = {'at': time.monotonic(), 'rows': rows, 'missing': missing}
     return rows, missing
 
@@ -2894,11 +2899,12 @@ def streamlit_main():
     def multicrypto_radar_view():
         snap=controller.snapshot()
         st.markdown('### 🧠 CEREBRO MULTICRIPTO · SIMULACIÓN')
+        st.caption('ESPERANDO significa que no hay señal o cotizaciones verificadas; no es una compra.')
         st.caption('Actualización cada 20 segundos · nueve monedas · consenso ≥5 con ask ≥70¢ · minorías ≤15¢ · máximo 2 entradas virtuales de $1 por ronda. Sin compras reales. Se mantienen hasta liquidación.')
         st.write(snap.get('message','Esperando primera lectura'))
         missing=snap.get('radar_missing') or {}
         if missing:
-            st.caption('Sin lectura: '+', '.join(f'{a} ({reason})' for a,reason in missing.items()))
+            st.warning('Mercados sin datos (no se harán entradas): '+', '.join(f'{a}: {reason}' for a,reason in missing.items()))
         data=snap.get('radar') or []
         if data:
             st.dataframe([{'Moneda':r['asset'],'SÍ ask (¢)':r['yes_cents'],
