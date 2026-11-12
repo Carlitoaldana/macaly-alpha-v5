@@ -1953,55 +1953,75 @@ def _radar_asset(m):
 
 
 def _radar_open_markets(feed):
-    """Una consulta global cada 30 s; conserva la última lectura sólo para visualización.
-
-    Si Kalshi aplica rate limit, respeta el backoff y NO opera con datos vencidos.
-    """
+    """Una consulta por serie, espaciada para evitar páginas globales irrelevantes."""
     now = utcnow()
     tick = time.monotonic()
     state = getattr(feed, '_multi_radar_state', None)
     if state is None:
-        state = {'last_request': -1e9, 'observations': {}, 'errors': {}, 'last_error': ''}
+        state = {'observations': {}, 'errors': {}, 'next_asset': 0,
+                 'last_request': -1e9, 'last_error': ''}
         feed._multi_radar_state = state
-    if tick-state['last_request'] >= 30 and tick >= getattr(feed,'retry_at',0):
+
+    # Solo una solicitud cada 4 segundos; cinco series se recorren en ~20 s.
+    if tick - state['last_request'] >= 4 and tick >= getattr(feed, 'retry_at', 0):
+        asset = RADAR_ASSETS[state['next_asset'] % len(RADAR_ASSETS)]
+        state['next_asset'] += 1
         state['last_request'] = tick
         try:
-            # Una sola petición en vez de 9 solicitudes que saturaban la API.
-            data = feed.get('/markets', {'status':'open', 'limit':1000})
-            found = {}
+            # Los filtros por serie evitan que una respuesta global paginada
+            # deje fuera todas las criptomonedas.
+            data = feed.get('/markets', {
+                'series_ticker': 'KX' + asset + '15M',
+                'status': 'open',
+                'limit': 100,
+            })
+            found = None
             for m in data.get('markets', []):
-                asset = _radar_asset(m)
-                if not asset: continue
-                try:
-                    end = datetime.fromisoformat(str(m['close_time']).replace('Z','+00:00'))
-                    left = (end-now).total_seconds()
-                    if not 0 < left <= 900: continue
-                    ya,na = get_yes_ask(m),get_no_ask(m)
-                    if ya is None or na is None or not (0 < ya <= 1 and 0 < na <= 1):continue
-                    row = {'asset':asset,'ticker':m['ticker'],'market':m,
-                        'yes_cents':round(100*ya,2),'no_cents':round(100*na,2),
-                        'seconds_left':round(left),'favorite':'UP' if ya > na else 'DOWN', '_seen':tick}
-                    if asset not in found or row['seconds_left'] < found[asset]['seconds_left']:
-                        found[asset] = row
-                except (KeyError,ValueError,TypeError,OverflowError):
+                if _radar_asset(m) != asset:
                     continue
-            state['observations'] = found
+                try:
+                    end = datetime.fromisoformat(str(m['close_time']).replace('Z', '+00:00'))
+                    left = (end - now).total_seconds()
+                    if not (0 < left <= 900):
+                        continue
+                    ya, na = get_yes_ask(m), get_no_ask(m)
+                    if ya is None or na is None or not (0 < ya <= 1 and 0 < na <= 1):
+                        continue
+                    row = {
+                        'asset': asset, 'ticker': m['ticker'], 'market': m,
+                        'yes_cents': round(100 * ya, 2),
+                        'no_cents': round(100 * na, 2),
+                        'seconds_left': round(left),
+                        'favorite': 'UP' if ya >= na else 'DOWN',
+                        '_seen': tick,
+                    }
+                    if found is None or row['seconds_left'] < found['seconds_left']:
+                        found = row
+                except (KeyError, ValueError, TypeError, OverflowError):
+                    continue
+            if found:
+                state['observations'][asset] = found
+                state['errors'].pop(asset, None)
+            else:
+                state['observations'].pop(asset, None)
+                state['errors'][asset] = 'Sin ronda activa cotizada en KX' + asset + '15M'
             state['last_error'] = ''
-            state['errors'] = {asset:'No figura en la respuesta de mercados abiertos; puede requerir otro identificador o paginación' for asset in RADAR_ASSETS if asset not in found}
         except Exception as exc:
-            state['last_error'] = str(exc)[:170]
-            # No borrar inmediatamente la pantalla; las cotizaciones caducan por edad.
-    rows,missing=[],{}
+            state['errors'][asset] = str(exc)[:180]
+            state['last_error'] = str(exc)[:180]
+
+    rows, missing = [], {}
     for asset in RADAR_ASSETS:
-        item=state['observations'].get(asset)
-        age=tick-item['_seen'] if item else float('inf')
-        if item and age <= 35 and item['seconds_left']-age > 0:
-            row=dict(item)
-            row['seconds_left']=max(0,round(item['seconds_left']-age))
+        item = state['observations'].get(asset)
+        age = tick - item['_seen'] if item else float('inf')
+        # Vigencia estricta: si no se ha renovado en 45 s, no puede operar.
+        if item and age <= 45 and item['seconds_left'] - age > 0:
+            row = dict(item)
+            row['seconds_left'] = max(0, round(item['seconds_left'] - age))
             rows.append(row)
         else:
-            missing[asset] = (state['last_error'] or state['errors'].get(asset,'Esperando primera consulta'))
-    return rows,missing
+            missing[asset] = state['errors'].get(asset, 'Pendiente de consulta escalonada')
+    return rows, missing
 
 
 def _radar_decision(rows):
@@ -2009,7 +2029,7 @@ def _radar_decision(rows):
     # Ask alto es proxy imperfecto, no una probabilidad calibrada.
     up = sum(r['yes_cents'] >= RADAR_MAJOR_MIN_CENTS for r in rows)
     down = sum(r['no_cents'] >= RADAR_MAJOR_MIN_CENTS for r in rows)
-    majority = 'UP' if up > down and up >= 3 else ('DOWN' if down > up and down >= 3 else None)
+    majority = ('UP' if up > down and up >= 3 else ('DOWN' if down > up and down >= 3 else None)) if len(rows) == len(RADAR_ASSETS) else None
     candidates = []
     if majority:
         for r in rows:
@@ -2082,7 +2102,7 @@ def _paper_multicrypto_step(self):
                 notes.append(f"{item['asset']}: sin entrada ({type(exc).__name__})")
     with self.lock:
         self.snapshot.update(status='ACTIVO' if rows else 'SIN DATOS',
-            message=(f"RADAR {len(rows)}/{len(RADAR_ASSETS)} · mayoría {majority or ('DATOS INSUFICIENTES' if len(rows)<5 else 'SIN CONSENSO')} · "
+            message=(f"RADAR {len(rows)}/{len(RADAR_ASSETS)} · mayoría {majority or ('DATOS INSUFICIENTES' if len(rows)<3 else 'SIN CONSENSO')} · "
                      f"UP fuertes {up}, DOWN fuertes {down} · "
                      + ('Entradas: '+', '.join(notes) if notes else 'Observando contratos baratos')),
             market=rows[0]['market'] if rows else None,
