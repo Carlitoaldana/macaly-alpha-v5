@@ -1929,7 +1929,7 @@ def _radar_open_markets(feed):
     """Consulta cada serie por separado para no perder monedas por paginación global."""
     now = utcnow()
     cache = getattr(feed, '_multicrypto_radar_cache', None)
-    if cache and time.monotonic() - cache['at'] < 25:
+    if cache and time.monotonic() - cache['at'] < 15:
         return cache['rows'], cache['missing']
 
     by_asset = {}
@@ -1938,11 +1938,9 @@ def _radar_open_markets(feed):
         series = 'KX' + asset + '15M'
         try:
             data = feed.get('/markets', {
-                'series_ticker': series, 'limit': 100,
-                'min_close_ts': int(now.timestamp()),
-                'max_close_ts': int(now.timestamp()) + 901,
+                'series_ticker': series, 'status': 'open', 'limit': 100,
             })
-            if data.get('error') or data.get('code'):
+            if data.get('error'):
                 raise ValueError(str(data.get('message') or data.get('error') or data.get('code'))[:100])
             if not data.get('markets'):
                 missing[asset] = 'La API no devolvió mercados para '+series
@@ -1974,7 +1972,7 @@ def _radar_open_markets(feed):
             if asset not in by_asset:
                 missing[asset] = 'Sin mercado activo cotizado o serie no disponible'
         except Exception as exc:
-            missing[asset] = 'Consulta no disponible: ' + type(exc).__name__
+            missing[asset] = 'Consulta no disponible: ' + type(exc).__name__ + ' · ' + str(exc)[:130]
     rows = [by_asset[a] for a in RADAR_ASSETS if a in by_asset]
     # No reutilizar cotizaciones viejas para decisiones ni entradas.
     feed._multicrypto_radar_cache = {'at': time.monotonic(), 'rows': rows, 'missing': missing}
