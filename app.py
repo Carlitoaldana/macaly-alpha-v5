@@ -1926,35 +1926,54 @@ def _radar_asset(m):
 
 
 def _radar_open_markets(feed):
+    """Consulta cada serie por separado para no perder monedas por paginación global."""
     now = utcnow()
-    # Consulta pública, sin credenciales ni órdenes. Solo mercados 15m verificados.
-    data = feed.get('/markets', {'status':'open','limit':1000,
-                    'min_close_ts':int(now.timestamp()),
-                    'max_close_ts':int(now.timestamp())+901})
+    cache = getattr(feed, '_multicrypto_radar_cache', None)
+    if cache and time.monotonic() - cache['at'] < 12:
+        return cache['rows'], cache['missing']
+
     by_asset = {}
-    for m in data.get('markets',[]):
-        asset = _radar_asset(m)
-        if not asset: continue
+    missing = {}
+    for asset in RADAR_ASSETS:
+        series = 'KX' + asset + '15M'
         try:
-            start = datetime.fromisoformat(str(m['open_time']).replace('Z','+00:00'))
-            end = datetime.fromisoformat(str(m['close_time']).replace('Z','+00:00'))
-            left = (end-now).total_seconds()
-            if not (start <= now < end and 0 < left <= 900): continue
-            # La ronda debe ser de 15 minutos; no aceptar mercados diarios.
-            if not (850 <= (end-start).total_seconds() <= 950): continue
-            ya, na = get_yes_ask(m), get_no_ask(m)
-            if ya is None or na is None: continue
-            if not (0 < ya <= 1 and 0 < na <= 1): continue
-            row = {'asset':asset,'ticker':m['ticker'],'market':m,
-                   'yes_cents':round(100*ya,2),'no_cents':round(100*na,2),
-                   'seconds_left':round(left),
-                   'favorite':'UP' if ya > na else 'DOWN'}
-            prev = by_asset.get(asset)
-            if prev is None or row['seconds_left'] < prev['seconds_left']:
-                by_asset[asset] = row
-        except (KeyError, ValueError, TypeError, OverflowError):
-            continue
-    return [by_asset[a] for a in RADAR_ASSETS if a in by_asset]
+            data = feed.get('/markets', {
+                'series_ticker': series, 'status': 'open', 'limit': 100,
+                'min_close_ts': int(now.timestamp()),
+                'max_close_ts': int(now.timestamp()) + 901,
+            })
+            for m in data.get('markets', []):
+                if _radar_asset(m) != asset:
+                    continue
+                try:
+                    end = datetime.fromisoformat(str(m['close_time']).replace('Z', '+00:00'))
+                    left = (end - now).total_seconds()
+                    if not (0 < left <= 900):
+                        continue
+                    # Kalshi puede abrir mercados antes del inicio de su ventana
+                    # negociable: no usar open_time como inicio de la ronda.
+                    ya, na = get_yes_ask(m), get_no_ask(m)
+                    if ya is None or na is None or not (0 < ya <= 1 and 0 < na <= 1):
+                        continue
+                    row = {
+                        'asset': asset, 'ticker': m['ticker'], 'market': m,
+                        'yes_cents': round(100 * ya, 2),
+                        'no_cents': round(100 * na, 2),
+                        'seconds_left': round(left),
+                        'favorite': 'UP' if ya < na else 'DOWN',
+                    }
+                    previous = by_asset.get(asset)
+                    if previous is None or row['seconds_left'] < previous['seconds_left']:
+                        by_asset[asset] = row
+                except (KeyError, ValueError, TypeError, OverflowError):
+                    continue
+            if asset not in by_asset:
+                missing[asset] = 'Sin mercado de 15 min activo y cotizado'
+        except Exception as exc:
+            missing[asset] = 'Consulta no disponible: ' + type(exc).__name__
+    rows = [by_asset[a] for a in RADAR_ASSETS if a in by_asset]
+    feed._multicrypto_radar_cache = {'at': time.monotonic(), 'rows': rows, 'missing': missing}
+    return rows, missing
 
 
 def _radar_decision(rows):
@@ -1982,11 +2001,11 @@ def _paper_multicrypto_step(self):
     # Salidas: la prueba de reversión mantiene la apuesta hasta liquidación.
     # No liquidar virtualmente con cotizaciones intermedias ni señales BTC.
     try:
-        rows = _radar_open_markets(self.feed)
+        rows, missing = _radar_open_markets(self.feed)
     except Exception as exc:
         with self.lock:
             self.snapshot.update(status='SIN DATOS',message='Radar Kalshi: '+str(exc),
-                                 radar=[],radar_candidates=[],radar_majority=None)
+                                 radar=[],radar_candidates=[],radar_majority=None,radar_missing={})
         return
     majority, up, down, candidates = _radar_decision(rows)
     notes = []
@@ -2033,13 +2052,13 @@ def _paper_multicrypto_step(self):
                 notes.append(f"{item['asset']}: sin entrada ({type(exc).__name__})")
     with self.lock:
         self.snapshot.update(status='ACTIVO' if rows else 'SIN DATOS',
-            message=(f"RADAR {len(rows)}/9 · mayoría {majority or 'SIN CONSENSO'} · "
+            message=(f"RADAR {len(rows)}/9 · mayoría {majority or ('DATOS INSUFICIENTES' if len(rows)<5 else 'SIN CONSENSO')} · "
                      f"UP fuertes {up}, DOWN fuertes {down} · "
                      + ('Entradas: '+', '.join(notes) if notes else 'Observando contratos baratos')),
             market=rows[0]['market'] if rows else None,
             signal=None,radar=[{k:v for k,v in r.items() if k!='market'} for r in rows],
             radar_candidates=[{k:v for k,v in r.items() if k!='market'} for r in candidates],
-            radar_majority=majority,radar_up=up,radar_down=down,updated=stamp())
+            radar_majority=majority,radar_up=up,radar_down=down,radar_missing=missing,updated=stamp())
 
 # El modo virtual usa exclusivamente el cerebro multimoneda.
 PaperBot.step = _paper_multicrypto_step
@@ -2877,11 +2896,14 @@ def streamlit_main():
         st.markdown('### 🧠 CEREBRO MULTICRIPTO · SIMULACIÓN')
         st.caption('Nueve monedas · consenso ≥5 con ask ≥70¢ · minorías ≤15¢ · máximo 2 entradas virtuales de $1 por ronda. Sin compras reales. Se mantienen hasta liquidación.')
         st.write(snap.get('message','Esperando primera lectura'))
+        missing=snap.get('radar_missing') or {}
+        if missing:
+            st.caption('Sin lectura: '+', '.join(f'{a} ({reason})' for a,reason in missing.items()))
         data=snap.get('radar') or []
         if data:
             st.dataframe([{'Moneda':r['asset'],'SÍ ask (¢)':r['yes_cents'],
                           'NO ask (¢)':r['no_cents'],
-                          'Favorito':'SÍ' if r['favorite']=='UP' else 'NO',
+                          'Favorito':'SÍ' if r['yes_cents'] < r['no_cents'] else 'NO',
                           'Segundos':r['seconds_left']} for r in data],
                          use_container_width=True,hide_index=True)
         else:
