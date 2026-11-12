@@ -1229,7 +1229,7 @@ class MarketData:
                 raise RuntimeError(f'Kalshi HTTP 429: pausa de {math.ceil(self.retry_at-time.monotonic())} s')
             response.raise_for_status()
             result = response.json()
-        except requests.RequestException as exc:
+        except RequestException as exc:
             raise RuntimeError(f'Kalshi conexión HTTP: {str(exc)[:150]}') from exc
         if not isinstance(result, dict):
             raise ValueError('Respuesta Kalshi incompleta.')
