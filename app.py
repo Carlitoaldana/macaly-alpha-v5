@@ -3571,7 +3571,7 @@ def render_history_page():
     # Diseño aislado del registro: no altera cálculos, señales ni el motor.
     st.markdown("""
     <style>
-    .history-view{font-family:inherit;color:#f8fafc;max-width:1000px;margin:0 auto;padding:6px 0 22px}
+    .history-view{font-family:inherit;color:#f8fafc;max-width:1000px;margin:0 auto;padding:118px 0 22px}
     .history-view .history-back{display:inline-block;color:#dcecff!important;text-decoration:none!important;font-size:14px;font-weight:800;margin-bottom:12px}
     .history-view .history-head{position:relative;overflow:hidden;padding:23px 18px 20px;border:1px solid #286bb1;border-radius:20px;background:radial-gradient(ellipse at 92% 5%,#154f79 0%,transparent 48%),linear-gradient(145deg,#071b35,#060e22 78%);box-shadow:0 0 18px #057aff28,inset 0 0 25px #0b4b7c22}
     .history-view .history-head:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(125deg,transparent 20%,#0aa9ff16 21%,transparent 23%,transparent 68%,#e9ad3218 69%,transparent 71%)}
