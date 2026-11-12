@@ -1934,7 +1934,7 @@ class PaperBot(Bot):
 
 # ===== CEREBRO MULTICRIPTO · CONTRARIAS BARATAS · SOLO SIMULACIÓN =====
 # Estrategia experimental: no presupone que la minoría vaya a revertirse.
-RADAR_ASSETS = ('BTC','ETH','SOL','XRP','DOGE','BNB','HYPE','NEAR','ZEC')
+RADAR_ASSETS = ('BTC','ETH','SOL','XRP','BNB')
 RADAR_LIMIT_CENTS = 15
 RADAR_MAJOR_MIN_CENTS = 70
 RADAR_MAX_POSITIONS_PER_ROUND = 2
@@ -2009,7 +2009,7 @@ def _radar_decision(rows):
     # Ask alto es proxy imperfecto, no una probabilidad calibrada.
     up = sum(r['yes_cents'] >= RADAR_MAJOR_MIN_CENTS for r in rows)
     down = sum(r['no_cents'] >= RADAR_MAJOR_MIN_CENTS for r in rows)
-    majority = 'UP' if up > down and up >= 5 else ('DOWN' if down > up and down >= 5 else None)
+    majority = 'UP' if up > down and up >= 3 else ('DOWN' if down > up and down >= 3 else None)
     candidates = []
     if majority:
         for r in rows:
@@ -2082,7 +2082,7 @@ def _paper_multicrypto_step(self):
                 notes.append(f"{item['asset']}: sin entrada ({type(exc).__name__})")
     with self.lock:
         self.snapshot.update(status='ACTIVO' if rows else 'SIN DATOS',
-            message=(f"RADAR {len(rows)}/9 · mayoría {majority or ('DATOS INSUFICIENTES' if len(rows)<5 else 'SIN CONSENSO')} · "
+            message=(f"RADAR {len(rows)}/{len(RADAR_ASSETS)} · mayoría {majority or ('DATOS INSUFICIENTES' if len(rows)<5 else 'SIN CONSENSO')} · "
                      f"UP fuertes {up}, DOWN fuertes {down} · "
                      + ('Entradas: '+', '.join(notes) if notes else 'Observando contratos baratos')),
             market=rows[0]['market'] if rows else None,
@@ -2925,7 +2925,7 @@ def streamlit_main():
         snap=controller.snapshot()
         st.markdown('### 🧠 CEREBRO MULTICRIPTO · SIMULACIÓN')
         st.caption('ESPERANDO significa que no hay señal o cotizaciones verificadas; no es una compra.')
-        st.caption('Actualización cada 20 segundos · nueve monedas · consenso ≥5 con ask ≥70¢ · minorías ≤15¢ · máximo 2 entradas virtuales de $1 por ronda. Sin compras reales. Se mantienen hasta liquidación.')
+        st.caption('Actualización cada 20 segundos · cinco monedas (BTC, ETH, SOL, XRP, BNB) · consenso ≥3 con ask ≥70¢ · minorías ≤15¢ · máximo 2 entradas virtuales de $1 por ronda. Sin compras reales. Se mantienen hasta liquidación.')
         st.write(snap.get('message','Esperando primera lectura'))
         missing=snap.get('radar_missing') or {}
         if missing:
