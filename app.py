@@ -1938,7 +1938,7 @@ def _radar_open_markets(feed):
         series = 'KX' + asset + '15M'
         try:
             data = feed.get('/markets', {
-                'series_ticker': series, 'status': 'open', 'limit': 100,
+                'series_ticker': series, 'limit': 100,
                 'min_close_ts': int(now.timestamp()),
                 'max_close_ts': int(now.timestamp()) + 901,
             })
@@ -1960,7 +1960,7 @@ def _radar_open_markets(feed):
                         'yes_cents': round(100 * ya, 2),
                         'no_cents': round(100 * na, 2),
                         'seconds_left': round(left),
-                        'favorite': 'UP' if ya < na else 'DOWN',
+                        'favorite': 'UP' if ya > na else 'DOWN',
                     }
                     previous = by_asset.get(asset)
                     if previous is None or row['seconds_left'] < previous['seconds_left']:
@@ -1968,7 +1968,7 @@ def _radar_open_markets(feed):
                 except (KeyError, ValueError, TypeError, OverflowError):
                     continue
             if asset not in by_asset:
-                missing[asset] = 'Sin mercado de 15 min activo y cotizado'
+                missing[asset] = 'Sin mercado activo cotizado o serie no disponible'
         except Exception as exc:
             missing[asset] = 'Consulta no disponible: ' + type(exc).__name__
     rows = [by_asset[a] for a in RADAR_ASSETS if a in by_asset]
@@ -2877,7 +2877,7 @@ def streamlit_main():
     if not index.exists():index.write_text(_TERMINAL_HTML,encoding='utf-8')
     terminal=components.declare_component('alpha_edge_terminal',path=str(directory))
 
-    @st.fragment(run_every=2)
+    @st.fragment(run_every=5)
     def live_terminal():
         _auto_connect_saved(controller,saved_credentials)
         event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
@@ -2890,11 +2890,11 @@ def streamlit_main():
                 st.rerun()
     live_terminal()
 
-    @st.fragment(run_every=4)
+    @st.fragment(run_every=20)
     def multicrypto_radar_view():
         snap=controller.snapshot()
         st.markdown('### 🧠 CEREBRO MULTICRIPTO · SIMULACIÓN')
-        st.caption('Nueve monedas · consenso ≥5 con ask ≥70¢ · minorías ≤15¢ · máximo 2 entradas virtuales de $1 por ronda. Sin compras reales. Se mantienen hasta liquidación.')
+        st.caption('Actualización cada 20 segundos · nueve monedas · consenso ≥5 con ask ≥70¢ · minorías ≤15¢ · máximo 2 entradas virtuales de $1 por ronda. Sin compras reales. Se mantienen hasta liquidación.')
         st.write(snap.get('message','Esperando primera lectura'))
         missing=snap.get('radar_missing') or {}
         if missing:
@@ -2903,7 +2903,7 @@ def streamlit_main():
         if data:
             st.dataframe([{'Moneda':r['asset'],'SÍ ask (¢)':r['yes_cents'],
                           'NO ask (¢)':r['no_cents'],
-                          'Favorito':'SÍ' if r['yes_cents'] < r['no_cents'] else 'NO',
+                          'Favorito':'SÍ' if r['yes_cents'] > r['no_cents'] else 'NO',
                           'Segundos':r['seconds_left']} for r in data],
                          use_container_width=True,hide_index=True)
         else:
