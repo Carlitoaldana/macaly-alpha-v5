@@ -1198,16 +1198,27 @@ class MarketData:
         self.retry_at = 0
 
     def get(self, path, params=None):
-        if time.monotonic() < self.retry_at:
-            raise ValueError('Kalshi en espera tras límite de consultas.')
+        # Backoff real ante HTTP 429; nunca convertir el bloqueo en un ValueError genérico.
+        remaining = self.retry_at - time.monotonic()
+        if remaining > 0:
+            raise RuntimeError(f'Kalshi HTTP 429: pausa de {math.ceil(remaining)} s')
         try:
-            result = requests.get(API+path, params=params, timeout=7).json()
-        except Exception as e:
-            if getattr(e, 'code', None) == 429:
-                self.retry_at = time.monotonic()+15
-            raise
+            response = requests.get(API + path, params=params, timeout=9)
+            if response.status_code == 429:
+                try:
+                    wait = float(response.headers.get('Retry-After', '60'))
+                except (TypeError, ValueError):
+                    wait = 60
+                self.retry_at = time.monotonic() + max(60, min(300, wait))
+                raise RuntimeError(f'Kalshi HTTP 429: pausa de {math.ceil(self.retry_at-time.monotonic())} s')
+            response.raise_for_status()
+            result = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(f'Kalshi conexión HTTP: {str(exc)[:150]}') from exc
         if not isinstance(result, dict):
             raise ValueError('Respuesta Kalshi incompleta.')
+        if result.get('error'):
+            raise ValueError('Kalshi: '+str(result.get('message') or result['error'])[:180])
         return result
 
     def current(self):
@@ -1926,62 +1937,55 @@ def _radar_asset(m):
 
 
 def _radar_open_markets(feed):
-    """Radar escalonado: evita nueve peticiones simultáneas y descarta datos viejos."""
+    """Una consulta global cada 30 s; conserva la última lectura sólo para visualización.
+
+    Si Kalshi aplica rate limit, respeta el backoff y NO opera con datos vencidos.
+    """
     now = utcnow()
     tick = time.monotonic()
     state = getattr(feed, '_multi_radar_state', None)
     if state is None:
-        state = {'cursor': 0, 'last_request': 0.0, 'observations': {}, 'errors': {}}
+        state = {'last_request': -1e9, 'observations': {}, 'errors': {}, 'last_error': ''}
         feed._multi_radar_state = state
-    # Consultar una sola serie cada 2.5 segundos; una vuelta completa ~23 s.
-    if tick - state['last_request'] >= 2.5:
-        asset = RADAR_ASSETS[state['cursor'] % len(RADAR_ASSETS)]
-        state['cursor'] += 1
+    if tick-state['last_request'] >= 30 and tick >= getattr(feed,'retry_at',0):
         state['last_request'] = tick
-        series = 'KX' + asset + '15M'
         try:
-            data = feed.get('/markets', {'series_ticker': series, 'limit': 100})
-            if data.get('error'):
-                raise ValueError(str(data.get('message') or data['error']))
-            eligible = []
+            # Una sola petición en vez de 9 solicitudes que saturaban la API.
+            data = feed.get('/markets', {'status':'open', 'limit':1000})
+            found = {}
             for m in data.get('markets', []):
-                if _radar_asset(m) != asset or m.get('status') not in ('open', 'active'):
-                    continue
+                asset = _radar_asset(m)
+                if not asset: continue
                 try:
-                    end = datetime.fromisoformat(str(m['close_time']).replace('Z', '+00:00'))
-                    left = (end - now).total_seconds()
-                    if not 0 < left <= 900:
-                        continue
-                    ya, na = get_yes_ask(m), get_no_ask(m)
-                    if ya is None or na is None or not (0 < ya <= 1 and 0 < na <= 1):
-                        continue
-                    eligible.append({'asset': asset, 'ticker': m['ticker'], 'market': m,
-                        'yes_cents': round(100*ya, 2), 'no_cents': round(100*na, 2),
-                        'seconds_left': round(left), 'favorite': 'UP' if ya > na else 'DOWN',
-                        '_seen': tick})
-                except (KeyError, TypeError, ValueError, OverflowError):
+                    end = datetime.fromisoformat(str(m['close_time']).replace('Z','+00:00'))
+                    left = (end-now).total_seconds()
+                    if not 0 < left <= 900: continue
+                    ya,na = get_yes_ask(m),get_no_ask(m)
+                    if ya is None or na is None or not (0 < ya <= 1 and 0 < na <= 1):continue
+                    row = {'asset':asset,'ticker':m['ticker'],'market':m,
+                        'yes_cents':round(100*ya,2),'no_cents':round(100*na,2),
+                        'seconds_left':round(left),'favorite':'UP' if ya > na else 'DOWN', '_seen':tick}
+                    if asset not in found or row['seconds_left'] < found[asset]['seconds_left']:
+                        found[asset] = row
+                except (KeyError,ValueError,TypeError,OverflowError):
                     continue
-            if eligible:
-                state['observations'][asset] = min(eligible, key=lambda r:r['seconds_left'])
-                state['errors'].pop(asset, None)
-            else:
-                state['observations'].pop(asset, None)
-                state['errors'][asset] = 'Sin mercado activo con cotización verificable ('+series+')'
+            state['observations'] = found
+            state['last_error'] = ''
+            state['errors'] = {asset:'No figura en la respuesta de mercados abiertos; puede requerir otro identificador o paginación' for asset in RADAR_ASSETS if asset not in found}
         except Exception as exc:
-            state['observations'].pop(asset, None)
-            state['errors'][asset] = type(exc).__name__ + ': ' + str(exc)[:110]
-    # Datos con más de 35 s se muestran como ausentes; no se usan para operar.
-    rows = []
-    missing = {}
+            state['last_error'] = str(exc)[:170]
+            # No borrar inmediatamente la pantalla; las cotizaciones caducan por edad.
+    rows,missing=[],{}
     for asset in RADAR_ASSETS:
-        item = state['observations'].get(asset)
-        if item and tick-item['_seen'] <= 35 and item['seconds_left']-(tick-item['_seen']) > 0:
-            row = dict(item)
-            row['seconds_left'] = max(0, round(item['seconds_left']-(tick-item['_seen'])))
+        item=state['observations'].get(asset)
+        age=tick-item['_seen'] if item else float('inf')
+        if item and age <= 35 and item['seconds_left']-age > 0:
+            row=dict(item)
+            row['seconds_left']=max(0,round(item['seconds_left']-age))
             rows.append(row)
         else:
-            missing[asset] = state['errors'].get(asset, 'Esperando consulta escalonada' if state['cursor'] < len(RADAR_ASSETS) else 'Cotización no disponible o vencida')
-    return rows, missing
+            missing[asset] = (state['last_error'] or state['errors'].get(asset,'Esperando primera consulta'))
+    return rows,missing
 
 
 def _radar_decision(rows):
@@ -2003,7 +2007,8 @@ def _radar_decision(rows):
 
 
 def _paper_multicrypto_step(self):
-    self.settle()
+    if time.monotonic() >= getattr(self.feed,'retry_at',0):
+        self.settle()
     with self.lock:
         positions = self.positions()
     # Salidas: la prueba de reversión mantiene la apuesta hasta liquidación.
@@ -2025,7 +2030,7 @@ def _paper_multicrypto_step(self):
             existing = self.db.execute('SELECT COUNT(*) FROM trades WHERE opened IS NOT NULL AND ticker IN ('+
                 ','.join('?' for _ in rows)+')',tuple(r['ticker'] for r in rows)).fetchone()[0] if rows else 0
         for item in candidates:
-            if time.monotonic()-item.get('_seen',0) > 10: continue
+            if time.monotonic()-item.get('_seen',0) > 12: continue
             if existing >= RADAR_MAX_POSITIONS_PER_ROUND: break
             with self.lock:
                 if any(p['ticker']==item['ticker'] for p in self.positions()):continue
