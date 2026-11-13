@@ -1575,8 +1575,7 @@ SERIES_15M = {
     'BTC': 'KXBTC15M', 'ETH': 'KXETH15M', 'SOL': 'KXSOL15M',
     'XRP': 'KXXRP15M', 'BNB': 'KXBNB15M',
 }
-RADAR_REVISION = 'radar-5x15-v1'
-VOTE_THRESHOLD = Decimal('70')
+RADAR_REVISION = 'radar-5x15-v2'
 ENTRY_LIMIT = 15
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
@@ -1663,8 +1662,8 @@ def valid_radar_rows(rows, now):
 
 
 def radar_decision(rows):
-    yes_votes = sum(row['yes'] >= VOTE_THRESHOLD for row in rows.values())
-    no_votes = sum(100 - row['yes'] >= VOTE_THRESHOLD for row in rows.values())
+    yes_votes = sum(row['yes'] > 50 for row in rows.values())
+    no_votes = sum(100 - row['yes'] > 50 for row in rows.values())
     majority = 'UP' if yes_votes >= 3 else 'DOWN' if no_votes >= 3 else None
     candidates = []
     if majority:
@@ -1832,7 +1831,7 @@ class PaperBot(Bot):
             summary = f'Datos insuficientes · {len(rows)}/5 cotizaciones vigentes'
             majority, candidates = None, []
         elif majority is None:
-            summary = f'Sin mayoría al 70% · {yes} SÍ / {no} NO'
+            summary = f'Sin mayoría · {yes} SÍ / {no} NO'
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
             opportunity = ' · Candidatas: ' + ', '.join(candidates) if candidates else ' · Sin contrarias a 15¢ o menos'
@@ -2156,7 +2155,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Tres votos de al menos 70% · Hasta dos entradas por ronda · Tope de $1 por entrada, incluida la comisión simulada.</div>
+<div class="notice">Mayoría de tres monedas · 50% exacto es neutral · Hasta dos entradas por ronda · Tope de $1 por entrada, incluida la comisión simulada.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2436,4 +2435,3 @@ if __name__=='__main__':
         raise SystemExit(streamlit_cli.main())
     else:
         streamlit_main()
-
