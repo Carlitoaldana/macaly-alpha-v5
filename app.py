@@ -2021,6 +2021,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 .notice{padding:16px;border:1px solid #4a638d;margin-top:12px;line-height:1.6;color:var(--muted);font-size:11px;border-radius:5px}
 #settingsFeedback.success{background:#163f3b;color:#b9ffe6;border-color:#4ce4b6}
 #settingsFeedback.error{color:#fecaca;border-color:#f87171}
+.trade-position + .trade-position{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
+.trade-position h3{margin:0 0 8px;overflow-wrap:anywhere}
 .toast{position:fixed;right:20px;bottom:20px;background:#163f3b;color:#b9ffe6;border:1px solid #4ce4b6;padding:15px 25px;border-radius:6px;z-index:10;box-shadow:0 6px 30px #0008}
 .strength{height:8px;border-radius:5px;background:#0b1630;margin:15px 0;overflow:hidden}
 .strength i{display:block;height:100%;width:0;background:var(--gold)}
@@ -2138,18 +2140,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 <article class="panel">
-<h2>Posición</h2>
-<div class="position">
-<div class="position-money">
-<div><span class="label">PAGÓ</span><div class="amount" id="positionPaid">$0.00</div></div>
-<div><span class="label">GANANCIA / PÉRDIDA ACTUAL</span><div class="amount" id="unrealized">—</div></div>
-</div>
-<span class="muted" id="positionNote">Sin operaciones</span>
-<hr>
-<strong id="openContracts" hidden>0 CONTRATOS</strong>
-<hr>
-<strong class="gold" id="positionSide">SIN POSICIÓN</strong>
-</div>
+<h2>Posiciones de la simulación</h2>
+<div class="body" id="positionList"><p class="muted">Sin operaciones</p></div>
 </article>
 </div>
 <article class="panel performance">
@@ -2372,14 +2364,43 @@ function coinLabel(row){
   const emblem = Object.hasOwn(coinIcons,row.asset) ? '<img class="coin-emblem" src="'+coinIcons[row.asset]+'" alt="" width="20" height="20">' : '';
   return '<span class="coin-name">'+emblem+esc(row.asset)+'</span>';
 }
+function positionResult(trade,s,fresh){
+  if(trade.closed)return trade.pnl;
+  const book=s.books?.[trade.ticker];
+  if(!fresh||!book||Date.now()>=Date.parse(book.expires))return null;
+  let remaining=trade.quantity,proceeds=0;
+  for(const [price,quantity] of book[trade.side]?.bids||[]){
+    const filled=Math.min(remaining,quantity);
+    remaining-=filled;
+    proceeds+=filled*price;
+    if(remaining===0)break;
+  }
+  if(remaining>0)return null;
+  return (proceeds-trade.quantity*(trade.entry+s.settings.fee_cents_per_contract))/100-trade.entry_fee;
+}
+function renderPositions(s,fresh){
+  const latest=s.trades[0];
+  const trades=s.trades.filter(trade=>!trade.closed||trade.id===latest?.id||
+    (latest?.round_close&&trade.round_close===latest.round_close));
+  $('#positionList').innerHTML=trades.map(trade=>{
+    const result=positionResult(trade,s,fresh);
+    const paid=trade.quantity*trade.entry/100+trade.entry_fee;
+    const side=trade.side==='UP'?'UP (SÍ)':trade.side==='DOWN'?'DOWN (NO)':trade.side;
+    const status=trade.closed?(trade.reason||'Cerrada'):'Abierta';
+    const color=result>0?'#34d399':result<0?'#f87171':'inherit';
+    return '<section class="trade-position"><h3 class="gold">'+esc(trade.ticker)+' · '+esc(side)+'</h3>'+
+      '<p>'+esc(trade.quantity)+' contratos a '+cents(trade.entry)+' · Costó '+money(paid)+'</p>'+
+      '<p>'+esc(status)+' · <strong style="color:'+color+'">'+
+      (result==null?'Resultado pendiente':(result>0?'+':'')+money(result))+'</strong></p></section>';
+  }).join('')||'<p class="muted">Sin operaciones</p>';
+}
 function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
 const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=(s.radar_count??0)+'/9 VIGENTES';$('#activeSignal').textContent=active||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent='15 ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||!s.books?.[p.ticker]||Date.now()>=Date.parse(s.books[p.ticker].expires)){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.books?.[p.ticker]?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
+renderPositions(s,fresh);$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
 if(!loaded||!dirty){for(const [name,key] of Object.entries(names)){
 const field=form.elements[name],value=String(s.settings[key]);
 if(name==='stopProfit'&&!Array.from(field.options).some(option=>option.value===value))field.add(new Option(value+'%',value));
