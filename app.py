@@ -1585,7 +1585,8 @@ EXTRA_SERIES_15M = {
     'ZEC': 'KXZEC15M', 'NEAR': 'KXNEAR15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-9x15-v4'
+RADAR_REVISION = 'radar-9x15-v5'
+DIRECTION_MIN = 5
 ENTRY_LIMIT = 15
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
@@ -1672,18 +1673,19 @@ def valid_radar_rows(rows, now):
 
 
 def radar_decision(rows):
-    core = [rows[asset] for asset in CORE_SERIES_15M if asset in rows]
-    yes_votes = sum(row['yes'] > 50 for row in core)
-    no_votes = sum(row['yes'] < 50 for row in core)
-    majority = 'UP' if yes_votes >= 3 else 'DOWN' if no_votes >= 3 else None
-    candidates = []
-    if majority:
-        for row in rows.values():
-            if majority == 'UP' and row['yes'] < 50 and row['yes_ask'] <= ENTRY_LIMIT:
-                candidates.append((row['yes_ask'], row['asset']))
-            if majority == 'DOWN' and row['yes'] > 50 and row['no_ask'] <= ENTRY_LIMIT:
-                candidates.append((row['no_ask'], row['asset']))
-    return majority, yes_votes, no_votes, [asset for _, asset in sorted(candidates)]
+    up = sorted((asset for asset, row in rows.items() if row['yes'] > 50),
+                key=lambda asset: (-rows[asset]['yes'], asset))
+    down = sorted((asset for asset, row in rows.items() if row['yes'] < 50),
+                  key=lambda asset: (rows[asset]['yes'], asset))
+    if len(up) >= DIRECTION_MIN:
+        side, leaders, opposite, ask = 'UP', up[:DIRECTION_MIN], down, 'yes_ask'
+    elif len(down) >= DIRECTION_MIN:
+        side, leaders, opposite, ask = 'DOWN', down[:DIRECTION_MIN], up, 'no_ask'
+    else:
+        return None, [], [], len(up), len(down)
+    candidates = sorted((asset for asset in opposite if rows[asset][ask] <= ENTRY_LIMIT),
+                        key=lambda asset: (rows[asset][ask], asset))
+    return side, leaders, candidates, len(up), len(down)
 
 
 class PaperBot(Bot):
@@ -1700,7 +1702,7 @@ class PaperBot(Bot):
         self.snapshot['mode'] = 'SIMULACIÓN'
         self.snapshot['radar'] = [{'asset': asset, 'detail': 'Consultando'} for asset in SERIES_15M]
         self.snapshot['updated'] = stamp()
-        self.snapshot['radar_summary'] = 'Consultando las cinco series principales y las cuatro adicionales.'
+        self.snapshot['radar_summary'] = 'Consultando las nueve monedas del radar.'
         if 'round_close' not in {r[1] for r in self.db.execute('PRAGMA table_info(trades)')}:
             self.db.execute('ALTER TABLE trades ADD COLUMN round_close TEXT')
         self.db.execute('CREATE INDEX IF NOT EXISTS trades_round_close ON trades(round_close)')
@@ -1809,10 +1811,11 @@ class PaperBot(Bot):
                 if not self.running or self.close_requested:
                     break
                 fresh_rows = valid_radar_rows(rows, utcnow())
-                if not CORE_SERIES_15M.keys() <= fresh_rows.keys():
-                    notes[asset] = 'Cotizaciones principales vencidas durante la verificación'
+                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows)
+                if fresh_side != side:
+                    notes[asset] = 'Se perdió la confirmación de cinco monedas durante la verificación'
                     break
-                if asset not in fresh_rows or time.monotonic() - book['at'] > 10:
+                if asset not in eligible or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
                     continue
                 budget = min(self.settings['radar_budget_dollars'], self.totals()['cash'])
@@ -1825,7 +1828,7 @@ class PaperBot(Bot):
                 fee = quantity * fee_cents / 100
                 cost = round(quantity * price / 100 + fee, 8)
                 evidence = {'mode': 'paper', 'brain': RADAR_REVISION, 'majority': side,
-                            'yes_mid_pct': {a: str(fresh_rows[a]['yes']) for a in CORE_SERIES_15M},
+                            'yes_mid_pct': {a: str(fresh_rows[a]['yes']) for a in leaders},
                             'entry_asset': asset, 'entry_asset_yes_mid_pct': str(row['yes']),
                             'candidate_ask_cents': str(row['yes_ask' if side == 'UP' else 'no_ask']),
                             'cost': cost}
@@ -1852,28 +1855,20 @@ class PaperBot(Bot):
             except ValueError as exc:
                 errors[asset] = str(exc)
         rows = valid_radar_rows(rows, utcnow())
-        majority, yes, no, candidates = radar_decision(rows)
-        core_count = len(CORE_SERIES_15M.keys() & rows.keys())
-        if core_count < len(CORE_SERIES_15M):
-            summary = f'Datos insuficientes · {core_count}/5 principales vigentes'
-            majority, candidates = None, []
-        elif majority is None:
-            summary = f'Sin mayoría · {yes} SÍ / {no} NO'
-        else:
-            direction = 'SÍ' if majority == 'UP' else 'NO'
+        majority, _, candidates, _, _ = radar_decision(rows)
         notes = self._enter_radar(rows, candidates, majority)
-        # Publish one coherent snapshot before querying settlement or legacy positions.
         now = utcnow()
         display_rows = valid_radar_rows(rows, now)
-        core_count = len(CORE_SERIES_15M.keys() & display_rows.keys())
-        extra_count = len(EXTRA_SERIES_15M.keys() & display_rows.keys())
-        if core_count < len(CORE_SERIES_15M):
-            summary = f'Datos insuficientes · {core_count}/5 principales vigentes'
-            majority = None
-        elif majority is not None:
-            current_candidates = [asset for asset in candidates if asset in display_rows]
-            opportunity = (' · Candidatas: ' + ', '.join(current_candidates)
-                           if current_candidates else ' · Sin contrarias a 15¢ o menos')
+        majority, leaders, candidates, yes, no = radar_decision(display_rows)
+        radar_count = len(display_rows)
+        if radar_count < DIRECTION_MIN:
+            summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
+        elif majority is None:
+            summary = f'Sin mayoría de cinco · {yes} SÍ / {no} NO'
+        else:
+            direction = 'SÍ' if majority == 'UP' else 'NO'
+            opportunity = (' · Candidatas: ' + ', '.join(candidates)
+                           if candidates else ' · Sin contrarias a 15¢ o menos')
             summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
         display = []
         for asset in SERIES_15M:
@@ -1881,19 +1876,19 @@ class PaperBot(Bot):
             latest = self.last_quotes.get(asset)
             if row is None:
                 detail = errors.get(asset, 'Cotización vencida o fuera de la ronda actual.')
-                display.append({'asset': asset, 'extra': asset in EXTRA_SERIES_15M, 'detail': detail,
+                display.append({'asset': asset, 'detail': detail,
                                 'last_ticker': latest['ticker'] if latest else None})
                 continue
-            display.append({'asset': asset, 'extra': asset in EXTRA_SERIES_15M, 'ticker': row['ticker'],
+            display.append({'asset': asset, 'ticker': row['ticker'],
                             'yes': float(row['yes']), 'no': float(100 - row['yes']),
                             'yes_ask': float(row['yes_ask']), 'no_ask': float(row['no_ask']),
-                            'detail': notes.get(asset) or ('Candidata' if asset in candidates else 'Vigente')})
+                            'detail': notes.get(asset) or ('Marca dirección' if asset in leaders else 'Candidata' if asset in candidates else 'Vigente')})
         btc = display_rows.get('BTC', {}).get('market')
         with self.lock:
             self.snapshot.update(status='ACTIVO' if self.running else 'PAUSADO',
                                  signal='SÍ' if majority == 'UP' else 'NO' if majority == 'DOWN' else None,
                                  market=btc, target=get_target_from_market(btc) if btc else None,
-                                 radar=display, radar_count=core_count, radar_extra_count=extra_count, radar_summary=summary,
+                                 radar=display, radar_count=radar_count, radar_summary=summary,
                                  radar_close=round_close(now).isoformat(),
                                  message=summary, retention=summary, updated=now.isoformat())
         marks, settlement_errors = self._check_positions(display_rows)
@@ -2375,12 +2370,12 @@ const coinIcons = Object.freeze({
 });
 function coinLabel(row){
   const emblem = Object.hasOwn(coinIcons,row.asset) ? '<img class="coin-emblem" src="'+coinIcons[row.asset]+'" alt="" width="20" height="20">' : '';
-  return '<span class="coin-name">'+emblem+esc(row.asset)+(row.extra?' · Extra':'')+'</span>';
+  return '<span class="coin-name">'+emblem+esc(row.asset)+'</span>';
 }
 function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
 const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=(s.radar_count??0)+'/5 PRINCIPALES';$('#activeSignal').textContent=active||(s.radar_count===5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=(s.radar_count??0)+'/9 VIGENTES';$('#activeSignal').textContent=active||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent='15 ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||!s.books?.[p.ticker]||Date.now()>=Date.parse(s.books[p.ticker].expires)){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.books?.[p.ticker]?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
@@ -2392,7 +2387,7 @@ field.value=value;
 }loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}busy(!!pending);
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
-$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=(s.radar_summary||s.message)+' · '+(s.radar_extra_count??0)+'/4 extras vigentes';
+$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=(s.radar_summary||s.message)+' · '+(s.radar_count??0)+'/9 vigentes';
 endAt=s.radar_close?Date.parse(s.radar_close):null;$('#connectionNotice').textContent=(s.radar_summary||'Consultando la API pública.')+(s.settlement_errors?.length?' · Liquidación pendiente: '+s.settlement_errors.join(' / '):'');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.radar_count&&!isFresh(current)){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused');$('#radarSignal').textContent='ALPHA';$('#radarMode').textContent='ESPERANDO';$('#signalTitle').textContent='ACTUALIZANDO RONDA'}}
 window.addEventListener('message',e=>{
@@ -2537,7 +2532,7 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · 5 PRINCIPALES + 4 EXTRAS · SALDO VIRTUAL')
+    st.caption('SIMULACIÓN · 9 MONEDAS · 5 PARA CONFIRMAR · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
