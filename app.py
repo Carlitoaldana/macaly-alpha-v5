@@ -1146,7 +1146,8 @@ DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=50,
-                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10)
+                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10,
+                radar_budget_dollars=1, radar_stop_profit_cents=90)
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -1178,13 +1179,15 @@ def valid_settings(raw):
               'max_entries_round':(1,100),
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
-              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100)}
+              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
+              'radar_budget_dollars':(0.01,100000), 'radar_stop_profit_cents':(0,100)}
+    dollar_fields = {'max_trade_dollars', 'radar_budget_dollars'}
     out = {}
     for key, (low, high) in bounds.items():
         v = raw[key]
-        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (key != 'max_trade_dollars' and int(v) != v) or not low <= v <= high:
+        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (key not in dollar_fields and int(v) != v) or not low <= v <= high:
             raise ValueError(f'Valor inválido para {key}: {low}–{high}.')
-        out[key] = round(float(v), 2) if key == 'max_trade_dollars' else int(v)
+        out[key] = round(float(v), 2) if key in dollar_fields else int(v)
     if not isinstance(raw['close_on_reverse'], bool):
         raise ValueError('El cierre por cambio de señal debe ser sí o no.')
     out['close_on_reverse'] = raw['close_on_reverse']
@@ -1580,7 +1583,7 @@ EXTRA_SERIES_15M = {
     'ZEC': 'KXZEC15M', 'NEAR': 'KXNEAR15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-9x15-v3'
+RADAR_REVISION = 'radar-9x15-v4'
 ENTRY_LIMIT = 15
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
@@ -1686,6 +1689,7 @@ class PaperBot(Bot):
 
     def __init__(self, db_path=None, feed=None, extra_feed=None):
         super().__init__(db_path, feed)
+        self.radar_worker_revision = RADAR_REVISION
         self.extra_feed = extra_feed if extra_feed is not None else MarketData()
         self.pool = ThreadPoolExecutor(max_workers=len(SERIES_15M), thread_name_prefix='kalshi-read')
         self.last_quotes = {}
@@ -1716,6 +1720,7 @@ class PaperBot(Bot):
         with self.lock:
             positions = self.positions()
             manual = self.close_requested
+            stop_profit = self.settings['radar_stop_profit_cents']
         active = {row['ticker']: row['market'] for row in rows.values()}
         errors = []
         live_positions = {p['ticker'] for p in positions}
@@ -1723,7 +1728,7 @@ class PaperBot(Bot):
             ticker = p['ticker']
             legacy = p['round_close'] is None
             before_close = not legacy and now < market_time(p['round_close'])
-            if before_close and ticker not in active and not manual:
+            if before_close and ticker not in active and not (manual or 0 < stop_profit < 100):
                 continue
             if time.monotonic() < self.next_position_check.get(ticker, 0):
                 continue
@@ -1750,6 +1755,11 @@ class PaperBot(Bot):
                             self.manage(p, book, None, get_seconds_remaining(market))
                         elif self.close_requested:
                             self.manage(p, book, None, get_seconds_remaining(market))
+                        elif 0 < (target := self.settings['radar_stop_profit_cents']) < 100 and time.monotonic() - book['at'] <= 5:
+                            bids = [(price, size) for price, size in book[p['side']]['bids'] if price >= target]
+                            price = fill_book(bids, p['quantity'])
+                            if price is not None and utcnow() < market_time(market['close_time']):
+                                self._close(p, price, 'STOP PROFIT AUTOMÁTICO')
             except (ValueError, TypeError, KeyError, InvalidOperation) as exc:
                 errors.append(f'{ticker}: {exc}')
         self.next_position_check = {ticker: at for ticker, at in self.next_position_check.items() if ticker in live_positions}
@@ -1803,11 +1813,11 @@ class PaperBot(Bot):
                 if asset not in fresh_rows or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
                     continue
-                budget = min(1, self.totals()['cash'])
+                budget = min(self.settings['radar_budget_dollars'], self.totals()['cash'])
                 fee_cents = self.settings['fee_cents_per_contract']
                 sized = size_for_budget(book[side]['asks'], budget, fee_cents, ENTRY_LIMIT, allow_partial=True)
                 if sized is None:
-                    notes[asset] = 'Sin liquidez confirmada dentro de 15¢ y $1'
+                    notes[asset] = f'Sin liquidez confirmada dentro de 15¢ y ${budget:.2f}'
                     continue
                 quantity, price = sized
                 fee = quantity * fee_cents / 100
@@ -2181,7 +2191,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Tres votos entre BTC, ETH, SOL, XRP y BNB · DOGE, HYPE, ZEC y NEAR solo buscan entradas · 50% exacto es neutral · Hasta dos monedas distintas por ronda · Tope de $1 por entrada, incluida la comisión simulada.</div>
+<div class="notice">Tres votos entre BTC, ETH, SOL, XRP y BNB · DOGE, HYPE, ZEC y NEAR solo buscan entradas · 50% exacto es neutral · Hasta dos monedas distintas por ronda.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2189,7 +2199,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Plan de operación</h2>
 <div class="body">
 <div class="top-controls">
-<span>BTC · 15 minutos</span>
+<span>9 monedas · 15 minutos</span>
 <span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
 </div>
 <div class="strength">
@@ -2218,8 +2228,24 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Meta de ganancia acumulada ($)</label>
 <input type="number" name="goal" value="50" min="0" required><small>No se reinicia cada día. Ejemplo: capital $20 + meta $10 = saldo objetivo $30. Al alcanzarla se detienen las entradas.</small>
 </div>
-<div class="notice">Entradas de hasta $1 · Compra a 15¢ o menos · Dos entradas por ronda.</div>
-<div class="notice">Las nuevas entradas esperan el resultado oficial de Kalshi. El botón de cierre permite salir antes si hay liquidez.</div>
+<div class="field">
+<label for="radarBudget">Presupuesto virtual por moneda ($)</label>
+<input id="radarBudget" type="number" name="budget" value="1" min="0.01" max="100000" step="0.01" required>
+<small>Tope por entrada, incluida la comisión simulada.</small>
+</div>
+<div class="field">
+<label for="radarStopProfit">Stop Profit (%)</label>
+<select id="radarStopProfit" name="stopProfit">
+<option value="80">80%</option>
+<option value="85">85%</option>
+<option value="90" selected>90%</option>
+<option value="95">95%</option>
+<option value="100">100% (liquidación)</option>
+<option value="0">Desactivado</option>
+</select>
+<small>Cierra toda la posición si hay compradores suficientes al porcentaje elegido o superior. El 100% espera la liquidación oficial.</small>
+</div>
+<div class="notice">Compra a 15¢ o menos · Hasta dos monedas distintas por ronda.</div>
 </div>
 </article>
 </div>
@@ -2283,7 +2309,7 @@ const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const pct=v=>v==null?'—':Number(v).toFixed(2)+'%';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',budget:'radar_budget_dollars',stopProfit:'radar_stop_profit_cents'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Radar',conexion:'Conexión'};
 let lastRadarMarkup=null;
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
@@ -2295,7 +2321,7 @@ function action(action,payload={}){if(pending){toast('Esperando confirmación de
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>{action('command',{command:'start'})};$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y cerrar las posiciones del bot en el modo actual?'))action('command',{command:'close'})};
 const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
+form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal','budget','stopProfit']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
 $('#exportCSV').onclick=()=>action('export');
 function isFresh(s){return s.updated&&Date.now()-Date.parse(s.updated)<20000&&(!s.radar_close||Date.now()<Date.parse(s.radar_close))&&s.status!=='SIN DATOS'}
 const coinIcons = Object.freeze({
@@ -2321,7 +2347,11 @@ $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salida
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||!s.books?.[p.ticker]||Date.now()>=Date.parse(s.books[p.ticker].expires)){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.books?.[p.ticker]?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
 $('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
-if(!loaded||!dirty){for(const [name,key] of Object.entries(names))form.elements[name].value=String(s.settings[key]);loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
+if(!loaded||!dirty){for(const [name,key] of Object.entries(names)){
+const field=form.elements[name],value=String(s.settings[key]);
+if(name==='stopProfit'&&!Array.from(field.options).some(option=>option.value===value))field.add(new Option(value+'%',value));
+field.value=value;
+}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=(s.radar_summary||s.message)+' · '+(s.radar_extra_count??0)+'/4 extras vigentes';
@@ -2357,8 +2387,9 @@ class Controller:
                 reply['message'] = {'start': 'Simulación activada.', 'pause': 'Entradas pausadas.',
                                     'close': 'Cierre virtual solicitado.'}[command]
             elif action == 'settings':
-                if payload.keys() - {'starting_balance', 'daily_goal_dollars'}:
-                    raise ValueError('El radar admite ajustes de capital y meta.')
+                if payload.keys() - {'starting_balance', 'daily_goal_dollars',
+                                     'radar_budget_dollars', 'radar_stop_profit_cents'}:
+                    raise ValueError('El ajuste enviado no está disponible.')
                 self.bot.save_settings(payload)
                 reply.update(saved_settings=dict(self.bot.settings), message='Ajustes guardados.')
             elif action == 'export':
