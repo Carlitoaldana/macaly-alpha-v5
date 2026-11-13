@@ -1135,7 +1135,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from concurrent.futures import ThreadPoolExecutor
-from statistics import median
 from email.utils import parsedate_to_datetime
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -1588,7 +1587,7 @@ EXTRA_SERIES_15M = {
     'DOGE': 'KXDOGE15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-5x15-v8'
+RADAR_REVISION = 'radar-5x15-v7'
 DIRECTION_MIN = 3
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
@@ -1690,63 +1689,6 @@ def radar_decision(rows, entry_limit):
     return side, leaders, candidates, len(up), len(down)
 
 
-def read_spot_movement(asset):
-    pair = 'XBTUSD' if asset == 'BTC' else f'{asset}USD'
-    try:
-        data = requests.get('https://api.kraken.com/0/public/OHLC',
-                            params={'pair': pair, 'interval': 1, 'since': int(time.time()) - 1260},
-                            timeout=4).json()
-        if data['error']:
-            return None
-        candles = next(rows for key, rows in data['result'].items() if key != 'last')
-        if len(candles) < 12:
-            return None
-        latest = candles[-1]
-        observed = datetime.fromtimestamp(int(latest[0]), timezone.utc)
-        if not -5 <= (utcnow() - observed).total_seconds() <= 80:
-            return None
-        price = float(latest[4])
-        ranges = []
-        for previous, current in zip(candles[-12:-2], candles[-11:-1]):
-            if int(current[0]) - int(previous[0]) != 60:
-                return None
-            high, low, last_close = float(current[2]), float(current[3]), float(previous[4])
-            ranges.append(max(high - low, abs(high - last_close), abs(low - last_close)))
-        movement = median(ranges)
-        if all(math.isfinite(value) and value > 0 for value in (price, movement)):
-            return price, movement, observed
-    except (OSError, ValueError, TypeError, KeyError, IndexError, StopIteration):
-        pass
-    return None
-
-
-def entry_priority(rows, candidates, side, spot, now):
-    """Keep the original order unless every candidate has a comparable estimate."""
-    estimates = {}
-    for asset in candidates:
-        row = rows[asset]
-        market = row['market']
-        reading = spot.get(asset)
-        try:
-            target = float(market['floor_strike'])
-        except (KeyError, ValueError, TypeError):
-            continue
-        if (not reading or not math.isfinite(target) or target <= 0 or
-                market.get('strike_type') not in ('greater_or_equal', 'greater')):
-            continue
-        price, movement, observed = reading
-        seconds = (row['close'] - now).total_seconds()
-        if seconds <= 0 or not -5 <= (now - observed).total_seconds() <= 80:
-            continue
-        gap = max(0, target - price if side == 'UP' else price - target)
-        expected_move = movement * math.sqrt(seconds / 60)
-        estimates[asset] = {'target': target, 'spot': price, 'seconds_left': seconds,
-                            'distance': gap, 'score': gap / expected_move}
-    if len(estimates) != len(candidates):
-        return candidates, {}
-    return sorted(candidates, key=lambda asset: estimates[asset]['score']), estimates
-
-
 class PaperBot(Bot):
     """Simulación con cotizaciones públicas y un registro local de operaciones."""
 
@@ -1755,10 +1697,6 @@ class PaperBot(Bot):
         self.radar_worker_revision = RADAR_REVISION
         self.extra_feed = extra_feed if extra_feed is not None else MarketData()
         self.pool = ThreadPoolExecutor(max_workers=len(SERIES_15M), thread_name_prefix='kalshi-read')
-        self.spot_pool = ThreadPoolExecutor(max_workers=len(SERIES_15M), thread_name_prefix='kraken-read')
-        self.spot_jobs = {}
-        self.spot_readings = {}
-        self.next_spot_refresh = 0
         self.last_quotes = {}
         self.next_position_check = {}
         self.position_books = {}
@@ -1839,7 +1777,7 @@ class PaperBot(Bot):
         return {ticker: {**book, 'expires': (utcnow() + timedelta(seconds=max(0, 10 - (time.monotonic() - book['at'])))).isoformat()}
                 for ticker, book in marks.items()}, errors
 
-    def _enter_radar(self, rows, candidates, side, priority=None):
+    def _enter_radar(self, rows, candidates, side):
         notes = {}
         for asset in candidates:
             row = rows[asset]
@@ -1896,8 +1834,6 @@ class PaperBot(Bot):
                             'entry_asset': asset, 'entry_asset_yes_mid_pct': str(row['yes']),
                             'candidate_ask_cents': str(row['yes_ask' if side == 'UP' else 'no_ask']),
                             'cost': cost}
-                if priority and asset in priority:
-                    evidence['entry_priority'] = priority[asset]
                 opened = stamp()
                 with self.db:
                     self.db.execute(
@@ -1909,19 +1845,7 @@ class PaperBot(Bot):
                 notes[asset] = f'Entrada virtual · ${cost:.4f}'
         return notes
 
-    def _refresh_spot(self):
-        for asset, job in list(self.spot_jobs.items()):
-            if job.done():
-                self.spot_readings[asset] = job.result()
-                del self.spot_jobs[asset]
-        now = time.monotonic()
-        if not self.spot_jobs and now >= self.next_spot_refresh:
-            self.next_spot_refresh = now + 12
-            self.spot_jobs = {asset: self.spot_pool.submit(read_spot_movement, asset)
-                              for asset in SERIES_15M}
-
     def step(self):
-        self._refresh_spot()
         jobs = {asset: self.pool.submit(read_radar_series, feed, asset)
                 for series, feed in ((CORE_SERIES_15M, self.feed), (EXTRA_SERIES_15M, self.extra_feed))
                 for asset in series}
@@ -1936,15 +1860,12 @@ class PaperBot(Bot):
         with self.lock:
             entry_limit = self.settings['radar_entry_limit_cents']
         majority, _, candidates, _, _ = radar_decision(rows, entry_limit)
-        self._refresh_spot()
-        candidates, priority = entry_priority(rows, candidates, majority, self.spot_readings, utcnow())
-        notes = self._enter_radar(rows, candidates, majority, priority)
+        notes = self._enter_radar(rows, candidates, majority)
         now = utcnow()
         display_rows = valid_radar_rows(rows, now)
         with self.lock:
             entry_limit = self.settings['radar_entry_limit_cents']
         majority, leaders, candidates, yes, no = radar_decision(display_rows, entry_limit)
-        candidates, _ = entry_priority(display_rows, candidates, majority, self.spot_readings, now)
         radar_count = len(display_rows)
         if radar_count < DIRECTION_MIN:
             summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
@@ -1991,7 +1912,6 @@ class PaperBot(Bot):
             super().loop()
         finally:
             self.pool.shutdown(wait=True, cancel_futures=True)
-            self.spot_pool.shutdown(wait=True, cancel_futures=True)
 
     def view(self):
         result = super().view()
