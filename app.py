@@ -1142,12 +1142,14 @@ from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 API = 'https://external-api.kalshi.com/trade-api/v2'
+DEFAULT_RADAR_ENTRY_CENTS = 15
 DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=50,
                 fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10,
-                radar_budget_dollars=1, radar_stop_profit_cents=90)
+                radar_budget_dollars=1, radar_stop_profit_cents=90,
+                radar_entry_limit_cents=DEFAULT_RADAR_ENTRY_CENTS)
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -1180,7 +1182,8 @@ def valid_settings(raw):
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
-              'radar_budget_dollars':(0.01,100000), 'radar_stop_profit_cents':(0,100)}
+              'radar_budget_dollars':(0.01,100000), 'radar_stop_profit_cents':(0,100),
+              'radar_entry_limit_cents':(1,99)}
     dollar_fields = {'max_trade_dollars', 'radar_budget_dollars'}
     out = {}
     for key, (low, high) in bounds.items():
@@ -1587,7 +1590,6 @@ EXTRA_SERIES_15M = {
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
 RADAR_REVISION = 'radar-9x15-v5'
 DIRECTION_MIN = 5
-ENTRY_LIMIT = 15
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
 
@@ -1672,7 +1674,7 @@ def valid_radar_rows(rows, now):
             if row['close'] == close and time.monotonic() - row['at'] <= QUOTE_MAX_AGE}
 
 
-def radar_decision(rows):
+def radar_decision(rows, entry_limit):
     up = sorted((asset for asset, row in rows.items() if row['yes'] > 50),
                 key=lambda asset: (-rows[asset]['yes'], asset))
     down = sorted((asset for asset, row in rows.items() if row['yes'] < 50),
@@ -1683,7 +1685,7 @@ def radar_decision(rows):
         side, leaders, opposite, ask = 'DOWN', down[:DIRECTION_MIN], up, 'no_ask'
     else:
         return None, [], [], len(up), len(down)
-    candidates = sorted((asset for asset in opposite if rows[asset][ask] <= ENTRY_LIMIT),
+    candidates = sorted((asset for asset in opposite if rows[asset][ask] <= entry_limit),
                         key=lambda asset: (rows[asset][ask], asset))
     return side, leaders, candidates, len(up), len(down)
 
@@ -1811,7 +1813,8 @@ class PaperBot(Bot):
                 if not self.running or self.close_requested:
                     break
                 fresh_rows = valid_radar_rows(rows, utcnow())
-                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows)
+                entry_limit = self.settings['radar_entry_limit_cents']
+                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit)
                 if fresh_side != side:
                     notes[asset] = 'Se perdió la confirmación de cinco monedas durante la verificación'
                     break
@@ -1820,9 +1823,9 @@ class PaperBot(Bot):
                     continue
                 budget = min(self.settings['radar_budget_dollars'], self.totals()['cash'])
                 fee_cents = self.settings['fee_cents_per_contract']
-                sized = size_for_budget(book[side]['asks'], budget, fee_cents, ENTRY_LIMIT, allow_partial=True)
+                sized = size_for_budget(book[side]['asks'], budget, fee_cents, entry_limit, allow_partial=True)
                 if sized is None:
-                    notes[asset] = f'Sin liquidez confirmada dentro de 15¢ y ${budget:.2f}'
+                    notes[asset] = f'Sin liquidez confirmada dentro de {entry_limit}¢ y ${budget:.2f}'
                     continue
                 quantity, price = sized
                 fee = quantity * fee_cents / 100
@@ -1855,11 +1858,15 @@ class PaperBot(Bot):
             except ValueError as exc:
                 errors[asset] = str(exc)
         rows = valid_radar_rows(rows, utcnow())
-        majority, _, candidates, _, _ = radar_decision(rows)
+        with self.lock:
+            entry_limit = self.settings['radar_entry_limit_cents']
+        majority, _, candidates, _, _ = radar_decision(rows, entry_limit)
         notes = self._enter_radar(rows, candidates, majority)
         now = utcnow()
         display_rows = valid_radar_rows(rows, now)
-        majority, leaders, candidates, yes, no = radar_decision(display_rows)
+        with self.lock:
+            entry_limit = self.settings['radar_entry_limit_cents']
+        majority, leaders, candidates, yes, no = radar_decision(display_rows, entry_limit)
         radar_count = len(display_rows)
         if radar_count < DIRECTION_MIN:
             summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
@@ -1868,7 +1875,7 @@ class PaperBot(Bot):
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
             opportunity = (' · Candidatas: ' + ', '.join(candidates)
-                           if candidates else ' · Sin contrarias a 15¢ o menos')
+                           if candidates else f' · Sin contrarias a {entry_limit}¢ o menos')
             summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
         display = []
         for asset in SERIES_15M:
@@ -2104,7 +2111,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <strong class="green" id="executionModeLabel">● SIMULACIÓN</strong>
 </div>
 </header>
-<div class="demo"><span id="liveMessage">Consultando la API pública de Kalshi…</span></div>
 <div class="section-title">
 <b id="pageNum">01</b>
 <span id="pageTitle">Resumen</span>
@@ -2128,8 +2134,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <span class="rnum s">30</span>
 <span class="rnum w">45</span>
 <div class="radar-core">
-<b id="radarSignal">ALPHA</b>
-<small id="radarMode">EDGE</small>
+<b id="radarSignal">—</b>
 </div>
 </div>
 <div class="radar-meta">
@@ -2225,6 +2230,11 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <small>Tope por entrada, incluida la comisión simulada.</small>
 </div>
 <div class="field">
+<label for="radarEntryLimit">Límite de entrada (¢)</label>
+<input id="radarEntryLimit" type="number" name="entryLimit" value="15" min="1" max="99" step="1" required>
+<small>Precio máximo por contrato para una entrada virtual.</small>
+</div>
+<div class="field">
 <label for="radarStopProfit">Stop Profit (%)</label>
 <select id="radarStopProfit" name="stopProfit">
 <option value="80">80%</option>
@@ -2236,7 +2246,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </select>
 <small>Cierra toda la posición si hay compradores suficientes al porcentaje elegido o superior. El 100% espera la liquidación oficial.</small>
 </div>
-<div class="notice">Compra a 15¢ o menos · Hasta dos monedas distintas por ronda.</div>
+<div class="notice">Hasta dos monedas distintas por ronda.</div>
 </div>
 </article>
 </div>
@@ -2320,7 +2330,7 @@ const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const pct=v=>v==null?'—':Number(v).toFixed(2)+'%';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',budget:'radar_budget_dollars',stopProfit:'radar_stop_profit_cents'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',budget:'radar_budget_dollars',entryLimit:'radar_entry_limit_cents',stopProfit:'radar_stop_profit_cents'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Radar',conexion:'Conexión'};
 let lastRadarMarkup=null;
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,lastReply=null,endAt=null;
@@ -2335,7 +2345,7 @@ function settingsFeedback(message, style=''){
 function busy(on){
   for(const s of ['#start','#pause','#close','#exportCSV'])$(s).disabled=on;
   $('#settings button[type=submit]').disabled=on||!loaded;
-  for(const name of ['goal','budget','stopProfit'])form.elements[name].disabled=on;
+  for(const name of ['goal','budget','entryLimit','stopProfit'])form.elements[name].disabled=on;
   form.elements.balance.disabled=on||!!current?.running||!!current?.positions.length;
 }
 function action(kind,payload={}){
@@ -2433,8 +2443,8 @@ kalshiAccount.onsubmit=e=>{
 function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
 const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=(s.radar_count??0)+'/9 VIGENTES';$('#activeSignal').textContent=active||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
-$('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent='15 ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active==='SÍ'?'UP':active==='NO'?'DOWN':'—';$('#activeSignal').textContent=active||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.radar_entry_limit_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 renderPositions(s,fresh);$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
 if(!loaded||!dirty){for(const [name,key] of Object.entries(names)){
@@ -2444,9 +2454,9 @@ field.value=value;
 }loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}busy(!!pending);
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
-$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=(s.radar_summary||s.message)+' · '+(s.radar_count??0)+'/9 vigentes';
+$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=s.radar_summary||s.message;
 endAt=s.radar_close?Date.parse(s.radar_close):null;$('#connectionNotice').textContent=(s.radar_summary||'Consultando la API pública.')+(s.settlement_errors?.length?' · Liquidación pendiente: '+s.settlement_errors.join(' / '):'');height();tick()}
-function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.radar_count&&!isFresh(current)){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused');$('#radarSignal').textContent='ALPHA';$('#radarMode').textContent='ESPERANDO';$('#signalTitle').textContent='ACTUALIZANDO RONDA'}}
+function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.radar_count&&!isFresh(current)){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused');$('#radarSignal').textContent='—';$('#signalTitle').textContent='ACTUALIZANDO RONDA'}}
 window.addEventListener('message',e=>{
   if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;
   const {reply,snapshot}=e.data.args||{};
@@ -2551,7 +2561,8 @@ class Controller:
                                     'close': 'Cierre virtual solicitado.'}[command]
             elif action == 'settings':
                 if payload.keys() - {'starting_balance', 'daily_goal_dollars',
-                                     'radar_budget_dollars', 'radar_stop_profit_cents'}:
+                                     'radar_budget_dollars', 'radar_stop_profit_cents',
+                                     'radar_entry_limit_cents'}:
                     raise ValueError('El ajuste enviado no está disponible.')
                 self.bot.save_settings(payload)
                 reply['message'] = 'Ajustes guardados y aplicados.'
