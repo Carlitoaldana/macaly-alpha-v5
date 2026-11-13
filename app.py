@@ -1580,16 +1580,15 @@ class Bot:
 
 
 CORE_SERIES_15M = {
-    'BTC': 'KXBTC15M', 'ETH': 'KXETH15M', 'SOL': 'KXSOL15M',
-    'XRP': 'KXXRP15M', 'BNB': 'KXBNB15M',
+    'BTC': 'KXBTC15M', 'ETH': 'KXETH15M', 'XRP': 'KXXRP15M',
+    'SOL': 'KXSOL15M',
 }
 EXTRA_SERIES_15M = {
-    'DOGE': 'KXDOGE15M', 'HYPE': 'KXHYPE15M',
-    'ZEC': 'KXZEC15M', 'NEAR': 'KXNEAR15M',
+    'DOGE': 'KXDOGE15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-9x15-v5'
-DIRECTION_MIN = 5
+RADAR_REVISION = 'radar-5x15-v7'
+DIRECTION_MIN = 3
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
 
@@ -1704,7 +1703,7 @@ class PaperBot(Bot):
         self.snapshot['mode'] = 'SIMULACIÓN'
         self.snapshot['radar'] = [{'asset': asset, 'detail': 'Consultando'} for asset in SERIES_15M]
         self.snapshot['updated'] = stamp()
-        self.snapshot['radar_summary'] = 'Consultando las nueve monedas del radar.'
+        self.snapshot['radar_summary'] = 'Consultando las cinco monedas del radar.'
         if 'round_close' not in {r[1] for r in self.db.execute('PRAGMA table_info(trades)')}:
             self.db.execute('ALTER TABLE trades ADD COLUMN round_close TEXT')
         self.db.execute('CREATE INDEX IF NOT EXISTS trades_round_close ON trades(round_close)')
@@ -1816,7 +1815,7 @@ class PaperBot(Bot):
                 entry_limit = self.settings['radar_entry_limit_cents']
                 fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit)
                 if fresh_side != side:
-                    notes[asset] = 'Se perdió la confirmación de cinco monedas durante la verificación'
+                    notes[asset] = 'Se perdió la confirmación de tres monedas durante la verificación'
                     break
                 if asset not in eligible or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
@@ -1871,7 +1870,7 @@ class PaperBot(Bot):
         if radar_count < DIRECTION_MIN:
             summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
         elif majority is None:
-            summary = f'Sin mayoría de cinco · {yes} SÍ / {no} NO'
+            summary = f'Sin mayoría de tres · {yes} SÍ / {no} NO'
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
             opportunity = (' · Candidatas: ' + ', '.join(candidates)
@@ -2088,7 +2087,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <footer>
 <span class="gold" id="executionFooter">SIMULACIÓN</span>
-<br>9 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
+<br>5 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
 <span class="green"><span id="feedStatus">● Esperando datos</span></span>
 </footer>
 </aside>
@@ -2100,7 +2099,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <div>
 <small>MERCADO</small>
-<strong>9 MONEDAS · 15 MINUTOS</strong>
+<strong>5 MONEDAS · 15 MINUTOS</strong>
 </div>
 <div>
 <small>SESIÓN</small>
@@ -2187,7 +2186,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Tres votos entre BTC, ETH, SOL, XRP y BNB · DOGE, HYPE, ZEC y NEAR solo buscan entradas · 50% exacto es neutral · Hasta dos monedas distintas por ronda.</div>
+<div class="notice">Tres monedas vigentes del mismo lado confirman la dirección · 50% exacto es neutral · Hasta dos monedas distintas por ronda.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2195,7 +2194,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Plan de operación</h2>
 <div class="body">
 <div class="top-controls">
-<span>9 monedas · 15 minutos</span>
+<span>5 monedas · 15 minutos</span>
 <span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
 </div>
 <div class="strength">
@@ -2386,7 +2385,6 @@ const coinIcons = Object.freeze({
   "BNB": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAWlBMVEUAAAD/1VX0uzLzuzD0uzDzuy/zuy/0vzXzuzDzujD/20nzui/0ui/zuy/0vDL0ui/0uzPzuy/zui/zvDf87cv43Jb77cr////53Jf0wkj0w0r99+fzuzPzvjyEp4rmAAAAEnRSTlMABkeVv9nzGJbxB4L0xy7jLfK6UobZAAAA6ElEQVR42oVT2RKDIAxExVtrGw7P/v9vFkqqRDqTfdLZJUvCRlzI8kKWVVXKIs9Eirpp4UTb1De66wcgGPqOHB8hwRgVeUzwB9PzPI98oqjRP66/LLFLuEcf8/McK/qvwUB4ohi8SUN4DwMnGje/lvD7ThRtJnLKbxtV5KIAxGE9D+AV9gBEISR+vUFZxyvlFFa53wApSqzvyRWU1gpWL0KXUlSBD+WVnmetgk1QVCgwiQDH8fpZmLvFghbsJaM29dWmvtpkB8WOmn+s9LkNee40MIYEJo2cIZHjQsvGnl8cfvX45WXX/wODgTtdutF+1wAAAABJRU5ErkJggg==",
   "DOGE": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAolBMVEUAAADVqlXbtknKqjXGqjnIpjfGqTbEpzXDpjXEpzXEpzTEpzXDpzXDpjXEpjXEpjXDpzTDpjTDpjT////ayIL49erUv27byYXczIvez5Hf0JXh0pni1J3i1J7j1qHk16Xm2qzr4bzt5MPu5sfEqDj59uv6+O/7+fL8+vXJr0j28uH49OfNtljWwnbQuWDRu2bz7df8+/b8+/f+/fz+/v3z7tgLl5/YAAAAEnRSTlMABgcYLS5HgpWWv8fZ4/Hy8/TT2gOVAAAA6ElEQVR4XoWT53LEIAyEZV8CLhzBK7hL773X93+1TBzN2Qxzo+/nsqAFJJqoTNO5EFzXmIpKFq3HBt8uKKe2AzIGW2fbexT0s0N2lyjBcmezX9YLhwSpe2yh/89hsRU7FpD8OOaRj8fzZwjDX5EWk0H4OoTQElV+ZjhYrV72r5g5iuYrMpgZ3kY1fvLTtYiGmtKAE+a1iA11pQEP33whYkcOQrxkPo0xvgK44XdRHQUILJwB+OE7UcNkSPfMtymlo8ywR67IkJdQQ6rXVB9KfWrts9Tv1hpGbTmtadW21wdHHz19eNXx/wXfGj2DvsSdawAAAABJRU5ErkJggg==",
   "HYPE": "data:image/png;base64,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",
-  "ZEC": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAwFBMVEUAAAD/1VX/tkn0tUrutUTut0jttETts0XstETss0Tss0TtskXss0Tts0Xts0XsskTsskTss0X////sskTww2/wxnXvwWjttk/00pP11pz1157226n+/PnvvmLuvWDss0jstEnstU3sskXxyHryy4HyzYbz0I3tt1Huulfuu1r12KLuvFz23Kr23a733rH337L34rr45L345cD45cH45sL558X56cr78uD88+P9+fL9+vTuvF3+/fz+/vz+/v7uvF59KQaRAAAAEnRSTlMABgcYLS5HgpWWv8fZ4/Hy8/TT2gOVAAABE0lEQVR4XoWT53bDIAyFwWltQ4jrSB7ZnXvvPd7/rYrbWogTzuH7yb0goSEcMs21KUuj81SKdQaqQKJQA+GTZGP0GGeJd32IawzZI5sjDDDaoPtc547/NxL2/hXABYvyl0eGYYMl+w3Q57/TNM0dwH1d16f9X7ogqrcvgZj2Z0oIWQQMM6qYFCkGDBM6TEVOhu1Vx6XVF+dkyIVGj/1PgK8DJLQwyFm+AcAZOowoud6+WP0RGaVn2Huy+vMuMra8EHOrv34jx/AkD63+UaOHZt98XwDAfNXRum+yQk2AOHKFYqWeBQyFZM2aBgyKt/ukqqoHgBvb9WNqd2BgrtGRhUbulo9cbGijYx9fnPjqxZc3uv4/maM/VJ+hnH0AAAAASUVORK5CYII=",
   "NEAR": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAABWGlDQ1BJQ0MgUHJvZmlsZQAAeJx9kLFLw1AQxr9WpaB1EB0cHDKJQ5SSCro4tBVEcQhVweqUvqapkMZHkiIFN/+Bgv+BCs5uFoc6OjgIopPo5uSk4KLleS+JpCJ6j+N+fO+74zggOW5wbvcDqDu+W1zKK5ulLSX1jAS9IAzm8Zyur0r+rj/j/T703k7LWb///43Biukxqp+UGcZdH0ioxPqezyXvE4+5tBRxS7IV8onkcsjngWe9WCC+JlZYzagQvxCr5R7d6uG63WDRDnL7tOlsrMk5lBNYxA48cNgw0IQCHdk//LOBv4BdcjfhUp+FGnzqyZEiJ5jEy3DAMAOVWEOGUpN3ju53F91PjbWDJ2ChI4S4iLWVDnA2Rydrx9rUPDAyBFy1ueEagdRHmaxWgddTYLgEjN5Qz7ZXzWrh9uk8MPAoxNskkDoEui0hPo6E6B5T8wNw6XwBA6diE8HYWhMAAAdbSURBVHjaZVZrjF1VGV3r2/uee+feMtPOTKdi2wzFoqBoS6pogAQFEtEUCiGoiUGDBOIf/SGFNMForMGIhqAJiBglRsBXQCwYFZHEVwSLFAhCGpiUUF59zUxn7sx9nb2/5Y9zB0R2zo/z4+xvr7P29621uFguURCRo82p80rn2GJul7kUjABAAMLKGySAoIMiTSIEyA0OqzOuCavWNyfH2IgucwKImUHmPfP9ywefOvr8YS0txUHJFARUxarygMjqhZKTAoNgklPZkMmawqoU11nrAxMnn97a1EKkK5Lom/9rcf/f5/cnZtSDjDXGALkomrkCXECqCprMc4AgWoXSZATpdPRiOjCYOzS72E79j46dVsuMJPd3Xnt89vlUTynSoJAlysHgcHo2QRBAZZNLcjpBghkugK4gmAuGbETD+qXvPbJ/Mo6d0Zq2DgZPHX9pPqYAktBwobSQTYA7URqcCEJQJhygg066yemgDCLNYVkgGaK1G9q38OKC+naouzibl3JN2aTsSZ6NMIrKBOhEdsKc5hDhBBVMkZI5KBBysB/oMYBw96Rc1nmkXHitOxvnc2fQ7xYFMxJFkCIhr5XJCIKWHQZCmUhGwMRYXbmyikzCEhGy4MlMAp2IpjL32mk5ZiWDgns2F6LRAEhq1ZqNJHeVI7FdLucAcwQxAwaJ7vKi1mwOAqRunf1ymXRBgploWVEQPAZIkBsgA2kZkreKkflnDv7xe/e059vnXXXpe7efMzeYFxBEGaiBpHqo9w/O33XTnb2l3vavXDG+dbpTLhhhMMpISRlgJOBE5rDPCRGoIz76kwdeeeBpAA/+59bWSGv6/C1z/ePZ6HRTMoTR3LjnW7e8fN8TAB5r/eay23aWIiRQEDOVAkWYA04IBEgYQJF0pU6iEZFpvv/gDbfPzxwaaY4md6cyOd4Y+/evH5q57wkaaMztAcRsMVtIZpAkOM0FcwJEEIPogAg3zyYa5ZratGF0enxh5uivrr/FXu+MFE2VatVHjz736h9uvHPt6dPv3PoeuUKsQcFlAB3u5kE0MZMmgJIgoJonQHCQZgA2nrH5U7u/bKPF7N9mfvv1O0a6sRXrjbbu/+YPRqfXXfPTG9ecumEoVHIAkFFMQaLMScAqtRKUDeYAXVQQkQVgtnf8fZecdf6uz6KOmfv++fDNd687YfKRX+7pFvzCXd9ubB7r9BcAKGQiVTNYyaIowU2IQ/0Ch/BXFmUAyHis0z77yotnX3p53x1/fvxHe9Zv3rj13LO2XnwBJov5/gKDAUhmbqBXWFm4RFWHGUCuyOTKYaAgZQDGmCzNcfHCXZ87afv70cXvdv+4e3hxYv3kYn+xKCIryG6ZEGWQiRCq+gQNb1uqmjVU8u8IuZs7WNP8/HduGN+2KR3t/eK6W449eWCyMer9EiKAmEhAcGpIha9gNlQ9hTd1f0iXZ6Aa8TR1wtSr+2aefPaZy2/eWWwc7T9/bM+u23io36q1XNU2NziHTYjKhoYHUAQqcwGNlU4YLHqoGmqiNXH4Hy/8/Lqb2nPHNp397h27rw6ra68/OnPv126tp3oR6hUOABkQSMGragAB+x/mIQE+VP9MAlit5ov3773rim9s3rrl3E9fePDIi6ftOOdjOz+DBl64//E/ffdnzRSGdidSVsEPMsPwL+Lb+AcJEdkI4MDe5559+LHmSet2XHvVfF6Q+Wzv+NlXXzL36pF9tz/0lx/eWzRHACiLMpKCBLGqzoqiFU+HKkcnwSzvD3pm1j40Vyp94qvXxHXNXr9rFuk+p6VPXn/lpou2+VIuj3fNLHvOGPqrIWcwg29c8pskkSTo7hY4dcoGd1fWmV/ccep5W+f7CzEUrsBoyb3Tsktv/NL4R6bzILv76s0bFQKyg9ngNuT/DYpomRmEieYIsG7unXP1RcX4CGvxw5d9fDEvBVCZIAEGops7zfXNy79/7dN7/lprNT546QV97xKAQqXHEQKUID6y+Nzvjz3RWZVDdiHQTcEzUsOKWBQ09pa7VR8Pg9EKn4SKeqNW1A3sdJbKXA6TFGAipXqX56/9UAyw6IzJo5SZ3eAAGAapHAwGVRtzZacIAhJMjLLc7Q+6fYdgIAFJhIhEGBlZazDGDY3x1TbSRuk1jwnBZaBIIMAIQnLBVI0sAMEIEkkZgQ6JMBISq+8AAe6h7rWpeIKdWFt94qq1PkBQSFQ2d8oJUTB3ZUHkMCKyyoqSIIUgGhGsCmQIojmDKwQVoceTVq3b2FhtUdy25tT1WoNuoNUqw/GV1AmSxuEd/P/EOOWowouLIkQqBNZS6VNqbVtzSgPRXHxXXLv9HWdOYRTLzkw6TVQFF0TleW99BEkuOOFwN8mkkFEbuC33J9C44MQtm4up7GByDTwrhFfKo3uP7z/QP7yEQSmHDS2cemu+hgA65VSUBQfATIooFMbVOLmYPH3i5Ok4UWQaa8wpZbMMBWIZgzm1l/qdJBftjWHB2xgSAVUxDQKdAlRjHKuPrOVYAdJTjUEl/wtMv4wTeanRtgAAAABJRU5ErkJggg=="
 });
 function coinLabel(row){
@@ -2654,7 +2652,7 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · 9 MONEDAS · 5 PARA CONFIRMAR · SALDO VIRTUAL')
+    st.caption('SIMULACIÓN · 5 MONEDAS · 3 PARA CONFIRMAR · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
