@@ -1443,19 +1443,21 @@ class Bot:
             merged = dict(self.settings)
             merged.update(raw)
             settings = valid_settings(merged)
-            account_message=''
-            if settings['starting_balance'] != self.settings['starting_balance']:
-                if self.running or self.positions():
-                    raise ValueError('Para empezar con otro capital, pausa las entradas y espera a que no haya posición abierta. No se borrará el historial.')
-                previous=self.totals()
-                baseline=self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
-                self.put('account_start_id',baseline)
-                account_message=f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
-            self.settings=settings
-            self.put('settings',settings)
-            self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
-                            (settings['take_profit_pct'],))
-            self.event('AJUSTES',account_message+'Ajustes guardados. Meta de ganancia acumulada; Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
+            account_message = ''
+            with self.db:
+                if settings['starting_balance'] != self.settings['starting_balance']:
+                    if self.running or self.positions():
+                        raise ValueError('Para empezar con otro capital, pausa las entradas y espera a que no haya posición abierta. No se borrará el historial.')
+                    previous = self.totals()
+                    baseline = self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
+                    self.put('account_start_id', baseline)
+                    account_message = f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
+                self.put('settings', settings)
+                self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
+                                (settings['take_profit_pct'],))
+                self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
+                                (stamp(), 'AJUSTES', account_message + 'Ajustes guardados y aplicados.'))
+            self.settings = settings
 
     def command(self,name):
         with self.lock:
@@ -2022,6 +2024,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 .empty{text-align:center;color:var(--muted);padding:50px 20px}
 .hidden{display:none!important}
 .notice{padding:16px;border:1px solid #4a638d;margin-top:12px;line-height:1.6;color:var(--muted);font-size:11px;border-radius:5px}
+#settingsFeedback.success{background:#163f3b;color:#b9ffe6;border-color:#4ce4b6}
+#settingsFeedback.error{color:#fecaca;border-color:#f87171}
 .toast{position:fixed;right:20px;bottom:20px;background:#163f3b;color:#b9ffe6;border:1px solid #4ce4b6;padding:15px 25px;border-radius:6px;z-index:10;box-shadow:0 6px 30px #0008}
 .strength{height:8px;border-radius:5px;background:#0b1630;margin:15px 0;overflow:hidden}
 .strength i{display:block;height:100%;width:0;background:var(--gold)}
@@ -2249,7 +2253,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 </div>
-<button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
+<button type="submit" class="primary save" disabled>GUARDAR Y APLICAR AJUSTES</button>
+<p id="settingsFeedback" class="notice hidden" role="status"></p>
 </form>
 <div class="notice">La meta usa la ganancia acumulada. El historial se conserva al cambiar el capital.</div>
 </section>
@@ -2312,16 +2317,49 @@ const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/N
 const names={balance:'starting_balance',goal:'daily_goal_dollars',budget:'radar_budget_dollars',stopProfit:'radar_stop_profit_cents'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Radar',conexion:'Conexión'};
 let lastRadarMarkup=null;
-let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
+let dirty=false,loaded=false,current=null,pending=null,sequence=0,lastReply=null,endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
 let lastHeight=0;function height(){let h=Math.max(650,document.documentElement.scrollHeight);if(h!==lastHeight){lastHeight=h;post('streamlit:setFrameHeight',{height:h})}}
 function toast(msg){$('#toast').textContent=msg;$('#toast').classList.remove('hidden');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),4500)}
-function busy(on){for(const s of ['#start','#pause','#close','#exportCSV','#settings button[type=submit]'])$(s).disabled=on}
-function action(action,payload={}){if(pending){toast('Esperando confirmación del servidor.');return}let id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);pending=id;busy(true);post('streamlit:setComponentValue',{value:{id,action,payload},dataType:'json'});setTimeout(()=>{if(pending===id){pending=null;busy(false);toast('Sin confirmación del servidor. Revisa Registro antes de repetir.')}},25000)}
+function settingsFeedback(message, style=''){
+  const notice=$('#settingsFeedback');
+  notice.textContent=message;
+  notice.className='notice '+style;
+}
+function busy(on){
+  for(const s of ['#start','#pause','#close','#exportCSV'])$(s).disabled=on;
+  $('#settings button[type=submit]').disabled=on||!loaded;
+  for(const name of ['goal','budget','stopProfit'])form.elements[name].disabled=on;
+  form.elements.balance.disabled=on||!!current?.running||!!current?.positions.length;
+}
+function action(kind,payload={}){
+  if(pending){toast('Esperando confirmación del servidor.');return}
+  const id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);
+  pending=id;
+  busy(true);
+  if(kind==='settings')settingsFeedback('Guardando ajustes…');
+  post('streamlit:setComponentValue',{value:{id,action:kind,payload},dataType:'json'});
+  setTimeout(()=>{
+    if(pending!==id)return;
+    pending=null;
+    busy(false);
+    const message='El servidor no confirmó el cambio. Revisa Registro antes de repetir.';
+    if(kind==='settings')settingsFeedback(message,'error');else toast(message);
+  },25000);
+}
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>{action('command',{command:'start'})};$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y cerrar las posiciones del bot en el modo actual?'))action('command',{command:'close'})};
-const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal','budget','stopProfit']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
+const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';$('#settingsFeedback').classList.add('hidden')};
+form.onsubmit=e=>{
+  e.preventDefault();
+  if(!loaded||pending)return;
+  const cfg={};
+  for(const [name,key] of Object.entries(names)){
+    const field=form.elements[name],value=Number(field.value);
+    if(!field.disabled&&value!==current.settings[key])cfg[key]=value;
+  }
+  action('settings',cfg);
+};
 $('#exportCSV').onclick=()=>action('export');
 function isFresh(s){return s.updated&&Date.now()-Date.parse(s.updated)<20000&&(!s.radar_close||Date.now()<Date.parse(s.radar_close))&&s.status!=='SIN DATOS'}
 const coinIcons = Object.freeze({
@@ -2351,13 +2389,36 @@ if(!loaded||!dirty){for(const [name,key] of Object.entries(names)){
 const field=form.elements[name],value=String(s.settings[key]);
 if(name==='stopProfit'&&!Array.from(field.options).some(option=>option.value===value))field.add(new Option(value+'%',value));
 field.value=value;
-}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
+}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}busy(!!pending);
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=(s.radar_summary||s.message)+' · '+(s.radar_extra_count??0)+'/4 extras vigentes';
 endAt=s.radar_close?Date.parse(s.radar_close):null;$('#connectionNotice').textContent=(s.radar_summary||'Consultando la API pública.')+(s.settlement_errors?.length?' · Liquidación pendiente: '+s.settlement_errors.join(' / '):'');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.radar_count&&!isFresh(current)){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused');$('#radarSignal').textContent='ALPHA';$('#radarMode').textContent='ESPERANDO';$('#signalTitle').textContent='ACTUALIZANDO RONDA'}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+window.addEventListener('message',e=>{
+  if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;
+  const {reply,snapshot}=e.data.args||{};
+  const confirmed=reply?.id&&reply.id!==lastReply&&(!pending||pending===reply.id);
+  if(confirmed&&reply.kind==='settings'&&reply.ok){dirty=false;loaded=false}
+  if(snapshot)update(snapshot);
+  if(!confirmed)return;
+  lastReply=reply.id;
+  pending=null;
+  busy(false);
+  if(reply.kind==='settings'){
+    settingsFeedback(reply.message,reply.ok?'success':'error');
+  }else{
+    if(reply.csv){
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));
+      a.download='alpha_historial.csv';
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+    }
+    toast(reply.message);
+  }
+  height();
+});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
@@ -2391,7 +2452,7 @@ class Controller:
                                      'radar_budget_dollars', 'radar_stop_profit_cents'}:
                     raise ValueError('El ajuste enviado no está disponible.')
                 self.bot.save_settings(payload)
-                reply.update(saved_settings=dict(self.bot.settings), message='Ajustes guardados.')
+                reply['message'] = 'Ajustes guardados y aplicados.'
             elif action == 'export':
                 stream = io.StringIO()
                 writer = csv.writer(stream)
@@ -2484,16 +2545,16 @@ def streamlit_main():
     if not index.exists():index.write_text(_TERMINAL_HTML,encoding='utf-8')
     terminal=components.declare_component('alpha_edge_terminal',path=str(directory))
 
+    def handle_terminal_change():
+        event = st.session_state.get('alpha_terminal')
+        reply = controller.handle(event)
+        if reply:
+            st.session_state.alpha_reply = reply
+
     @st.fragment(run_every=2)
     def live_terminal():
-        event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
-        if isinstance(event,dict) and event.get('action')=='ack':
-            st.session_state.alpha_reply=None
-        elif isinstance(event,dict) and event.get('id') not in controller.seen:
-            reply=controller.handle(event)
-            if reply:
-                st.session_state.alpha_reply=reply
-                st.rerun()
+        terminal(snapshot=controller.snapshot(), reply=st.session_state.get('alpha_reply'),
+                 key='alpha_terminal', default=None, on_change=handle_terminal_change)
     live_terminal()
 
 if __name__=='__main__':
