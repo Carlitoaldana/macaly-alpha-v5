@@ -1146,7 +1146,8 @@ DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=50,
-                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10)
+                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10,
+                radar_budget_dollars=1, radar_stop_profit_cents=90)
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -1178,13 +1179,15 @@ def valid_settings(raw):
               'max_entries_round':(1,100),
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
-              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100)}
+              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
+              'radar_budget_dollars':(0.01,100000), 'radar_stop_profit_cents':(0,100)}
+    dollar_fields = {'max_trade_dollars', 'radar_budget_dollars'}
     out = {}
     for key, (low, high) in bounds.items():
         v = raw[key]
-        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (key != 'max_trade_dollars' and int(v) != v) or not low <= v <= high:
+        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (key not in dollar_fields and int(v) != v) or not low <= v <= high:
             raise ValueError(f'Valor inválido para {key}: {low}–{high}.')
-        out[key] = round(float(v), 2) if key == 'max_trade_dollars' else int(v)
+        out[key] = round(float(v), 2) if key in dollar_fields else int(v)
     if not isinstance(raw['close_on_reverse'], bool):
         raise ValueError('El cierre por cambio de señal debe ser sí o no.')
     out['close_on_reverse'] = raw['close_on_reverse']
@@ -1440,19 +1443,21 @@ class Bot:
             merged = dict(self.settings)
             merged.update(raw)
             settings = valid_settings(merged)
-            account_message=''
-            if settings['starting_balance'] != self.settings['starting_balance']:
-                if self.running or self.positions():
-                    raise ValueError('Para empezar con otro capital, pausa las entradas y espera a que no haya posición abierta. No se borrará el historial.')
-                previous=self.totals()
-                baseline=self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
-                self.put('account_start_id',baseline)
-                account_message=f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
-            self.settings=settings
-            self.put('settings',settings)
-            self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
-                            (settings['take_profit_pct'],))
-            self.event('AJUSTES',account_message+'Ajustes guardados. Meta de ganancia acumulada; Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
+            account_message = ''
+            with self.db:
+                if settings['starting_balance'] != self.settings['starting_balance']:
+                    if self.running or self.positions():
+                        raise ValueError('Para empezar con otro capital, pausa las entradas y espera a que no haya posición abierta. No se borrará el historial.')
+                    previous = self.totals()
+                    baseline = self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
+                    self.put('account_start_id', baseline)
+                    account_message = f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
+                self.put('settings', settings)
+                self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
+                                (settings['take_profit_pct'],))
+                self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
+                                (stamp(), 'AJUSTES', account_message + 'Ajustes guardados y aplicados.'))
+            self.settings = settings
 
     def command(self,name):
         with self.lock:
@@ -1580,7 +1585,8 @@ EXTRA_SERIES_15M = {
     'ZEC': 'KXZEC15M', 'NEAR': 'KXNEAR15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-9x15-v3'
+RADAR_REVISION = 'radar-9x15-v5'
+DIRECTION_MIN = 5
 ENTRY_LIMIT = 15
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
@@ -1667,18 +1673,19 @@ def valid_radar_rows(rows, now):
 
 
 def radar_decision(rows):
-    core = [rows[asset] for asset in CORE_SERIES_15M if asset in rows]
-    yes_votes = sum(row['yes'] > 50 for row in core)
-    no_votes = sum(row['yes'] < 50 for row in core)
-    majority = 'UP' if yes_votes >= 3 else 'DOWN' if no_votes >= 3 else None
-    candidates = []
-    if majority:
-        for row in rows.values():
-            if majority == 'UP' and row['yes'] < 50 and row['yes_ask'] <= ENTRY_LIMIT:
-                candidates.append((row['yes_ask'], row['asset']))
-            if majority == 'DOWN' and row['yes'] > 50 and row['no_ask'] <= ENTRY_LIMIT:
-                candidates.append((row['no_ask'], row['asset']))
-    return majority, yes_votes, no_votes, [asset for _, asset in sorted(candidates)]
+    up = sorted((asset for asset, row in rows.items() if row['yes'] > 50),
+                key=lambda asset: (-rows[asset]['yes'], asset))
+    down = sorted((asset for asset, row in rows.items() if row['yes'] < 50),
+                  key=lambda asset: (rows[asset]['yes'], asset))
+    if len(up) >= DIRECTION_MIN:
+        side, leaders, opposite, ask = 'UP', up[:DIRECTION_MIN], down, 'yes_ask'
+    elif len(down) >= DIRECTION_MIN:
+        side, leaders, opposite, ask = 'DOWN', down[:DIRECTION_MIN], up, 'no_ask'
+    else:
+        return None, [], [], len(up), len(down)
+    candidates = sorted((asset for asset in opposite if rows[asset][ask] <= ENTRY_LIMIT),
+                        key=lambda asset: (rows[asset][ask], asset))
+    return side, leaders, candidates, len(up), len(down)
 
 
 class PaperBot(Bot):
@@ -1686,6 +1693,7 @@ class PaperBot(Bot):
 
     def __init__(self, db_path=None, feed=None, extra_feed=None):
         super().__init__(db_path, feed)
+        self.radar_worker_revision = RADAR_REVISION
         self.extra_feed = extra_feed if extra_feed is not None else MarketData()
         self.pool = ThreadPoolExecutor(max_workers=len(SERIES_15M), thread_name_prefix='kalshi-read')
         self.last_quotes = {}
@@ -1694,7 +1702,7 @@ class PaperBot(Bot):
         self.snapshot['mode'] = 'SIMULACIÓN'
         self.snapshot['radar'] = [{'asset': asset, 'detail': 'Consultando'} for asset in SERIES_15M]
         self.snapshot['updated'] = stamp()
-        self.snapshot['radar_summary'] = 'Consultando las cinco series principales y las cuatro adicionales.'
+        self.snapshot['radar_summary'] = 'Consultando las nueve monedas del radar.'
         if 'round_close' not in {r[1] for r in self.db.execute('PRAGMA table_info(trades)')}:
             self.db.execute('ALTER TABLE trades ADD COLUMN round_close TEXT')
         self.db.execute('CREATE INDEX IF NOT EXISTS trades_round_close ON trades(round_close)')
@@ -1716,6 +1724,7 @@ class PaperBot(Bot):
         with self.lock:
             positions = self.positions()
             manual = self.close_requested
+            stop_profit = self.settings['radar_stop_profit_cents']
         active = {row['ticker']: row['market'] for row in rows.values()}
         errors = []
         live_positions = {p['ticker'] for p in positions}
@@ -1723,7 +1732,7 @@ class PaperBot(Bot):
             ticker = p['ticker']
             legacy = p['round_close'] is None
             before_close = not legacy and now < market_time(p['round_close'])
-            if before_close and ticker not in active and not manual:
+            if before_close and ticker not in active and not (manual or 0 < stop_profit < 100):
                 continue
             if time.monotonic() < self.next_position_check.get(ticker, 0):
                 continue
@@ -1750,6 +1759,11 @@ class PaperBot(Bot):
                             self.manage(p, book, None, get_seconds_remaining(market))
                         elif self.close_requested:
                             self.manage(p, book, None, get_seconds_remaining(market))
+                        elif 0 < (target := self.settings['radar_stop_profit_cents']) < 100 and time.monotonic() - book['at'] <= 5:
+                            bids = [(price, size) for price, size in book[p['side']]['bids'] if price >= target]
+                            price = fill_book(bids, p['quantity'])
+                            if price is not None and utcnow() < market_time(market['close_time']):
+                                self._close(p, price, 'STOP PROFIT AUTOMÁTICO')
             except (ValueError, TypeError, KeyError, InvalidOperation) as exc:
                 errors.append(f'{ticker}: {exc}')
         self.next_position_check = {ticker: at for ticker, at in self.next_position_check.items() if ticker in live_positions}
@@ -1797,23 +1811,24 @@ class PaperBot(Bot):
                 if not self.running or self.close_requested:
                     break
                 fresh_rows = valid_radar_rows(rows, utcnow())
-                if not CORE_SERIES_15M.keys() <= fresh_rows.keys():
-                    notes[asset] = 'Cotizaciones principales vencidas durante la verificación'
+                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows)
+                if fresh_side != side:
+                    notes[asset] = 'Se perdió la confirmación de cinco monedas durante la verificación'
                     break
-                if asset not in fresh_rows or time.monotonic() - book['at'] > 10:
+                if asset not in eligible or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
                     continue
-                budget = min(1, self.totals()['cash'])
+                budget = min(self.settings['radar_budget_dollars'], self.totals()['cash'])
                 fee_cents = self.settings['fee_cents_per_contract']
                 sized = size_for_budget(book[side]['asks'], budget, fee_cents, ENTRY_LIMIT, allow_partial=True)
                 if sized is None:
-                    notes[asset] = 'Sin liquidez confirmada dentro de 15¢ y $1'
+                    notes[asset] = f'Sin liquidez confirmada dentro de 15¢ y ${budget:.2f}'
                     continue
                 quantity, price = sized
                 fee = quantity * fee_cents / 100
                 cost = round(quantity * price / 100 + fee, 8)
                 evidence = {'mode': 'paper', 'brain': RADAR_REVISION, 'majority': side,
-                            'yes_mid_pct': {a: str(fresh_rows[a]['yes']) for a in CORE_SERIES_15M},
+                            'yes_mid_pct': {a: str(fresh_rows[a]['yes']) for a in leaders},
                             'entry_asset': asset, 'entry_asset_yes_mid_pct': str(row['yes']),
                             'candidate_ask_cents': str(row['yes_ask' if side == 'UP' else 'no_ask']),
                             'cost': cost}
@@ -1840,28 +1855,20 @@ class PaperBot(Bot):
             except ValueError as exc:
                 errors[asset] = str(exc)
         rows = valid_radar_rows(rows, utcnow())
-        majority, yes, no, candidates = radar_decision(rows)
-        core_count = len(CORE_SERIES_15M.keys() & rows.keys())
-        if core_count < len(CORE_SERIES_15M):
-            summary = f'Datos insuficientes · {core_count}/5 principales vigentes'
-            majority, candidates = None, []
-        elif majority is None:
-            summary = f'Sin mayoría · {yes} SÍ / {no} NO'
-        else:
-            direction = 'SÍ' if majority == 'UP' else 'NO'
+        majority, _, candidates, _, _ = radar_decision(rows)
         notes = self._enter_radar(rows, candidates, majority)
-        # Publish one coherent snapshot before querying settlement or legacy positions.
         now = utcnow()
         display_rows = valid_radar_rows(rows, now)
-        core_count = len(CORE_SERIES_15M.keys() & display_rows.keys())
-        extra_count = len(EXTRA_SERIES_15M.keys() & display_rows.keys())
-        if core_count < len(CORE_SERIES_15M):
-            summary = f'Datos insuficientes · {core_count}/5 principales vigentes'
-            majority = None
-        elif majority is not None:
-            current_candidates = [asset for asset in candidates if asset in display_rows]
-            opportunity = (' · Candidatas: ' + ', '.join(current_candidates)
-                           if current_candidates else ' · Sin contrarias a 15¢ o menos')
+        majority, leaders, candidates, yes, no = radar_decision(display_rows)
+        radar_count = len(display_rows)
+        if radar_count < DIRECTION_MIN:
+            summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
+        elif majority is None:
+            summary = f'Sin mayoría de cinco · {yes} SÍ / {no} NO'
+        else:
+            direction = 'SÍ' if majority == 'UP' else 'NO'
+            opportunity = (' · Candidatas: ' + ', '.join(candidates)
+                           if candidates else ' · Sin contrarias a 15¢ o menos')
             summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
         display = []
         for asset in SERIES_15M:
@@ -1869,19 +1876,19 @@ class PaperBot(Bot):
             latest = self.last_quotes.get(asset)
             if row is None:
                 detail = errors.get(asset, 'Cotización vencida o fuera de la ronda actual.')
-                display.append({'asset': asset, 'extra': asset in EXTRA_SERIES_15M, 'detail': detail,
+                display.append({'asset': asset, 'detail': detail,
                                 'last_ticker': latest['ticker'] if latest else None})
                 continue
-            display.append({'asset': asset, 'extra': asset in EXTRA_SERIES_15M, 'ticker': row['ticker'],
+            display.append({'asset': asset, 'ticker': row['ticker'],
                             'yes': float(row['yes']), 'no': float(100 - row['yes']),
                             'yes_ask': float(row['yes_ask']), 'no_ask': float(row['no_ask']),
-                            'detail': notes.get(asset) or ('Candidata' if asset in candidates else 'Vigente')})
+                            'detail': notes.get(asset) or ('Marca dirección' if asset in leaders else 'Candidata' if asset in candidates else 'Vigente')})
         btc = display_rows.get('BTC', {}).get('market')
         with self.lock:
             self.snapshot.update(status='ACTIVO' if self.running else 'PAUSADO',
                                  signal='SÍ' if majority == 'UP' else 'NO' if majority == 'DOWN' else None,
                                  market=btc, target=get_target_from_market(btc) if btc else None,
-                                 radar=display, radar_count=core_count, radar_extra_count=extra_count, radar_summary=summary,
+                                 radar=display, radar_count=radar_count, radar_summary=summary,
                                  radar_close=round_close(now).isoformat(),
                                  message=summary, retention=summary, updated=now.isoformat())
         marks, settlement_errors = self._check_positions(display_rows)
@@ -1992,6 +1999,8 @@ input[type=range]{accent-color:var(--gold);width:100%}
 .wide{width:100%!important}
 .save{width:100%;margin-top:15px}
 .table-wrap{overflow-x:auto}
+.coin-name{display:inline-flex;align-items:center;gap:7px}
+.coin-emblem{width:20px;height:20px;flex:none;object-fit:contain;border-radius:4px}
 @media(max-width:600px){
   .radar-quotes table,.radar-quotes tbody{display:block;width:100%;min-width:0}
   .radar-quotes thead{display:none}
@@ -2010,6 +2019,10 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 .empty{text-align:center;color:var(--muted);padding:50px 20px}
 .hidden{display:none!important}
 .notice{padding:16px;border:1px solid #4a638d;margin-top:12px;line-height:1.6;color:var(--muted);font-size:11px;border-radius:5px}
+#settingsFeedback.success{background:#163f3b;color:#b9ffe6;border-color:#4ce4b6}
+#settingsFeedback.error{color:#fecaca;border-color:#f87171}
+.trade-position + .trade-position{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
+.trade-position h3{margin:0 0 8px;overflow-wrap:anywhere}
 .toast{position:fixed;right:20px;bottom:20px;background:#163f3b;color:#b9ffe6;border:1px solid #4ce4b6;padding:15px 25px;border-radius:6px;z-index:10;box-shadow:0 6px 30px #0008}
 .strength{height:8px;border-radius:5px;background:#0b1630;margin:15px 0;overflow:hidden}
 .strength i{display:block;height:100%;width:0;background:var(--gold)}
@@ -2127,18 +2140,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 <article class="panel">
-<h2>Posición</h2>
-<div class="position">
-<div class="position-money">
-<div><span class="label">PAGÓ</span><div class="amount" id="positionPaid">$0.00</div></div>
-<div><span class="label">GANANCIA / PÉRDIDA ACTUAL</span><div class="amount" id="unrealized">—</div></div>
-</div>
-<span class="muted" id="positionNote">Sin operaciones</span>
-<hr>
-<strong id="openContracts" hidden>0 CONTRATOS</strong>
-<hr>
-<strong class="gold" id="positionSide">SIN POSICIÓN</strong>
-</div>
+<h2>Posiciones abiertas</h2>
+<div class="body" id="positionList"><p class="muted">Sin posiciones abiertas</p></div>
 </article>
 </div>
 <article class="panel performance">
@@ -2179,7 +2182,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Tres votos entre BTC, ETH, SOL, XRP y BNB · DOGE, HYPE, ZEC y NEAR solo buscan entradas · 50% exacto es neutral · Hasta dos monedas distintas por ronda · Tope de $1 por entrada, incluida la comisión simulada.</div>
+<div class="notice">Tres votos entre BTC, ETH, SOL, XRP y BNB · DOGE, HYPE, ZEC y NEAR solo buscan entradas · 50% exacto es neutral · Hasta dos monedas distintas por ronda.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2187,7 +2190,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Plan de operación</h2>
 <div class="body">
 <div class="top-controls">
-<span>BTC · 15 minutos</span>
+<span>9 monedas · 15 minutos</span>
 <span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
 </div>
 <div class="strength">
@@ -2216,12 +2219,29 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Meta de ganancia acumulada ($)</label>
 <input type="number" name="goal" value="50" min="0" required><small>No se reinicia cada día. Ejemplo: capital $20 + meta $10 = saldo objetivo $30. Al alcanzarla se detienen las entradas.</small>
 </div>
-<div class="notice">Entradas de hasta $1 · Compra a 15¢ o menos · Dos entradas por ronda.</div>
-<div class="notice">Las nuevas entradas esperan el resultado oficial de Kalshi. El botón de cierre permite salir antes si hay liquidez.</div>
+<div class="field">
+<label for="radarBudget">Presupuesto virtual por moneda ($)</label>
+<input id="radarBudget" type="number" name="budget" value="1" min="0.01" max="100000" step="0.01" required>
+<small>Tope por entrada, incluida la comisión simulada.</small>
+</div>
+<div class="field">
+<label for="radarStopProfit">Stop Profit (%)</label>
+<select id="radarStopProfit" name="stopProfit">
+<option value="80">80%</option>
+<option value="85">85%</option>
+<option value="90" selected>90%</option>
+<option value="95">95%</option>
+<option value="100">100% (liquidación)</option>
+<option value="0">Desactivado</option>
+</select>
+<small>Cierra toda la posición si hay compradores suficientes al porcentaje elegido o superior. El 100% espera la liquidación oficial.</small>
+</div>
+<div class="notice">Compra a 15¢ o menos · Hasta dos monedas distintas por ronda.</div>
 </div>
 </article>
 </div>
-<button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
+<button type="submit" class="primary save" disabled>GUARDAR Y APLICAR AJUSTES</button>
+<p id="settingsFeedback" class="notice hidden" role="status"></p>
 </form>
 <div class="notice">La meta usa la ganancia acumulada. El historial se conserva al cambiar el capital.</div>
 </section>
@@ -2281,36 +2301,135 @@ const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const pct=v=>v==null?'—':Number(v).toFixed(2)+'%';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',budget:'radar_budget_dollars',stopProfit:'radar_stop_profit_cents'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Radar',conexion:'Conexión'};
 let lastRadarMarkup=null;
-let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
+let dirty=false,loaded=false,current=null,pending=null,sequence=0,lastReply=null,endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
 let lastHeight=0;function height(){let h=Math.max(650,document.documentElement.scrollHeight);if(h!==lastHeight){lastHeight=h;post('streamlit:setFrameHeight',{height:h})}}
 function toast(msg){$('#toast').textContent=msg;$('#toast').classList.remove('hidden');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),4500)}
-function busy(on){for(const s of ['#start','#pause','#close','#exportCSV','#settings button[type=submit]'])$(s).disabled=on}
-function action(action,payload={}){if(pending){toast('Esperando confirmación del servidor.');return}let id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);pending=id;busy(true);post('streamlit:setComponentValue',{value:{id,action,payload},dataType:'json'});setTimeout(()=>{if(pending===id){pending=null;busy(false);toast('Sin confirmación del servidor. Revisa Registro antes de repetir.')}},25000)}
+function settingsFeedback(message, style=''){
+  const notice=$('#settingsFeedback');
+  notice.textContent=message;
+  notice.className='notice '+style;
+}
+function busy(on){
+  for(const s of ['#start','#pause','#close','#exportCSV'])$(s).disabled=on;
+  $('#settings button[type=submit]').disabled=on||!loaded;
+  for(const name of ['goal','budget','stopProfit'])form.elements[name].disabled=on;
+  form.elements.balance.disabled=on||!!current?.running||!!current?.positions.length;
+}
+function action(kind,payload={}){
+  if(pending){toast('Esperando confirmación del servidor.');return}
+  const id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);
+  pending=id;
+  busy(true);
+  if(kind==='settings')settingsFeedback('Guardando ajustes…');
+  post('streamlit:setComponentValue',{value:{id,action:kind,payload},dataType:'json'});
+  setTimeout(()=>{
+    if(pending!==id)return;
+    pending=null;
+    busy(false);
+    const message='El servidor no confirmó el cambio. Revisa Registro antes de repetir.';
+    if(kind==='settings')settingsFeedback(message,'error');else toast(message);
+  },25000);
+}
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>{action('command',{command:'start'})};$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y cerrar las posiciones del bot en el modo actual?'))action('command',{command:'close'})};
-const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
+const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';$('#settingsFeedback').classList.add('hidden')};
+form.onsubmit=e=>{
+  e.preventDefault();
+  if(!loaded||pending)return;
+  const cfg={};
+  for(const [name,key] of Object.entries(names)){
+    const field=form.elements[name],value=Number(field.value);
+    if(!field.disabled&&value!==current.settings[key])cfg[key]=value;
+  }
+  action('settings',cfg);
+};
 $('#exportCSV').onclick=()=>action('export');
 function isFresh(s){return s.updated&&Date.now()-Date.parse(s.updated)<20000&&(!s.radar_close||Date.now()<Date.parse(s.radar_close))&&s.status!=='SIN DATOS'}
+const coinIcons = Object.freeze({
+  "BTC": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAACv0lEQVR4AaxWA6xdQRB9URs7qW0rThvXiGvbdqPa/EZt27bNb9u83tOd4u733W16knc1u3Nmd2bOPp8scKpDLd2vUV/dr0GA7t/gPv9F6P71i+hHz/SNbDSGxvr+FxDQtC53Hqj71S/Q/OpD5kdjaQ7N/Xfiay1ra34N1nBnxcK52o/mkg/ypbxqPvG5BInUj3xJ74YR2LAzn5CkQCD1I5+GX8NOEitXIVcPgjiqz7nitluvdsBJfQ39cC9oIW2gBbWQSkeVNUHForoiJ+0NGHM4eVuYzzaCORaMi6NkglhTudUkqt2OvQkn+RnMF9s40QgihJP56bct4SEI2r4eUt1RLhXUszIrZsXpqAhWkgXr4z4wswROfpz07hGnUDhpkWkA4+ZsVAdm67C+neA10VNKrIjbR9KplPvwzigL885CWJ8Pg5XmiEDMUhhXxnv6Im4f6bdKAMb1aS6RkxcjbLwQ7fh7ro0C8uoK4qb831dqvU8HXBLry5HyDk8PBgQ8U0HcFECEUuvlRLgEpANaQFMR3NsAsQOODS20nVcAET46TuXz3wkCgsgpSAQzilEW1vswT3/ErRSAcX2qIC5K5cV3iJMnoCLM+8skW7F+oVIKrE/7IfJ/VDg6NZAL1HPXRruhH+8jowURoggV82/cnFXeHtAErCDJtZNqSgRw37MN9RN9eLvFwk56DAGS3O4Vx5IsixbN+OgZAHF7CpH9/VSVhUfiY95ZwFtvCIwLw0QHiBRJCZG3FId1hHFtCum9KDgPMNsgDZCSYqXDyHq1CwTrQzhXvbsoD6GAxs2ZUoeR8nHspL4CY4wLTHuYT9eBYD5cBf1kPxiXx4K6QQtupX4cS/0h8W8IJz8eTtZXend1X/u5+SbkNM2ayG+SzdSA1wl/n55Alye/SUb/RunAN8vp3zEZCl0z+ndOB7x7DgARoloEset8/QAAAABJRU5ErkJggg==",
+  "ETH": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAACzklEQVR4AaxWA9ZcXRCco//fQjaRbCPriG1zFNu2bdu2bc6zvvFUXgVj9PuSPqeH93bVbdR9IalFIvivR1Tr3C2cWNwtrJz1/bn/2aHzM3/jf1zDtaF/ZX0jboduEWVJ17BidZ2YgMS5lnu4t93AAxbg/64RJeYHdBm0ne4yBmMFP3U4cVUEInDGEmeje0Tv1C2sfBQGxsZDNt8Fa5WPPWN6R8HJZeD0TT74tftJzFhjiNYzNjEa1jxI2gfPUOAl8ySAk1c99J2siMtRtyd+NxykTmAa38/dbMPafbZ4L7FqUh+k22euNUArJ0Afu0ATT0dFKTizUvCe0QS+Ktm6BA6cc9E9IotDzKLCBRGZPadd0OoRoM/baIrFitghSqcUfNRcFZlMoSmBM9fbMHCarCGJHaJ+Swk8eJFGtV2+W0mAvvmwI4pH7BAvEcnixdtMlNvbTxmcvdGGVbstzN9kYs8pp4JEdKku0YWzJPC81cK+kxToVg65XAGPXqZw+noJaNUei2B0zFpnYMsRm8Rw5KKHnrGWBJ6zBE4rAuzum4+SOFMErkug6FNW6dQFLNjcvCGJLSHgBzKK4BIC9Ijvw2YpzQlMVGxRCQZMVdjZ2HDAFhHgtFAvescFJZA04eKtJg6cdRkQY+dr2HfGrUtg3EKN/UJwLNxitmxEYovH8Mq9JDQzh2U7Lfh7MH2NgRNXPBJAeIlWnP34cp0NiDV7bdkYSoWIJ0toOdBevM/wdMyIf2qV8osRs1XsPPFrFA+edzkBIiEKJMU8HUeRls8XcOFWG0bOVZmFkhL6IzhyjiqW4qCXEU/ZVIrnbDCCXEbBr2PW/8nrdF0C2445/D/4dRz0gWToTBWOl68gcPyyh35TFPkDyV8+klHlKgj8WN3UtyQ2yShvlILqBJADQFmTjEYp5c1ycFZbCYz31AZKm+X075jQv2s2VDqn9O+eAwBc0aAXtcxwIQAAAABJRU5ErkJggg==",
+  "SOL": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAIKADAAQAAAABAAAAIAAAAACshmLzAAADUklEQVRYCcVXT0gVYRCf2fe9P6lEGYaZdVILD3VSIqK0qINR0EWEOhdJRXgNQpKgkwVCQccgCy+JUEEheuiQdfAQWKERpKkkKVTW873dnWbWt49d37fre/LUvey3M79vfrPzzczOIuR5dVJfbNZMNhPhWQCqJ4IqRKiS7bye5vU0AI4h0kClSgx1YmsqH9O4Gqid+irNdPImA88T0dbV8KJHxF8E8FhFE7fuY+ts2J5AB67Si/hS6ucNQOrgVywNMxKoQ1wEwu54bMftHmxZ0uG0DshbW+l/zzi0h3SbCpXx8byNRLec00Ujx4HLS70HLDCf88lWF0oUjscpAKPlYfzCBy/O54Bz3qnk++KTu5Q4pWKJBm8kDFclZy5hXz9yYaJq4RAulzfrgCRcsc7cNa67C4eT3BmlcwSZUptYc7brmMJkXB1cojVyFEpwUudh5MeMOmiNNIDCSJhZre6rPQd3zJd+HZe1wwnQjtLhZtLJuaAm02Tsg7ZIozQXv5E8nr7bC9BtvoI/kNsCpFntiiYq1HJ71Xe4ZmM/tKnGPKhyIZP2PNwzX2vJBS0vLNwq09tzLbDEAIR+c1SrCxNaYMMbexz+QvjnQLg5B6g+yNig/TFIVSQ51XMElr9oOosX1VHYBiU6VahMItBvjcIXmgvFCTdeSj36zedRpkPuxXK4rk5CKWb7hg6mlSUpDT3mIEzQD61ehJyIf7KNSIf6RvNwlxNpkXKzWIf3yhIYhWvqBNTiTq/YtyZORTkCHiSgzqfxPEyyE1JKZyIHIcJpWeh12KiBcSsgCoQzSiYZdiLQASGcogV4YA4Xyr0qXri5CnCMK6EpDF0CMThi1K4pAikwIbiacIwjQAMcgfYgB8og7iTiHqM8CBIqf2q+C9QLtyEDpLRFHUrIO9QpWAs5VxY8MUdgyP6kM+3MjcJtyPQqA6QOdUUdh93Gdp0qVGaSBb3WCAzbnwNxwincm/45durKGZF4eg10t9gK5nLHsmxhy+gs02uxuVbaEw7hcuW+j/ymDqXikYQlAuo09wYeoYt9LY/lbuhd674IuMKN/DHJ5oBLLnfxMhataOKRpIsLdtGrK2jt7DW6xNbKN3ftaCPgKuWemZg3/ufU64Ss1+v3/D9/T4MrRetTGgAAAABJRU5ErkJggg==",
+  "XRP": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAA21BMVEUAAAArK1UkKzIkKTAkKTAjKS8kKi8rKzUkKzAkKTAjKS8kSUkjKS8kKi8kKS8nLDIkKi8oLTOHi47///+ChomDhoqGiYyFiIuHio2BhYiJjJCKjZCBhId/goaUl5omLDKVmJt9gYT+/v7Z2tubnqFbX2Th4uMrMTdhZmqMj5IkKS91eX3Ky83y8/MyOD3Bw8UzOD7V1tft7u50d3vs7e00OT/W19jj5OQ+Q0k9Q0g1OkDY2dri4+Q8Qkc1O0Dg4eI8QUY2PEHa29zf4OE7QEV7f4OfoaSdoKI6P0U8bs3jAAAAK3RSTlMABkeVv9nzGJbx/weC9Mcu4y3////////////////////////////////yG7j5mgAAATVJREFUeAGF0wO6w0AUBeCJk1P3PtuqbXP/GyryMijzf2qjuWSSphumZduWaegaO+S4HgTPddiuSDSGHbFoZOf1OA7ElY8kkjgimRLvJ3FU0gnOj+OE+H8cUZwU9Q+IAUgTXUBxSZQGENse4mLriugawjX/5zKmeeKdGwTSRJfweRrTEbgluoPvnugBAZ0Z4B6Jnp6B5xeiR3AGMyG8vtH7x8c7vb1CMJkF6fOLNr4+IVnMhuL75/f35xsKmz9wyt/OEchkc7lsBgpLDTJfIF8hrwZpgCuWqFzJ5ytVKhXBGbJQtTo1mthoNahek4XipW53qNuDr/dFnTYvNW9W/50GQwSGA3rvY8vl7R6NaTKFMJ3QeOS3mw/MbL5YQrFczGcAouEjFz604WMfvjjhqxe2vCHrvwbZMTAkWxjM4AAAAABJRU5ErkJggg==",
+  "BNB": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAWlBMVEUAAAD/1VX0uzLzuzD0uzDzuy/zuy/0vzXzuzDzujD/20nzui/0ui/zuy/0vDL0ui/0uzPzuy/zui/zvDf87cv43Jb77cr////53Jf0wkj0w0r99+fzuzPzvjyEp4rmAAAAEnRSTlMABkeVv9nzGJbxB4L0xy7jLfK6UobZAAAA6ElEQVR42oVT2RKDIAxExVtrGw7P/v9vFkqqRDqTfdLZJUvCRlzI8kKWVVXKIs9Eirpp4UTb1De66wcgGPqOHB8hwRgVeUzwB9PzPI98oqjRP66/LLFLuEcf8/McK/qvwUB4ohi8SUN4DwMnGje/lvD7ThRtJnLKbxtV5KIAxGE9D+AV9gBEISR+vUFZxyvlFFa53wApSqzvyRWU1gpWL0KXUlSBD+WVnmetgk1QVCgwiQDH8fpZmLvFghbsJaM29dWmvtpkB8WOmn+s9LkNee40MIYEJo2cIZHjQsvGnl8cfvX45WXX/wODgTtdutF+1wAAAABJRU5ErkJggg==",
+  "DOGE": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAolBMVEUAAADVqlXbtknKqjXGqjnIpjfGqTbEpzXDpjXEpzXEpzTEpzXDpzXDpjXEpjXEpjXDpzTDpjTDpjT////ayIL49erUv27byYXczIvez5Hf0JXh0pni1J3i1J7j1qHk16Xm2qzr4bzt5MPu5sfEqDj59uv6+O/7+fL8+vXJr0j28uH49OfNtljWwnbQuWDRu2bz7df8+/b8+/f+/fz+/v3z7tgLl5/YAAAAEnRSTlMABgcYLS5HgpWWv8fZ4/Hy8/TT2gOVAAAA6ElEQVR4XoWT53LEIAyEZV8CLhzBK7hL773X93+1TBzN2Qxzo+/nsqAFJJqoTNO5EFzXmIpKFq3HBt8uKKe2AzIGW2fbexT0s0N2lyjBcmezX9YLhwSpe2yh/89hsRU7FpD8OOaRj8fzZwjDX5EWk0H4OoTQElV+ZjhYrV72r5g5iuYrMpgZ3kY1fvLTtYiGmtKAE+a1iA11pQEP33whYkcOQrxkPo0xvgK44XdRHQUILJwB+OE7UcNkSPfMtymlo8ywR67IkJdQQ6rXVB9KfWrts9Tv1hpGbTmtadW21wdHHz19eNXx/wXfGj2DvsSdawAAAABJRU5ErkJggg==",
+  "HYPE": "data:image/png;base64,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",
+  "ZEC": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAwFBMVEUAAAD/1VX/tkn0tUrutUTut0jttETts0XstETss0Tss0TtskXss0Tts0Xts0XsskTsskTss0X////sskTww2/wxnXvwWjttk/00pP11pz1157226n+/PnvvmLuvWDss0jstEnstU3sskXxyHryy4HyzYbz0I3tt1Huulfuu1r12KLuvFz23Kr23a733rH337L34rr45L345cD45cH45sL558X56cr78uD88+P9+fL9+vTuvF3+/fz+/vz+/v7uvF59KQaRAAAAEnRSTlMABgcYLS5HgpWWv8fZ4/Hy8/TT2gOVAAABE0lEQVR4XoWT53bDIAyFwWltQ4jrSB7ZnXvvPd7/rYrbWogTzuH7yb0goSEcMs21KUuj81SKdQaqQKJQA+GTZGP0GGeJd32IawzZI5sjDDDaoPtc547/NxL2/hXABYvyl0eGYYMl+w3Q57/TNM0dwH1d16f9X7ogqrcvgZj2Z0oIWQQMM6qYFCkGDBM6TEVOhu1Vx6XVF+dkyIVGj/1PgK8DJLQwyFm+AcAZOowoud6+WP0RGaVn2Huy+vMuMra8EHOrv34jx/AkD63+UaOHZt98XwDAfNXRum+yQk2AOHKFYqWeBQyFZM2aBgyKt/ukqqoHgBvb9WNqd2BgrtGRhUbulo9cbGijYx9fnPjqxZc3uv4/maM/VJ+hnH0AAAAASUVORK5CYII=",
+  "NEAR": "data:image/png;base64,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"
+});
+function coinLabel(row){
+  const emblem = Object.hasOwn(coinIcons,row.asset) ? '<img class="coin-emblem" src="'+coinIcons[row.asset]+'" alt="" width="20" height="20">' : '';
+  return '<span class="coin-name">'+emblem+esc(row.asset)+'</span>';
+}
+function positionResult(trade,s,fresh){
+  const book=s.books?.[trade.ticker];
+  if(!fresh||!book||Date.now()>=Date.parse(book.expires))return null;
+  let remaining=trade.quantity,proceeds=0;
+  for(const [price,quantity] of book[trade.side]?.bids||[]){
+    const filled=Math.min(remaining,quantity);
+    remaining-=filled;
+    proceeds+=filled*price;
+    if(remaining===0)break;
+  }
+  if(remaining>0)return null;
+  return (proceeds-trade.quantity*(trade.entry+s.settings.fee_cents_per_contract))/100-trade.entry_fee;
+}
+function renderPositions(s,fresh){
+  $('#positionList').innerHTML=s.positions.map(trade=>{
+    const result=positionResult(trade,s,fresh);
+    const paid=trade.quantity*trade.entry/100+trade.entry_fee;
+    const side=trade.side==='UP'?'UP (SÍ)':trade.side==='DOWN'?'DOWN (NO)':trade.side;
+    const color=result>0?'#34d399':result<0?'#f87171':'inherit';
+    return '<section class="trade-position"><h3 class="gold">'+esc(trade.ticker)+' · '+esc(side)+'</h3>'+
+      '<p>'+esc(trade.quantity)+' contratos a '+cents(trade.entry)+' · Costó '+money(paid)+'</p>'+
+      '<p>Abierta · <strong style="color:'+color+'">'+
+      (result==null?'Resultado pendiente':(result>0?'+':'')+money(result))+'</strong></p></section>';
+  }).join('')||'<p class="muted">Sin posiciones abiertas</p>';
+}
 function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
-const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+esc(r.asset)+(r.extra?' · Extra':'')+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
+const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=(s.radar_count??0)+'/5 PRINCIPALES';$('#activeSignal').textContent=active||(s.radar_count===5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=(s.radar_count??0)+'/9 VIGENTES';$('#activeSignal').textContent=active||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent='15 ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||!s.books?.[p.ticker]||Date.now()>=Date.parse(s.books[p.ticker].expires)){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.books?.[p.ticker]?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
-if(!loaded||!dirty){for(const [name,key] of Object.entries(names))form.elements[name].value=String(s.settings[key]);loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
+renderPositions(s,fresh);$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
+if(!loaded||!dirty){for(const [name,key] of Object.entries(names)){
+const field=form.elements[name],value=String(s.settings[key]);
+if(name==='stopProfit'&&!Array.from(field.options).some(option=>option.value===value))field.add(new Option(value+'%',value));
+field.value=value;
+}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}busy(!!pending);
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
-$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=(s.radar_summary||s.message)+' · '+(s.radar_extra_count??0)+'/4 extras vigentes';
+$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=(s.radar_summary||s.message)+' · '+(s.radar_count??0)+'/9 vigentes';
 endAt=s.radar_close?Date.parse(s.radar_close):null;$('#connectionNotice').textContent=(s.radar_summary||'Consultando la API pública.')+(s.settlement_errors?.length?' · Liquidación pendiente: '+s.settlement_errors.join(' / '):'');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.radar_count&&!isFresh(current)){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused');$('#radarSignal').textContent='ALPHA';$('#radarMode').textContent='ESPERANDO';$('#signalTitle').textContent='ACTUALIZANDO RONDA'}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+window.addEventListener('message',e=>{
+  if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;
+  const {reply,snapshot}=e.data.args||{};
+  const confirmed=reply?.id&&reply.id!==lastReply&&(!pending||pending===reply.id);
+  if(confirmed&&reply.kind==='settings'&&reply.ok){dirty=false;loaded=false}
+  if(snapshot)update(snapshot);
+  if(!confirmed)return;
+  lastReply=reply.id;
+  pending=null;
+  busy(false);
+  if(reply.kind==='settings'){
+    settingsFeedback(reply.message,reply.ok?'success':'error');
+  }else{
+    if(reply.csv){
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));
+      a.download='alpha_historial.csv';
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+    }
+    toast(reply.message);
+  }
+  height();
+});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
@@ -2340,10 +2459,11 @@ class Controller:
                 reply['message'] = {'start': 'Simulación activada.', 'pause': 'Entradas pausadas.',
                                     'close': 'Cierre virtual solicitado.'}[command]
             elif action == 'settings':
-                if payload.keys() - {'starting_balance', 'daily_goal_dollars'}:
-                    raise ValueError('El radar admite ajustes de capital y meta.')
+                if payload.keys() - {'starting_balance', 'daily_goal_dollars',
+                                     'radar_budget_dollars', 'radar_stop_profit_cents'}:
+                    raise ValueError('El ajuste enviado no está disponible.')
                 self.bot.save_settings(payload)
-                reply.update(saved_settings=dict(self.bot.settings), message='Ajustes guardados.')
+                reply['message'] = 'Ajustes guardados y aplicados.'
             elif action == 'export':
                 stream = io.StringIO()
                 writer = csv.writer(stream)
@@ -2428,7 +2548,7 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · 5 PRINCIPALES + 4 EXTRAS · SALDO VIRTUAL')
+    st.caption('SIMULACIÓN · 9 MONEDAS · 5 PARA CONFIRMAR · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
@@ -2436,16 +2556,16 @@ def streamlit_main():
     if not index.exists():index.write_text(_TERMINAL_HTML,encoding='utf-8')
     terminal=components.declare_component('alpha_edge_terminal',path=str(directory))
 
+    def handle_terminal_change():
+        event = st.session_state.get('alpha_terminal')
+        reply = controller.handle(event)
+        if reply:
+            st.session_state.alpha_reply = reply
+
     @st.fragment(run_every=2)
     def live_terminal():
-        event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
-        if isinstance(event,dict) and event.get('action')=='ack':
-            st.session_state.alpha_reply=None
-        elif isinstance(event,dict) and event.get('id') not in controller.seen:
-            reply=controller.handle(event)
-            if reply:
-                st.session_state.alpha_reply=reply
-                st.rerun()
+        terminal(snapshot=controller.snapshot(), reply=st.session_state.get('alpha_reply'),
+                 key='alpha_terminal', default=None, on_change=handle_terminal_change)
     live_terminal()
 
 if __name__=='__main__':
