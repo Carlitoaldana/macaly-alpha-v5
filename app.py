@@ -2287,8 +2287,27 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Conexión Kalshi</h2>
 <div class="body">
+<button id="connectionMode" class="primary" type="button" aria-controls="kalshiAccount" aria-expanded="false">Modo simulación</button>
+<div id="kalshiPublic">
 <p class="muted">Datos públicos de Kalshi. Compras y ventas exclusivamente virtuales.</p>
 <div class="notice"><span id="connectionNotice">Consultando la API pública.</span></div>
+</div>
+<form id="kalshiAccount" class="hidden" autocomplete="off">
+<div class="field">
+<label>Cuenta REAL de Kalshi</label>
+</div>
+<div class="field">
+<label for="apiKey">API Key ID</label>
+<input id="apiKey" class="wide" style="max-width:360px" type="text" placeholder="API Key ID" autocomplete="off">
+</div>
+<div class="field">
+<label for="privateKey">Clave privada</label>
+<textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM" spellcheck="false" autocomplete="off"></textarea>
+</div>
+<p class="muted">Conectar verifica tu cuenta. Las operaciones siguen en simulación.</p>
+<button id="testApi" class="primary" type="submit">CONECTAR</button>
+<div class="notice" id="kalshiAccountStatus" role="status">Cuenta sin conectar.</div>
+</form>
 </div>
 </article>
 </section>
@@ -2389,6 +2408,28 @@ function renderPositions(s,fresh){
       (result==null?'Resultado pendiente':(result>0?'+':'')+money(result))+'</strong></p></section>';
   }).join('')||'<p class="muted">Sin posiciones abiertas</p>';
 }
+const connectionMode=$('#connectionMode'),kalshiAccount=$('#kalshiAccount');
+connectionMode.onclick=()=>{
+  const showAccount=kalshiAccount.classList.contains('hidden');
+  kalshiAccount.classList.toggle('hidden',!showAccount);
+  $('#kalshiPublic').classList.toggle('hidden',showAccount);
+  connectionMode.textContent=showAccount?'Modo real · conexión':'Modo simulación';
+  connectionMode.setAttribute('aria-expanded',String(showAccount));
+  if(!showAccount)$('#privateKey').value='';
+  height();
+};
+kalshiAccount.onsubmit=e=>{
+  e.preventDefault();
+  if(pending){toast('Esperando confirmación del servidor.');return}
+  const keyId=$('#apiKey').value.trim(),pem=$('#privateKey').value.trim();
+  if(!keyId||!pem){
+    $('#kalshiAccountStatus').textContent='Completa el API Key ID y la clave privada PEM.';
+    return;
+  }
+  $('#privateKey').value='';
+  $('#kalshiAccountStatus').textContent='Verificando cuenta de Kalshi…';
+  action('verify_kalshi',{key_id:keyId,pem});
+};
 function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
 const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
@@ -2416,7 +2457,10 @@ window.addEventListener('message',e=>{
   lastReply=reply.id;
   pending=null;
   busy(false);
-  if(reply.kind==='settings'){
+  if(reply.kind==='verify_kalshi'){
+    $('#kalshiAccountStatus').textContent=reply.message;
+    post('streamlit:setComponentValue',{value:{action:'ack'},dataType:'json'});
+  }else if(reply.kind==='settings'){
     settingsFeedback(reply.message,reply.ok?'success':'error');
   }else{
     if(reply.csv){
@@ -2434,6 +2478,53 @@ window.addEventListener('resize',height);new ResizeObserver(height).observe(docu
 
 </script></body></html>
 """
+
+def _verify_kalshi_account(key_id, pem):
+    import base64
+
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
+    except ImportError:
+        raise ValueError('El servidor necesita el paquete cryptography para verificar la cuenta.') from None
+
+    if not isinstance(key_id, str) or not key_id.strip() or len(key_id) > 200 or not key_id.isascii():
+        raise ValueError('API Key ID inválido.')
+    if any(ord(character) < 33 or ord(character) > 126 for character in key_id.strip()):
+        raise ValueError('API Key ID inválido.')
+    if not isinstance(pem, str) or not pem.strip() or len(pem) > 16000:
+        raise ValueError('Clave privada PEM inválida.')
+    try:
+        key = serialization.load_pem_private_key(pem.strip().encode(), password=None)
+    except (TypeError, ValueError):
+        raise ValueError('Introduce una clave privada PEM válida y sin contraseña.') from None
+    path = '/trade-api/v2/portfolio/balance'
+    timestamp = str(int(time.time() * 1000))
+    message = (timestamp + 'GET' + path).encode()
+    if isinstance(key, rsa.RSAPrivateKey):
+        digest = hashes.SHA256()
+        signature = key.sign(message, padding.PSS(mgf=padding.MGF1(digest), salt_length=digest.digest_size), digest)
+    elif isinstance(key, ed25519.Ed25519PrivateKey):
+        signature = key.sign(message)
+    else:
+        raise ValueError('Kalshi requiere una clave RSA o Ed25519.')
+    request = Request('https://external-api.kalshi.com' + path, method='GET', headers={
+        'KALSHI-ACCESS-KEY': key_id.strip(),
+        'KALSHI-ACCESS-TIMESTAMP': timestamp,
+        'KALSHI-ACCESS-SIGNATURE': base64.b64encode(signature).decode('ascii'),
+        'User-Agent': 'JCAlphaEdge/connection',
+    })
+    try:
+        with urlopen(request, timeout=8) as response:
+            result = json.load(response)
+    except HTTPError as error:
+        raise ValueError(f'Kalshi respondió HTTP {error.code}. Revisa las claves y vuelve a intentar.') from None
+    except (OSError, ValueError):
+        raise ValueError('No se pudo verificar la cuenta con Kalshi.') from None
+    balance = _plan_number(result.get('balance')) if isinstance(result, dict) else None
+    if balance is None or balance < 0:
+        raise ValueError('Kalshi no devolvió un saldo verificable.')
+
 
 class Controller:
     def __init__(self, bot):
@@ -2464,6 +2555,9 @@ class Controller:
                     raise ValueError('El ajuste enviado no está disponible.')
                 self.bot.save_settings(payload)
                 reply['message'] = 'Ajustes guardados y aplicados.'
+            elif action == 'verify_kalshi':
+                _verify_kalshi_account(payload.get('key_id'), payload.get('pem'))
+                reply['message'] = 'Cuenta de Kalshi verificada. Operaciones en simulación.'
             elif action == 'export':
                 stream = io.StringIO()
                 writer = csv.writer(stream)
