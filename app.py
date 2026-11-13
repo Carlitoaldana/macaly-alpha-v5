@@ -1571,11 +1571,16 @@ class Bot:
             return clean_json(result)
 
 
-SERIES_15M = {
+CORE_SERIES_15M = {
     'BTC': 'KXBTC15M', 'ETH': 'KXETH15M', 'SOL': 'KXSOL15M',
     'XRP': 'KXXRP15M', 'BNB': 'KXBNB15M',
 }
-RADAR_REVISION = 'radar-5x15-v2'
+EXTRA_SERIES_15M = {
+    'DOGE': 'KXDOGE15M', 'HYPE': 'KXHYPE15M',
+    'ZEC': 'KXZEC15M', 'NEAR': 'KXNEAR15M',
+}
+SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
+RADAR_REVISION = 'radar-9x15-v3'
 ENTRY_LIMIT = 15
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
@@ -1662,8 +1667,9 @@ def valid_radar_rows(rows, now):
 
 
 def radar_decision(rows):
-    yes_votes = sum(row['yes'] > 50 for row in rows.values())
-    no_votes = sum(100 - row['yes'] > 50 for row in rows.values())
+    core = [rows[asset] for asset in CORE_SERIES_15M if asset in rows]
+    yes_votes = sum(row['yes'] > 50 for row in core)
+    no_votes = sum(row['yes'] < 50 for row in core)
     majority = 'UP' if yes_votes >= 3 else 'DOWN' if no_votes >= 3 else None
     candidates = []
     if majority:
@@ -1678,8 +1684,9 @@ def radar_decision(rows):
 class PaperBot(Bot):
     """Simulación con cotizaciones públicas y un registro local de operaciones."""
 
-    def __init__(self, db_path=None, feed=None):
+    def __init__(self, db_path=None, feed=None, extra_feed=None):
         super().__init__(db_path, feed)
+        self.extra_feed = extra_feed if extra_feed is not None else MarketData()
         self.pool = ThreadPoolExecutor(max_workers=len(SERIES_15M), thread_name_prefix='kalshi-read')
         self.last_quotes = {}
         self.next_position_check = {}
@@ -1687,7 +1694,7 @@ class PaperBot(Bot):
         self.snapshot['mode'] = 'SIMULACIÓN'
         self.snapshot['radar'] = [{'asset': asset, 'detail': 'Consultando'} for asset in SERIES_15M]
         self.snapshot['updated'] = stamp()
-        self.snapshot['radar_summary'] = 'Consultando las cinco series de Kalshi.'
+        self.snapshot['radar_summary'] = 'Consultando las cinco series principales y las cuatro adicionales.'
         if 'round_close' not in {r[1] for r in self.db.execute('PRAGMA table_info(trades)')}:
             self.db.execute('ALTER TABLE trades ADD COLUMN round_close TEXT')
         self.db.execute('CREATE INDEX IF NOT EXISTS trades_round_close ON trades(round_close)')
@@ -1781,17 +1788,21 @@ class PaperBot(Bot):
                     notes[asset] = 'Saldo virtual agotado'
                     break
             try:
-                book = self.feed.book(row['ticker'])
+                feed = self.extra_feed if asset in EXTRA_SERIES_15M else self.feed
+                book = feed.book(row['ticker'])
             except (ValueError, InvalidOperation) as exc:
                 notes[asset] = str(exc)
                 continue
             with self.lock:
                 if not self.running or self.close_requested:
                     break
-                if (len(valid_radar_rows(rows, utcnow())) != len(SERIES_15M) or
-                        time.monotonic() - book["at"] > 10):
-                    notes[asset] = 'Cotización vencida durante la verificación'
+                fresh_rows = valid_radar_rows(rows, utcnow())
+                if not CORE_SERIES_15M.keys() <= fresh_rows.keys():
+                    notes[asset] = 'Cotizaciones principales vencidas durante la verificación'
                     break
+                if asset not in fresh_rows or time.monotonic() - book['at'] > 10:
+                    notes[asset] = 'Cotización vencida durante la verificación'
+                    continue
                 budget = min(1, self.totals()['cash'])
                 fee_cents = self.settings['fee_cents_per_contract']
                 sized = size_for_budget(book[side]['asks'], budget, fee_cents, ENTRY_LIMIT, allow_partial=True)
@@ -1802,7 +1813,8 @@ class PaperBot(Bot):
                 fee = quantity * fee_cents / 100
                 cost = round(quantity * price / 100 + fee, 8)
                 evidence = {'mode': 'paper', 'brain': RADAR_REVISION, 'majority': side,
-                            'yes_mid_pct': {a: str(r['yes']) for a, r in rows.items()},
+                            'yes_mid_pct': {a: str(fresh_rows[a]['yes']) for a in CORE_SERIES_15M},
+                            'entry_asset': asset, 'entry_asset_yes_mid_pct': str(row['yes']),
                             'candidate_ask_cents': str(row['yes_ask' if side == 'UP' else 'no_ask']),
                             'cost': cost}
                 opened = stamp()
@@ -1817,7 +1829,9 @@ class PaperBot(Bot):
         return notes
 
     def step(self):
-        jobs = {asset: self.pool.submit(read_radar_series, self.feed, asset) for asset in SERIES_15M}
+        jobs = {asset: self.pool.submit(read_radar_series, feed, asset)
+                for series, feed in ((CORE_SERIES_15M, self.feed), (EXTRA_SERIES_15M, self.extra_feed))
+                for asset in series}
         rows, errors = {}, {}
         for asset, job in jobs.items():
             try:
@@ -1827,32 +1841,38 @@ class PaperBot(Bot):
                 errors[asset] = str(exc)
         rows = valid_radar_rows(rows, utcnow())
         majority, yes, no, candidates = radar_decision(rows)
-        if len(rows) < len(SERIES_15M):
-            summary = f'Datos insuficientes · {len(rows)}/5 cotizaciones vigentes'
+        core_count = len(CORE_SERIES_15M.keys() & rows.keys())
+        if core_count < len(CORE_SERIES_15M):
+            summary = f'Datos insuficientes · {core_count}/5 principales vigentes'
             majority, candidates = None, []
         elif majority is None:
             summary = f'Sin mayoría · {yes} SÍ / {no} NO'
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
-            opportunity = ' · Candidatas: ' + ', '.join(candidates) if candidates else ' · Sin contrarias a 15¢ o menos'
-            summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
         notes = self._enter_radar(rows, candidates, majority)
         # Publish one coherent snapshot before querying settlement or legacy positions.
         now = utcnow()
         display_rows = valid_radar_rows(rows, now)
-        if len(display_rows) != len(rows):
-            summary = f'Datos insuficientes · {len(display_rows)}/5 cotizaciones vigentes'
+        core_count = len(CORE_SERIES_15M.keys() & display_rows.keys())
+        extra_count = len(EXTRA_SERIES_15M.keys() & display_rows.keys())
+        if core_count < len(CORE_SERIES_15M):
+            summary = f'Datos insuficientes · {core_count}/5 principales vigentes'
             majority = None
+        elif majority is not None:
+            current_candidates = [asset for asset in candidates if asset in display_rows]
+            opportunity = (' · Candidatas: ' + ', '.join(current_candidates)
+                           if current_candidates else ' · Sin contrarias a 15¢ o menos')
+            summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
         display = []
         for asset in SERIES_15M:
             row = display_rows.get(asset)
             latest = self.last_quotes.get(asset)
             if row is None:
                 detail = errors.get(asset, 'Cotización vencida o fuera de la ronda actual.')
-                display.append({'asset': asset, 'detail': detail,
+                display.append({'asset': asset, 'extra': asset in EXTRA_SERIES_15M, 'detail': detail,
                                 'last_ticker': latest['ticker'] if latest else None})
                 continue
-            display.append({'asset': asset, 'ticker': row['ticker'],
+            display.append({'asset': asset, 'extra': asset in EXTRA_SERIES_15M, 'ticker': row['ticker'],
                             'yes': float(row['yes']), 'no': float(100 - row['yes']),
                             'yes_ask': float(row['yes_ask']), 'no_ask': float(row['no_ask']),
                             'detail': notes.get(asset) or ('Candidata' if asset in candidates else 'Vigente')})
@@ -1861,12 +1881,16 @@ class PaperBot(Bot):
             self.snapshot.update(status='ACTIVO' if self.running else 'PAUSADO',
                                  signal='SÍ' if majority == 'UP' else 'NO' if majority == 'DOWN' else None,
                                  market=btc, target=get_target_from_market(btc) if btc else None,
-                                 radar=display, radar_count=len(display_rows), radar_summary=summary,
+                                 radar=display, radar_count=core_count, radar_extra_count=extra_count, radar_summary=summary,
                                  radar_close=round_close(now).isoformat(),
                                  message=summary, retention=summary, updated=now.isoformat())
         marks, settlement_errors = self._check_positions(display_rows)
-        if not errors and not settlement_errors and not any('HTTP 429' in note for note in notes.values()):
+        if not (CORE_SERIES_15M.keys() & errors.keys()) and not settlement_errors and not any(
+                'HTTP 429' in notes.get(asset, '') for asset in CORE_SERIES_15M):
             self.feed.acknowledge_poll()
+        if not (EXTRA_SERIES_15M.keys() & errors.keys()) and not any(
+                'HTTP 429' in notes.get(asset, '') for asset in EXTRA_SERIES_15M):
+            self.extra_feed.acknowledge_poll()
         with self.lock:
             self.snapshot.update(books=marks, settlement_errors=settlement_errors)
 
@@ -2044,7 +2068,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <footer>
 <span class="gold" id="executionFooter">SIMULACIÓN</span>
-<br>5 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
+<br>9 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
 <span class="green"><span id="feedStatus">● Esperando datos</span></span>
 </footer>
 </aside>
@@ -2056,7 +2080,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <div>
 <small>MERCADO</small>
-<strong>5 MONEDAS · 15 MINUTOS</strong>
+<strong>9 MONEDAS · 15 MINUTOS</strong>
 </div>
 <div>
 <small>SESIÓN</small>
@@ -2155,7 +2179,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Mayoría de tres monedas · 50% exacto es neutral · Hasta dos entradas por ronda · Tope de $1 por entrada, incluida la comisión simulada.</div>
+<div class="notice">Tres votos entre BTC, ETH, SOL, XRP y BNB · DOGE, HYPE, ZEC y NEAR solo buscan entradas · 50% exacto es neutral · Hasta dos monedas distintas por ronda · Tope de $1 por entrada, incluida la comisión simulada.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2273,9 +2297,9 @@ form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal']){let 
 $('#exportCSV').onclick=()=>action('export');
 function isFresh(s){return s.updated&&Date.now()-Date.parse(s.updated)<20000&&(!s.radar_close||Date.now()<Date.parse(s.radar_close))&&s.status!=='SIN DATOS'}
 function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
-const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+esc(r.asset)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
+const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+esc(r.asset)+(r.extra?' · Extra':'')+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=(s.radar_count??0)+'/5 SERIES';$('#activeSignal').textContent=active||(s.radar_count===5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=(s.radar_count??0)+'/5 PRINCIPALES';$('#activeSignal').textContent=active||(s.radar_count===5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'SIMULACIÓN')+' · '+s.message;$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent='15 ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||!s.books?.[p.ticker]||Date.now()>=Date.parse(s.books[p.ticker].expires)){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.books?.[p.ticker]?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
@@ -2283,7 +2307,7 @@ $('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry
 if(!loaded||!dirty){for(const [name,key] of Object.entries(names))form.elements[name].value=String(s.settings[key]);loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
-$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=s.radar_summary||s.message;
+$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=(s.radar_summary||s.message)+' · '+(s.radar_extra_count??0)+'/4 extras vigentes';
 endAt=s.radar_close?Date.parse(s.radar_close):null;$('#connectionNotice').textContent=(s.radar_summary||'Consultando la API pública.')+(s.settlement_errors?.length?' · Liquidación pendiente: '+s.settlement_errors.join(' / '):'');height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.radar_count&&!isFresh(current)){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused');$('#radarSignal').textContent='ALPHA';$('#radarMode').textContent='ESPERANDO';$('#signalTitle').textContent='ACTUALIZANDO RONDA'}}
 window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
@@ -2404,7 +2428,7 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · BTC, ETH, SOL, XRP Y BNB · SALDO VIRTUAL')
+    st.caption('SIMULACIÓN · 5 PRINCIPALES + 4 EXTRAS · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
