@@ -1178,7 +1178,7 @@ def valid_settings(raw):
         raise ValueError('Envía todos los ajustes; hay campos desconocidos o ausentes.')
     bounds = {'contracts':(1,1000), 'max_entry_cents':(2,99),
               'take_profit_pct':(0,100), 'stop_loss_pct':(0,100),
-              'max_entries_round':(1,100),
+              'max_entries_round':(1,2),
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
@@ -1589,7 +1589,6 @@ EXTRA_SERIES_15M = {
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
 RADAR_REVISION = 'radar-5x15-v7'
 DIRECTION_MIN = 3
-ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
 
 
@@ -1789,8 +1788,8 @@ class PaperBot(Bot):
                     'SELECT COUNT(*) FROM trades WHERE round_close=? OR '
                     '(round_close IS NULL AND julianday(opened)>=julianday(?) AND julianday(opened)<julianday(?))',
                     (close_key, (row['close'] - timedelta(minutes=15)).isoformat(), close_key)).fetchone()[0]
-                if count >= ROUND_LIMIT:
-                    notes[asset] = 'Límite de dos entradas alcanzado'
+                if count >= self.settings['max_entries_round']:
+                    notes[asset] = 'Límite de compras por ronda alcanzado'
                     break
                 if self.db.execute('SELECT 1 FROM trades WHERE ticker=?', (row['ticker'],)).fetchone():
                     notes[asset] = 'Ya registrada en esta ronda'
@@ -1810,6 +1809,9 @@ class PaperBot(Bot):
                 continue
             with self.lock:
                 if not self.running or self.close_requested:
+                    break
+                if count >= self.settings['max_entries_round']:
+                    notes[asset] = 'Límite de compras por ronda alcanzado'
                     break
                 fresh_rows = valid_radar_rows(rows, utcnow())
                 entry_limit = self.settings['radar_entry_limit_cents']
@@ -2186,7 +2188,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Tres monedas vigentes del mismo lado confirman la dirección · 50% exacto es neutral · Hasta dos monedas distintas por ronda.</div>
+<div class="notice">Tres monedas vigentes del mismo lado confirman la dirección · 50% exacto es neutral.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2245,7 +2247,14 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </select>
 <small>Cierra toda la posición si hay compradores suficientes al porcentaje elegido o superior. El 100% espera la liquidación oficial.</small>
 </div>
-<div class="notice">Hasta dos monedas distintas por ronda.</div>
+<div class="field">
+<label for="radarRoundEntries">Compras máximas por ronda</label>
+<select id="radarRoundEntries" name="roundEntries">
+<option value="1" selected>1 compra</option>
+<option value="2">2 compras</option>
+</select>
+<small>Se aplica al total de la ronda de 15 minutos.</small>
+</div>
 </div>
 </article>
 </div>
@@ -2329,7 +2338,7 @@ const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const pct=v=>v==null?'—':Number(v).toFixed(2)+'%';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',budget:'radar_budget_dollars',entryLimit:'radar_entry_limit_cents',stopProfit:'radar_stop_profit_cents'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',budget:'radar_budget_dollars',entryLimit:'radar_entry_limit_cents',roundEntries:'max_entries_round',stopProfit:'radar_stop_profit_cents'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Radar',conexion:'Conexión'};
 let lastRadarMarkup=null;
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,lastReply=null,endAt=null;
@@ -2344,7 +2353,7 @@ function settingsFeedback(message, style=''){
 function busy(on){
   for(const s of ['#start','#pause','#close','#exportCSV'])$(s).disabled=on;
   $('#settings button[type=submit]').disabled=on||!loaded;
-  for(const name of ['goal','budget','entryLimit','stopProfit'])form.elements[name].disabled=on;
+  for(const name of ['goal','budget','entryLimit','roundEntries','stopProfit'])form.elements[name].disabled=on;
   form.elements.balance.disabled=on||!!current?.running||!!current?.positions.length;
 }
 function action(kind,payload={}){
@@ -2561,7 +2570,7 @@ class Controller:
             elif action == 'settings':
                 if payload.keys() - {'starting_balance', 'daily_goal_dollars',
                                      'radar_budget_dollars', 'radar_stop_profit_cents',
-                                     'radar_entry_limit_cents'}:
+                                     'radar_entry_limit_cents', 'max_entries_round'}:
                     raise ValueError('El ajuste enviado no está disponible.')
                 self.bot.save_settings(payload)
                 reply['message'] = 'Ajustes guardados y aplicados.'
