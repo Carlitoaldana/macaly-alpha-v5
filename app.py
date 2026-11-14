@@ -3931,6 +3931,14 @@ def live_dashboard():
     pre = sig.get("presignal") or build_presignal(sig, seconds_left)
     pre_direction = pre["direction"]
     pre_percent = pre["percent"]
+    signal_caption = round_signal["signal"]
+    if active in ("UP", "DOWN"):
+        signal_caption = f"APOYO DEL MOTOR {confidence}%"
+    elif pre_direction in ("UP", "DOWN") and signal_caption in (
+        "Analizando fuerza actual antes de la primera señal",
+        "SIN CONFIRMACIÓN",
+    ):
+        signal_caption = f"{pre_direction} aún sin confirmar"
 
     if pre_direction == "UP":
         pre_color, pre_bg, pre_glow = "#00dfb5", "rgba(18,91,57,.26)", "rgba(0,223,181,.20)"
@@ -4112,7 +4120,7 @@ def live_dashboard():
 
   <section class="rhero {'waiting' if active not in ('UP','DOWN') else ''}" data-official-signal="{hero_word}">
     <div class="rsignal"><span class="cssarrow"></span><span>{hero_word}</span></div>
-    <div class="rconf">{'APOYO DEL MOTOR ' + str(confidence) + '%' if active in ('UP','DOWN') else round_signal["signal"]}</div>
+    <div class="rconf">{signal_caption}</div>
   </section>
 
   {weakness_html}
