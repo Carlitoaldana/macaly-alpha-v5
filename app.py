@@ -11,7 +11,7 @@ import logging
 import math
 import html
 import zlib
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 import threading
 import time
@@ -35,9 +35,6 @@ st.set_page_config(
 # CONFIGURACIÓN ORIGINAL
 # =========================================================
 
-NEW_ROUND_WAIT = 8
-NEW_ENTRY_LOCK = 75
-
 # Dos lecturas coherentes, separadas por al menos 2 s (mínimo 2 s).
 SIGNAL_CONFIRM_READINGS = 2
 SIGNAL_CONFIRM_INTERVAL = 2.0
@@ -59,13 +56,6 @@ def _valid_live_observation(price, observed_at, source):
     _PRICE_OBSERVATIONS.values = observations
     return value
 
-
-UP_THRESHOLD = 4.0
-DOWN_THRESHOLD = -4.0
-
-FLIP_UP_THRESHOLD = 4.75
-FLIP_DOWN_THRESHOLD = -4.75
-FLIP_CONFIRMATIONS = 2
 
 # =========================================================
 # DISEÑO MOBILE — BASADO EN LA REFERENCIA APROBADA
@@ -1044,49 +1034,6 @@ def preserve_exit_plan(state, saved):
     fixed=('reference_kind','rule','direction','reference_btc','atr_at_confirmation','target_btc','invalidation_btc','source','first_time','created_at')
     state['exit_plan']={**current,**{k:old[k] for k in fixed if k in old}}
 
-def plan_bid(market, side):
-    market=market or {};prefix='yes' if side=='UP' else 'no'
-    value=_plan_number(market.get(prefix+'_bid_dollars'))
-    if value is None:
-        value=_plan_number(market.get(prefix+'_bid'))
-        if value is not None:value/=100
-    return value if value is not None and 0<value<=1 else None
-
-def render_exit_plan(state, signal, market, seconds_left, now):
-    plan=(state or {}).get('exit_plan');status=exit_plan_status(plan,signal,seconds_left,now)
-    titles={'NO_PLAN':'ESPERANDO UNA NUEVA SEÑAL','ROUND_CLOSED':'ESTA RONDA YA TERMINÓ',
-        'NO_CURRENT_DATA':'ESPERANDO UN PRECIO ACTUAL','REFERENCE_CHANGED':'NO PUEDO COMPARAR EL PRECIO AHORA',
-        'IN_RANGE':'SIGUIENDO LA SEÑAL','TARGET_REACHED':'LLEGÓ AL OBJETIVO · REVISA SALIR',
-        'INVALIDATED':'VA EN CONTRA · REVISA SALIR'}
-    title=titles[status]
-    if status=='NO_PLAN' and (state or {}).get('first_direction') in ('UP','DOWN'):
-        title='SEÑAL ACTIVA · ESPERANDO DATOS PARA LA REFERENCIA'
-    color='#e64b4b' if status=='INVALIDATED' else '#00dfb5' if status=='TARGET_REACHED' else '#38bdf8'
-    if not plan:
-        details=('La señal ya está activa. Falta un precio y ATR válidos para iniciar el seguimiento.' if (state or {}).get('first_direction') in ('UP','DOWN') else 'Los precios aparecerán cuando el bot confirme una nueva señal.')
-        rows=''
-    else:
-        if status=='IN_RANGE':title+=' '+plan['direction']
-        active_side=(state or {}).get('active_direction')
-        if active_side in ('UP','DOWN') and active_side!=plan['direction']:
-            title='LA SEÑAL ACTIVA CAMBIÓ A '+active_side+' · REVISA LA REFERENCIA INICIAL'
-        bid=plan_bid(market,plan['direction']);bid_text=f'{bid*100:.1f}¢ por contrato' if bid is not None else 'No disponible'
-        goal_verb='sube' if plan['direction']=='UP' else 'baja'
-        against_verb='baja' if plan['direction']=='UP' else 'sube'
-        fields=[('Señal inicial',plan['direction']),('Referencia BTC al reanudar' if plan.get('reference_kind')=='resumed' else 'Precio al dar la señal',f"${plan['reference_btc']:,.2f}"),
-            ('Si '+goal_verb+' a esto, revisa salir',f"${plan['target_btc']:,.2f}"),
-            ('Si '+against_verb+' a esto, revisa salir',f"${plan['invalidation_btc']:,.2f}"),
-            ('Precio orientativo para vender',bid_text)]
-        rows=''.join('<div style="display:flex;justify-content:space-between;gap:12px;margin-top:8px"><span>'+html.escape(k)+'</span><strong>'+html.escape(v)+'</strong></div>' for k,v in fields)
-        details='Estos precios son una guía; el mercado puede seguir moviéndose.'
-        if plan.get('reference_kind')=='resumed':details+=' Referencia fijada al reanudar el seguimiento; no es el precio de la señal original.'
-        current_price=_plan_number((signal or {}).get('price'))
-        if status=='IN_RANGE' and current_price is not None and (1 if plan['direction']=='UP' else -1)*(current_price-plan['reference_btc'])<0:
-            title='RETROCESO CONTRA '+plan['direction']+' · REVISA LA SALIDA'
-            details+=' BTC está en contra de la referencia inicial, sin alcanzar aún el límite marcado.'
-        if plan.get('terminal_at'):details+=' El aviso ya se activó y seguirá visible aunque el precio regrese.'
-    return '<section style="border:1px solid '+color+';border-radius:18px;padding:18px;margin:12px 0;background:#0b1720;color:#cbd5e1"><div style="font-size:13px;color:'+color+'">CUÁNDO REVISAR LA SALIDA</div><h3 style="color:'+color+';margin:10px 0">'+title+'</h3>'+rows+'<p style="font-size:12px;color:#94a3b8;margin:12px 0 0">'+details+' No vende automáticamente. El precio de venta puede cambiar y no asegura ganancias.</p></section>'
-
 
 def new_round_state(ticker, seconds_left):
     now = datetime.now(timezone.utc)
@@ -1151,7 +1098,7 @@ def _load_state_from_connection(conn, ticker):
     # La primera lectura conserva la ronda anterior, sin permitir que un trabajador
     # antiguo escriba en la nueva base coordinada.
     try:
-        with sqlite3.connect('file:' + LEGACY_ROUND_STATE_DB + '?mode=ro', uri=True, timeout=1) as legacy:
+        with closing(sqlite3.connect('file:' + LEGACY_ROUND_STATE_DB + '?mode=ro', uri=True, timeout=1)) as legacy:
             row = legacy.execute('SELECT payload FROM round_state WHERE ticker=?', (ticker,)).fetchone()
         return _decode_round_payload(row[0]) if row else None
     except Exception:
@@ -1165,7 +1112,7 @@ def load_round_state(ticker):
     if conn is not None:
         return _load_state_from_connection(conn, ticker)
     try:
-        with _round_db() as conn:
+        with closing(_round_db()) as conn:
             return _load_state_from_connection(conn, ticker)
     except Exception:
         return None
@@ -1199,7 +1146,7 @@ def save_round_state(state):
     if conn is not None:
         _write_state_to_connection(conn,state)
         return
-    with _round_db() as conn:
+    with closing(_round_db()) as conn, conn:
         conn.execute('BEGIN IMMEDIATE')
         _write_state_to_connection(conn,state)
 
@@ -1243,8 +1190,6 @@ def _background_update_state(state, sig, market, seconds_left):
     return _run_round_transaction(apply)
 
 
-
-
 # =========================================================
 # HISTORIAL Y RENDIMIENTO — CAPA INDEPENDIENTE
 # No modifica build_signal(), preseñal, lector, ballenas ni gráfico.
@@ -1255,6 +1200,7 @@ HISTORY_DB = "btc_signal_history_v2.db"
 _history_log = logging.getLogger(__name__)
 _pending_history_writes = {}
 _pending_history_lock = threading.Lock()
+_history_write_lock = threading.Lock()
 
 @contextmanager
 def _history_db():
@@ -1315,38 +1261,39 @@ def _initialize_history_db(conn):
 
 
 def save_round_history(state):
-    """Guarda la ronda y deja en espera las escrituras que fallen."""
+    """Encola y guarda la observación más reciente de la ronda."""
     if not state or not state.get("ticker"):
         return
     ticker = state["ticker"]
     snapshot = dict(state)
     with _pending_history_lock:
-        previous = _pending_history_writes.get(ticker)
-    try:
-        _persist_round_history(snapshot)
-    except sqlite3.Error as exc:
-        with _pending_history_lock:
-            _pending_history_writes[ticker] = snapshot
-        _history_log.warning("No se pudo guardar la ronda %s. Se reintentará: %s", ticker, exc)
-    else:
-        with _pending_history_lock:
-            if _pending_history_writes.get(ticker) is previous:
-                _pending_history_writes.pop(ticker, None)
+        _pending_history_writes[ticker] = snapshot
+    _flush_history_write(ticker)
 
 
 def _retry_history_writes():
     with _pending_history_lock:
-        pending = list(_pending_history_writes.items())
-    for ticker, snapshot in pending:
+        tickers = tuple(_pending_history_writes)
+    for ticker in tickers:
+        _flush_history_write(ticker)
+
+
+def _flush_history_write(ticker):
+    # Serializa los reintentos con las escrituras nuevas para evitar que una
+    # observación anterior sobrescriba otra más reciente.
+    with _history_write_lock:
+        with _pending_history_lock:
+            snapshot = _pending_history_writes.get(ticker)
+        if snapshot is None:
+            return
         try:
             _persist_round_history(snapshot)
         except sqlite3.Error as exc:
-            _history_log.warning("Sigue pendiente la escritura de %s: %s", ticker, exc)
-        else:
-            with _pending_history_lock:
-                if _pending_history_writes.get(ticker) is snapshot:
-                    _pending_history_writes.pop(ticker, None)
-
+            _history_log.warning("Escritura pendiente para la ronda %s: %s", ticker, exc)
+            return
+        with _pending_history_lock:
+            if _pending_history_writes.get(ticker) is snapshot:
+                _pending_history_writes.pop(ticker)
 
 def _persist_round_history(state):
     """Guarda la observación; solamente Kalshi determina el resultado final."""
@@ -1670,21 +1617,27 @@ def start_history_verifier():
 
 def load_history(limit=100):
     with _history_db() as conn:
-        # Un registrador antiguo aún activo no puede convertir una observación en resultado oficial.
-        conn.execute('''UPDATE round_history SET
-            final_outcome=CASE official_result WHEN 'yes' THEN 'UP' WHEN 'no' THEN 'DOWN' ELSE final_outcome END,
-            final_btc=COALESCE(verified_expiration_value,final_btc)
-            WHERE verification_status='official' ''')
-        conn.execute('''UPDATE round_history SET bot_signal=first_signal,
-            result=CASE WHEN first_signal NOT IN ('UP','DOWN') OR first_signal IS NULL THEN 'NO TRADE'
-                        WHEN verification_status != 'official' THEN 'PENDIENTE'
-                        WHEN first_signal=final_outcome THEN 'GANADA' ELSE 'PERDIDA' END''')
-        rows = conn.execute('''SELECT ticker,target,final_btc,
-            CASE WHEN verification_status='official' THEN final_outcome ELSE 'PENDIENTE' END,
-            bot_signal,result,first_signal,first_signal_time,closed_at
-            FROM round_history ORDER BY closed_at DESC LIMIT ?''', (int(limit),)).fetchall()
-    return pd.DataFrame(rows, columns=['Ronda','Target','BTC final','Resultado oficial','Señal bot','Estado','1ª señal','Hora 1ª señal','Cierre'])
-
+        rows = conn.execute('''WITH history AS (
+            SELECT ticker,target,
+                CASE WHEN verification_status='official'
+                     THEN COALESCE(verified_expiration_value,final_btc)
+                     ELSE final_btc END AS btc,
+                verification_status,
+                CASE official_result WHEN 'yes' THEN 'UP' WHEN 'no' THEN 'DOWN'
+                     ELSE final_outcome END AS outcome,
+                first_signal,first_signal_time,closed_at
+            FROM round_history ORDER BY closed_at DESC LIMIT ?
+        )
+        SELECT ticker,target,btc,
+            CASE WHEN verification_status='official' THEN outcome ELSE 'PENDIENTE' END,
+            first_signal,
+            CASE WHEN first_signal NOT IN ('UP','DOWN') OR first_signal IS NULL THEN 'NO TRADE'
+                 WHEN verification_status != 'official' THEN 'PENDIENTE'
+                 WHEN first_signal=outcome THEN 'GANADA' ELSE 'PERDIDA' END,
+            first_signal,first_signal_time,closed_at
+        FROM history ORDER BY closed_at DESC''', (int(limit),)).fetchall()
+    return pd.DataFrame(rows, columns=['Ronda','Target','BTC final','Resultado oficial',
+                                      'Señal bot','Estado','1ª señal','Hora 1ª señal','Cierre'])
 
 def history_stats(df):
     if df is None or df.empty:
@@ -1906,45 +1859,6 @@ def get_coinbase_whale_flow(flow_state=None):
     }
 
 
-def compact_usd(value):
-    value = float(value or 0)
-    if value >= 1_000_000:
-        return f"${value/1_000_000:.2f}M"
-    if value >= 1_000:
-        return f"${value/1_000:.0f}K"
-    return f"${value:,.0f}"
-
-
-def render_whale_panel(whale, active):
-    base = "margin:8px 0;padding:12px;border:1px solid #26384b;border-radius:13px;background:linear-gradient(180deg,#0c1724,#09111b)"
-    if not whale or not whale.get("detected"):
-        buy = compact_usd((whale or {}).get("live_buy", 0))
-        sell = compact_usd((whale or {}).get("live_sell", 0))
-        return f'''<section style="{base}">
-          <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:10px;color:#e4edf7">🐋 FLUJO BALLENA · EN VIVO</b><span style="font-size:8px;color:#00dfb5">● COINBASE</span></div>
-          <div style="margin-top:8px;font-size:13px;font-weight:900;color:#91a2b5">SIN FLUJO EXTREMO AHORA</div>
-          <div style="margin-top:6px;font-size:9px;color:#8da0b4">Últimos 10 s · COMPRAS {buy} · VENTAS {sell}</div>
-          <div style="margin-top:4px;font-size:8px;color:#6f8195">Confirma presión con ventanas de 10 s y 30 s; no alerta por una operación aislada.</div>
-        </section>'''
-
-    a = whale["alert"]
-    up = a["direction"] == "UP"
-    color = "#00dfb5" if up else "#e64b4b"
-    arrow = "↑" if up else "↓"
-    label = "COMPRADOR · POSIBLE IMPULSO UP" if up else "VENDEDOR · POSIBLE IMPULSO DOWN"
-    dominant = a["buy"] if up else a["sell"]
-    relation = ""
-    if active in ("UP", "DOWN"):
-        relation = " · CONFIRMA SEÑAL" if active == a["direction"] else " · CONTRADICE SEÑAL"
-    return f'''<section style="{base};border-color:{color};box-shadow:0 0 20px {color}33">
-      <div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:10px;color:#e4edf7">🐋 FLUJO BALLENA · EN VIVO</b><span style="font-size:8px;color:{color}">● ALERTA</span></div>
-      <div style="margin-top:8px;font-size:15px;font-weight:950;color:{color}">⚡ {arrow} FLUJO EXTREMO {label}</div>
-      <div style="margin-top:6px;font-size:12px;font-weight:900;color:#f3f7fb">{compact_usd(dominant)} dominantes en ~30 s</div>
-      <div style="margin-top:5px;font-size:9px;color:#aab8c7">COMPRAS {compact_usd(a['buy'])} · VENTAS {compact_usd(a['sell'])} · DOMINIO {a['imbalance']*100:.0f}%{relation}</div>
-      <div style="margin-top:4px;font-size:8px;color:#7f91a5">Alerta temprana de presión extraordinaria en el flujo real de BTC/USD.</div>
-    </section>'''
-
-
 def get_btc_live_price():
     response = requests.get(
         "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
@@ -2147,35 +2061,6 @@ def get_no_ask(market):
 # PROBABILIDAD ORIGINAL
 # =========================================================
 
-def estimated_probabilities(
-    final_score, distance, seconds_left, mom3, mom5
-):
-    score = float(np.clip(final_score, -10, 10))
-    up_prob = 50 + score * 4.2
-
-    if mom3 > 0.04:
-        up_prob += 3
-    elif mom3 < -0.04:
-        up_prob -= 3
-
-    if mom5 > 0.06:
-        up_prob += 2
-    elif mom5 < -0.06:
-        up_prob -= 2
-
-    if (
-        distance is not None
-        and seconds_left is not None
-        and seconds_left <= 180
-    ):
-        if distance > 0:
-            up_prob += 3
-        elif distance < 0:
-            up_prob -= 3
-
-    up_prob = float(np.clip(up_prob, 5, 95))
-    return round(up_prob), round(100 - up_prob)
-
 
 # =========================================================
 # MOTOR ORIGINAL v4.6.1
@@ -2296,8 +2181,6 @@ def _entry_route_checks(sig, seconds_left):
     return {"valid":True,"sides":sides,"noise_ok":noise_ok}
 
 
-
-
 def _structure_context(df, price, atr, rvol):
     """Same previous-20-candle levels used by the chart; no look-ahead.
 
@@ -2343,7 +2226,6 @@ def _structure_context(df, price, atr, rvol):
             "up_blocked": up_blocked, "down_blocked": down_blocked,
             "break_up": bool(break_up), "break_down": bool(break_down),
             "event": event}
-
 
 
 def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvol, whale):
@@ -2661,14 +2543,6 @@ def _retention_assessment(state, signal):
     families = _direction_evidence(signal)
     return (sum(v == side for v in families.values()),
             sum(v != side for v in families.values()))
-
-
-def _retention_supported(state, signal, seconds_left):
-    """Partial weakening is not sufficient to withdraw an existing signal."""
-    if seconds_left is None or seconds_left <= 0:
-        return False
-    support, _ = _retention_assessment(state, signal)
-    return support >= 2
 
 
 def _reset_withdrawal(state):
@@ -3412,128 +3286,6 @@ def closing_reader(sig, round_signal, seconds_left, micro):
     }
 
 
-def render_live_candles(df, live_price, target, active, timeframe="1m"):
-    # Renderiza velas BTC/USD para visualización sin cambiar el motor v4.6.1.
-    # 3m y 5m se construyen agrupando las velas reales de Coinbase de 1 minuto.
-    if df is None or len(df) < 5:
-        return f'<div class="chartbox"><div class="charttitle">BTC/USD · {timeframe}</div><div class="chartempty">Esperando velas…</div></div>'
-
-    tf_minutes = {"1m": 1, "3m": 3, "5m": 5}.get(timeframe, 1)
-    source_df = df.copy().sort_values("time")
-    if tf_minutes > 1:
-        d = (
-            source_df.set_index("time")
-            .resample(f"{tf_minutes}min", label="left", closed="left")
-            .agg({
-                "open": "first",
-                "high": "max",
-                "low": "min",
-                "close": "last",
-                "volume": "sum",
-            })
-            .dropna()
-            .reset_index()
-        )
-    else:
-        d = source_df[["time", "open", "high", "low", "close", "volume"]].copy()
-
-    # Solo actualiza una vela abierta con un precio de la misma fuente.
-    bucket_start = pd.Timestamp(datetime.now(timezone.utc)).floor(f"{tf_minutes}min")
-    if live_price is not None and len(d) and pd.Timestamp(d.iloc[-1]["time"]) == bucket_start:
-        i = d.index[-1]
-        d.loc[i, "close"] = float(live_price)
-        d.loc[i, "high"] = max(float(d.loc[i, "high"]), float(live_price))
-        d.loc[i, "low"] = min(float(d.loc[i, "low"]), float(live_price))
-
-    close = d["close"].astype(float)
-    ema9 = close.ewm(span=9, adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-    d = d.tail(42).reset_index(drop=True)
-    ema9 = ema9.tail(len(d)).reset_index(drop=True)
-    ema21 = ema21.tail(len(d)).reset_index(drop=True)
-
-    W, H = 760, 430
-    left, right, top, bottom = 18, 142, 54, 82
-    pw, ph = W-left-right, H-top-bottom
-    vals = list(d["low"].astype(float)) + list(d["high"].astype(float))
-    if target is not None: vals.append(float(target))
-    if live_price is not None: vals.append(float(live_price))
-    lo, hi = min(vals), max(vals)
-    pad = max((hi-lo)*0.10, 8)
-    lo, hi = lo-pad, hi+pad
-    def y(v): return top + (hi-float(v))/(hi-lo)*ph
-    n=len(d); step=pw/max(n,1); body=max(3.2, min(8, step*.58))
-
-    svg=[]
-    # horizontal grid + prices
-    for k in range(5):
-        yy=top+ph*k/4; price=hi-(hi-lo)*k/4
-        svg.append(f'<line x1="{left}" y1="{yy:.1f}" x2="{W-right}" y2="{yy:.1f}" stroke="#182536" stroke-width="1"/>')
-        svg.append(f'<text x="{W-right+8}" y="{yy+4:.1f}" fill="#8392a7" font-size="12">{price:,.0f}</text>')
-    # vertical grid
-    for k in range(5):
-        xx=left+pw*k/4
-        svg.append(f'<line x1="{xx:.1f}" y1="{top}" x2="{xx:.1f}" y2="{top+ph}" stroke="#121e2d" stroke-width="1"/>')
-
-    # volume scaled into bottom 52 px of plot
-    vmax=max(float(d["volume"].max()),1)
-    vbase=top+ph
-    for i,row in d.iterrows():
-        x=left+(i+.5)*step; vh=float(row["volume"])/vmax*48
-        col='#16b97a' if float(row['close'])>=float(row['open']) else '#c43d59'
-        svg.append(f'<rect x="{x-body/2:.1f}" y="{vbase-vh:.1f}" width="{body:.1f}" height="{vh:.1f}" fill="{col}" opacity=".55"/>')
-
-    # candles
-    for i,row in d.iterrows():
-        x=left+(i+.5)*step
-        o,c,h,l=map(float,[row['open'],row['close'],row['high'],row['low']])
-        col='#00dfb5' if c>=o else '#e64b4b'
-        svg.append(f'<line x1="{x:.1f}" y1="{y(h):.1f}" x2="{x:.1f}" y2="{y(l):.1f}" stroke="{col}" stroke-width="1.4"/>')
-        yy=min(y(o),y(c)); hh=max(2.0,abs(y(o)-y(c)))
-        svg.append(f'<rect x="{x-body/2:.1f}" y="{yy:.1f}" width="{body:.1f}" height="{hh:.1f}" rx=".7" fill="{col}"/>')
-
-    # EMA paths
-    def path(series,color):
-        pts=' '.join(f'{left+(i+.5)*step:.1f},{y(v):.1f}' for i,v in enumerate(series))
-        return f'<polyline points="{pts}" fill="none" stroke="{color}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'
-    svg.append(path(ema9,'#df42e7'))
-    svg.append(path(ema21,'#32d7ef'))
-
-    # target line
-    if target is not None and lo <= float(target) <= hi:
-        ty=y(target)
-        svg.append(f'<line x1="{left}" y1="{ty:.1f}" x2="{W-right}" y2="{ty:.1f}" stroke="#23e7c1" stroke-width="1.8" stroke-dasharray="7 6"/>')
-        # La etiqueta queda en el margen derecho, fuera del área de velas.
-        svg.append(f'<rect x="{W-right+18}" y="{ty-12:.1f}" width="96" height="23" rx="3" fill="#20e7bd"/>')
-        svg.append(f'<text x="{W-right+25}" y="{ty+4:.1f}" fill="#061510" font-size="10" font-weight="800">TARGET</text>')
-    # live price line + label
-    if live_price is not None and lo <= float(live_price) <= hi:
-        ly=y(live_price); lc='#00dfb5' if active=='UP' else '#e64b4b' if active=='DOWN' else '#38bdf8'
-        svg.append(f'<line x1="{left}" y1="{ly:.1f}" x2="{W-right}" y2="{ly:.1f}" stroke="{lc}" stroke-width="1.3" stroke-dasharray="3 4"/>')
-        svg.append(f'<rect x="{W-right+18}" y="{ly-12:.1f}" width="96" height="23" rx="3" fill="{lc}"/>')
-        svg.append(f'<text x="{W-right+25}" y="{ly+4:.1f}" fill="#061510" font-size="11" font-weight="900">{float(live_price):,.0f}</text>')
-
-    # time labels
-    picks=[0, max(0,n//3), max(0,2*n//3), n-1]
-    for idx in picks:
-        tm=d.iloc[idx]['time'].to_pydatetime().astimezone(ZoneInfo("America/New_York")).strftime('%-I:%M %p')
-        xx=left+(idx+.5)*step
-        svg.append(f'<text x="{xx:.1f}" y="{H-52}" text-anchor="middle" fill="#8392a7" font-size="11">{tm}</text>')
-
-    last=d.iloc[-1]
-    change=float(last['close'])-float(last['open'])
-    pct=(change/float(last['open'])*100) if float(last['open']) else 0
-    direction_color='#00dfb5' if change>=0 else '#e64b4b'
-    target_label=f'${float(target):,.0f}' if target is not None else '--'
-    return f'''<section class="chartbox">
-      <div class="charttop"><div><b>BTC/USD · {timeframe}</b><span class="chartlive">● LIVE</span></div><div class="charttf">{timeframe}</div></div>
-      <div class="ohlc">O {float(last['open']):,.0f} &nbsp; H {float(last['high']):,.0f} &nbsp; L {float(last['low']):,.0f} &nbsp; C {float(last['close']):,.0f} &nbsp; <strong style="color:{direction_color}">{change:+,.0f} ({pct:+.2f}%)</strong></div>
-      <div class="indicators"><span class="ema9dot">●</span> EMA9 {float(ema9.iloc[-1]):,.0f} &nbsp;&nbsp; <span class="ema21dot">●</span> EMA21 {float(ema21.iloc[-1]):,.0f} &nbsp;&nbsp; <span class="targetdot">━</span> TARGET {target_label}</div>
-      <svg class="candlesvg" viewBox="0 0 {W} {H}" preserveAspectRatio="none">{''.join(svg)}</svg>
-      <div class="chartfoot"><span class="selected">{timeframe}</span><span>VELAS REALES COINBASE</span><span>ACTUALIZACIÓN LIVE</span></div>
-    </section>'''
-
-
 # =========================================================
 # NAVEGACIÓN REAL — EL ENGRANAJE ABRE AJUSTES
 # No muestra botones extra en la pantalla principal.
@@ -3653,113 +3405,10 @@ def get_order_flow_advisory(whale):
             "imbalance": imbalance, "reliable": True}
 
 
-def render_intelligent_market_panel(book, flow, active):
-    def describe(item):
-        if not item or not item.get("reliable"):
-            return "SIN DATOS", "—"
-        d = item.get("direction")
-        return ("PRESIÓN " + d if d else "EQUILIBRADO"), f"{abs(item['imbalance'])*100:.0f}%"
-    book_label, book_pct = describe(book)
-    flow_label, flow_pct = describe(flow)
-    if not book or not flow.get("reliable"):
-        headline, color, detail = "DATOS INSUFICIENTES", "#94a3b8", "Esperando lecturas válidas de Coinbase."
-    elif book["direction"] and book["direction"] == flow["direction"]:
-        direction = book["direction"]
-        if active in ("UP", "DOWN"):
-            contrary = active != direction
-            headline = f"{active} EN RIESGO" if contrary else f"APOYO A {active}"
-            color = "#ffb347" if contrary else ("#ef4444" if active == "DOWN" else "#00dfb5")
-        else:
-            headline, color = f"PRESIÓN CONJUNTA {direction}", ("#ef4444" if direction == "DOWN" else "#00dfb5")
-        detail = "Order Book y Order Flow coinciden."
-    else:
-        headline, color, detail = "LECTURAS MIXTAS", "#e9bb66", "Sin confirmación conjunta entre indicadores."
-    def pressure_color(label):
-        return "#ef4444" if "DOWN" in label else "#00dfb5" if "UP" in label else "#cbd5e1"
-    book_color = pressure_color(book_label)
-    flow_color = pressure_color(flow_label)
-    return f'''<section style="margin:12px 0;padding:18px;min-height:300px;display:flex;flex-direction:column;justify-content:center;border:1px solid {color};border-radius:18px;background:#0b1520;box-shadow:0 0 18px {color}20">
-      <div style="font-size:13px;font-weight:900;color:#dce7f3">ANÁLISIS INTELIGENTE · BTC · COINBASE</div>
-      <div style="margin-top:14px;font-size:clamp(25px,5vw,34px);font-weight:950;color:{color};text-shadow:0 0 16px {color}55">{headline}</div>
-      <div style="margin-top:12px;font-size:14px;color:#cbd5e1"><b>ORDER BOOK:</b> <span style="color:{book_color};font-weight:900">{book_label} · {book_pct}</span></div>
-      <div style="margin-top:9px;font-size:14px;color:#cbd5e1"><b>ORDER FLOW (30 s):</b> <span style="color:{flow_color};font-weight:900">{flow_label} · {flow_pct}</span></div>
-      <div style="margin-top:14px;font-size:13px;color:#cbd5e1">{detail}</div>
-      <div style="margin-top:15px;font-size:12px;color:#94a3b8">Solo informativo. No predice aciertos ni cambia la señal oficial. Las órdenes pueden cancelarse y el flujo puede ser incompleto.</div>
-    </section>'''
-
 # DETECTOR TEMPRANO DE REVERSIÓN (SOLO OBSERVACIÓN)
 # Independiente: NO modifica build_signal, preseñal, ni señales oficiales.
 # =========================================================
 
-def detect_early_reversal(ticker, micro, whale, price):
-    """Detector observacional autónomo: no consulta señal ni estado del cerebro.
-
-    Busca un cambio de dirección entre el movimiento previo y los últimos
-    10 segundos. El flujo Coinbase aporta contexto, no impide la lectura.
-    """
-    empty = {"status": "OBSERVANDO", "direction": None,
-             "detail": "Reuniendo movimiento del precio.", "checks": 0}
-    if ticker in (None, "--") or price is None:
-        return empty
-    tape = st.session_state.get("micro_prices", [])
-    if len(tape) < 4 or not micro.get("ready"):
-        return empty
-
-    now = datetime.now(timezone.utc).timestamp()
-    if now - float(tape[-1]["t"]) > 6:
-        return {**empty, "detail": "Esperando precio actualizado."}
-
-    last_t = float(tape[-1]["t"])
-    current = float(tape[-1]["p"])
-    def at_or_before(age):
-        cutoff = last_t - age
-        earlier = [x for x in tape if float(x["t"]) <= cutoff]
-        return (float(earlier[-1]["p"])
-                if earlier and cutoff - float(earlier[-1]["t"]) <= SIGNAL_CONFIRM_INTERVAL else None)
-
-    p10 = at_or_before(10)
-    p30 = at_or_before(30)
-    if p10 is None or p30 is None:
-        return {**empty, "detail": "Reuniendo 30 segundos de precio para comparar tendencias."}
-
-    recent = current - p10
-    previous = p10 - p30
-    direction = None
-    if previous < 0 and recent > 0:
-        direction = "UP"
-    elif previous > 0 and recent < 0:
-        direction = "DOWN"
-
-    buy = float((whale or {}).get("live_buy", 0) or 0)
-    sell = float((whale or {}).get("live_sell", 0) or 0)
-    total = buy + sell
-    flow_direction = "UP" if buy > sell else "DOWN" if sell > buy else None
-    flow_share = max(buy, sell) / total * 100 if total else 0
-    detail = f"Tramo previo {previous:+.0f} USD · últimos 10s {recent:+.0f} USD"
-    if total:
-        detail += f" · flujo Coinbase {flow_direction} {flow_share:.0f}%"
-    else:
-        detail += " · flujo Coinbase no disponible"
-
-    if direction:
-        return {"status": "POSIBLE REVERSIÓN", "direction": direction,
-                "detail": detail + " · cambio de dirección observado, no confirmado",
-                "checks": 1}
-    return {"status": "SIN REVERSIÓN OBSERVADA", "direction": None,
-            "detail": detail, "checks": 0}
-
-
-def render_early_reversal_panel(result):
-    direction = result.get("direction")
-    color = "#e64b4b" if direction == "DOWN" else "#00dfb5" if direction == "UP" else "#8fa3b8"
-    title = result.get("status", "OBSERVANDO")
-    detail = result.get("detail", "")
-    return f'''<section style="margin:12px 0;padding:18px;min-height:300px;display:flex;flex-direction:column;justify-content:center;border:1px solid {color};border-radius:18px;background:#0b1520">
-      <div style="font-size:13px;font-weight:900;color:#dce7f3">DETECTOR DE REVERSIÓN · EXPERIMENTAL</div>
-      <div style="margin-top:14px;font-size:24px;line-height:1.3;font-weight:950;color:{color}">{title}{' → ' + direction if direction else ''}</div>
-      <div style="margin-top:14px;font-size:14px;line-height:1.5;color:#cbd5e1">{detail}</div>
-      <div style="margin-top:18px;font-size:12px;line-height:1.5;color:#94a3b8">Alerta informativa, no orden de compra ni predicción garantizada. No cambia la señal oficial.</div>
-    </section>'''
 
 # Panel visual independiente del motor. Sin envío de órdenes.
 
@@ -4078,57 +3727,6 @@ window.addEventListener('message',function(event){
 });
 draw();
 </script></html>'''
-
-
-def signal_requirement_view(sig, seconds_left):
-    return _entry_route_checks(sig, seconds_left)
-
-
-def render_signal_requirements(sig, round_signal, market, seconds_left, now=None):
-    """One visual box for individual conditions; never changes confirmation."""
-    view = signal_requirement_view(sig, seconds_left)
-    state = round_signal.get('round_state') or {}
-    now = now or datetime.now(timezone.utc)
-    end = pd.to_datetime((market or {}).get('close_time'), utc=True, errors='coerce')
-    closed = seconds_left is not None and seconds_left <= 0
-    if not pd.isna(end):
-        closed = closed or end <= pd.Timestamp(now)
-    ready = view['valid'] and bool(state) and not closed and not pd.isna(end)
-    side = sig.get('candidate')
-    if side not in ('UP', 'DOWN'):
-        # La dirección histórica no decide qué requisitos se inspeccionan.
-        # Sin candidatura válida, mostrar el lado de mayor evidencia ACTUAL,
-        # sin convertirlo en señal oficial.
-        current_score = sig.get('final_score')
-        if current_score is not None:
-            try:
-                value = float(current_score)
-                if np.isfinite(value) and value != 0:
-                    side = 'UP' if value > 0 else 'DOWN'
-            except (TypeError, ValueError):
-                pass
-    if side not in ('UP', 'DOWN') and view['valid']:
-        side = max(('UP', 'DOWN'), key=lambda d: max(r['met']/r['total'] for r in view['sides'][d]))
-    checks = []
-    if view['valid'] and side in ('UP', 'DOWN'):
-        routes = view['sides'][side]
-        # Mostrar solo rutas de tendencia y entrada temprana.
-        complete = [r for r in routes if r['complete']]
-        route = complete[0] if complete else max(routes, key=lambda r: r['met']/r['total'])
-        checks = route['checks']
-    total = len(checks)
-    met = sum(bool(ok) for _, ok in checks) if ready else 0
-    # Cada nombre corresponde al mismo booleano que controla su barra.
-    bars = ''.join(
-        '<div class="sq-item"><i' + (' class="sq-on"' if ready and ok else '') +
-        ' title="' + html.escape(label, quote=True) + '"></i>' +
-        '<span>' + html.escape(label) + '</span></div>'
-        for label, ok in checks
-    )
-    label = 'REQUISITOS ' + side if side in ('UP','DOWN') else 'REQUISITOS DE LA SEÑAL'
-    note = 'RONDA TERMINADA' if closed else 'ESPERANDO DATOS' if not ready else 'Cada barra representa un requisito.'
-    number = str(met) + '<small>/' + str(total) + '</small>' if total else '—'
-    return '<style>.sq-box{margin:12px 0;padding:18px;border:1px solid #23685e;border-radius:18px;background:linear-gradient(125deg,#0c2026,#0a151e);color:#eef5f8}.sq-title{font-size:11px;font-weight:800;letter-spacing:1.5px;color:#8ca1ab}.sq-number{font-size:38px;font-weight:900;margin:14px 0;line-height:1.1}.sq-number small{font-size:20px;color:#81949f}.sq-bars{display:flex;gap:7px;margin:14px 0}.sq-bars .sq-item{flex:1;min-width:0;text-align:center}.sq-bars i{display:block;height:7px;width:100%;background:#1d3038;border-radius:9px}.sq-bars .sq-item span{display:block;margin-top:7px;font-size:9px;line-height:1.25;color:#a5b6be;overflow-wrap:anywhere}.sq-bars .sq-on{background:#00dfb5;box-shadow:0 0 10px #00dfb54d}.sq-note{font-size:11px;color:#a5b6be}.sq-down .sq-bars .sq-on{background:#e64b4b;box-shadow:0 0 10px #e64b4b4d}</style><section class="sq-box' + (' sq-down' if side == 'DOWN' else '') + '"><div class="sq-title">' + label + '</div><div class="sq-number">' + number + '</div><div class="sq-bars">' + bars + '</div><div class="sq-note">' + note + '</div></section>'
 
 
 @st.fragment(run_every="2s")
@@ -4740,8 +4338,6 @@ def _trace_event(kind, payload, ticker=None):
         return
 
 
-
-
 # =========================================================
 def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
     _TRACE_CONTEXT.build_id = None
@@ -4871,7 +4467,6 @@ def render_signal_trace_page():
         st.json(readings)
     except Exception as error:
         st.info("Datos todavía no disponibles: " + str(error))
-
 
 
 # Raíz visual estable: no se destruye con los ciclos del fragmento.
