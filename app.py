@@ -1587,8 +1587,10 @@ EXTRA_SERIES_15M = {
     'DOGE': 'KXDOGE15M', 'HYPE': 'KXHYPE15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-6x15-v10'
+RADAR_REVISION = 'radar-6x15-v11'
 DIRECTION_MIN = 4
+STRONG_DIRECTION_MIN = 3
+STRONG_DIRECTION_PCT = 70
 QUOTE_MAX_AGE = 25
 
 
@@ -1677,9 +1679,11 @@ def radar_decision(rows, entry_limit, now):
     down = [asset for asset, row in rows.items() if row['yes'] < 50]
     if rows.keys() != SERIES_15M.keys() or any(row["close"] <= now for row in rows.values()):
         return None, [], [], len(up), len(down)
-    if len(up) >= DIRECTION_MIN:
+    strong_up = sum(rows[asset]['yes'] > STRONG_DIRECTION_PCT for asset in up)
+    strong_down = sum(100 - rows[asset]['yes'] > STRONG_DIRECTION_PCT for asset in down)
+    if len(up) >= DIRECTION_MIN and strong_up >= STRONG_DIRECTION_MIN:
         side, leaders, opposite, ask = 'UP', up, down, 'yes_ask'
-    elif len(down) >= DIRECTION_MIN:
+    elif len(down) >= DIRECTION_MIN and strong_down >= STRONG_DIRECTION_MIN:
         side, leaders, opposite, ask = 'DOWN', down, up, 'no_ask'
     else:
         return None, [], [], len(up), len(down)
@@ -1818,7 +1822,7 @@ class PaperBot(Bot):
                 entry_limit = self.settings['radar_entry_limit_cents']
                 fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit, now)
                 if fresh_side != side:
-                    notes[asset] = 'La confirmación de cuatro monedas ya no está vigente'
+                    notes[asset] = 'La confirmación de dirección y fuerza ya no está vigente'
                     break
                 if asset not in eligible or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
@@ -1877,7 +1881,8 @@ class PaperBot(Bot):
         if radar_count < len(SERIES_15M):
             summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
         elif majority is None:
-            summary = f'Sin cuatro del mismo lado · {yes} UP / {no} DOWN'
+            summary = (f'Sin señal · {yes} UP / {no} DOWN · Se requieren {DIRECTION_MIN} del mismo lado'
+                       f' y {STRONG_DIRECTION_MIN} por encima del {STRONG_DIRECTION_PCT}%')
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
             opportunity = (' · Candidatas: ' + ', '.join(candidates)
@@ -2455,7 +2460,7 @@ function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
 const direction=active==='SÍ'?'UP':active==='NO'?'DOWN':null;
 const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=6?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=6?'SIN CONFIRMAR':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.radar_entry_limit_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 renderPositions(s,fresh);$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
@@ -2665,7 +2670,8 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · 6 MONEDAS · 4 PARA CONFIRMAR · SALDO VIRTUAL')
+    st.caption(f'SIMULACIÓN · {len(SERIES_15M)} MONEDAS · {DIRECTION_MIN} DEL MISMO LADO, '
+               f'{STRONG_DIRECTION_MIN} POR ENCIMA DEL {STRONG_DIRECTION_PCT}% · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
