@@ -2827,19 +2827,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state[key] = None
         state["pending_count"] = 0
         return
-    # OBSERVACIÓN INICIAL: durante el primer minuto de cada ronda de 15m,
-    # seguir calculando indicadores y recogiendo precios, pero sin confirmar
-    # ni dejar pendiente una primera señal. El reloj viene del cierre real
-    # del mercado, no de cuándo abrió el usuario la pantalla.
-    if (state.get("first_direction") is None
-            and (seconds_left is None or seconds_left > 14 * 60)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        state["pending_price_source"] = None
-        state["opening_conflict"] = "Analizando el primer minuto de la ronda"
-        return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
         # Una interrupción no demuestra neutralidad ni permite confirmar.
@@ -3581,74 +3568,62 @@ def render_live_candles(df, live_price, target, active, timeframe="1m"):
 # =========================================================
 
 def render_history_page():
+    # Diseño aislado del registro: no altera cálculos, señales ni el motor.
     st.markdown("""
     <style>
-    .settings-back{color:#d7e1ee!important;text-decoration:none!important;font-size:14px;font-weight:900}
-    .settings-title{font-size:30px;font-weight:1000;color:#fff;margin:22px 0 4px}
-    .settings-sub{font-size:14px;color:#c7d0dc;margin-bottom:20px}
-    .history-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
-    .history-stat{background:#0d141d;border:1px solid #1d2b3a;border-radius:10px;padding:10px 5px;text-align:center}
-    .history-label{font-size:9px;font-weight:1000;color:#fff!important;opacity:1!important;margin-bottom:7px}
-    .history-value{font-size:22px;font-weight:1000;line-height:1}
-    .history-note{margin-top:14px;color:#fff!important;opacity:1!important;font-size:10px;font-weight:900}
-    
-/* Strong neon and readable labels across both visual surfaces. */
-.green{color:#00dfb5!important;text-shadow:0 0 5px #00dfb588,0 0 14px #00dfb555!important}
-.red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
-.pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
-.pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
-.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
-.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
-.rhero{filter:drop-shadow(0 0 9px var(--accent))}
-.note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
-.floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
-.canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
-@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
-
-
-/* Purple neon outlines, consistent across dashboard and chart cards. */
-.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
-.finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
-.panel,.card,.metric,details,.floatcounts div{
- border-color:#23685e!important;
- box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
-}
-.panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
-.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
-.techrow,.rnav,.chartnav{border-color:#23685e!important}
-
-
-/* Uniform turquoise presentation. Signal values and timing are unchanged. */
-.stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
-.refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
-.panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
- background:linear-gradient(125deg,#0c2026,#0a151e)!important;
- border-color:#23685e!important;box-shadow:none!important;
-}
-.refapp .techrow,.refapp .techrow>div,.refapp .rnav,.panel .chartnav{border-color:#244047!important}
-.refapp .gear,.panel summary:after{color:#00dfb5!important;text-shadow:none!important}
-.refapp .finalcard,.refapp .finalclose,.refapp .analysisbox,.refapp .probbox{border-color:#244047!important}
-.stRadio label,[data-testid="stButton"] button,.panel .toggle,.panel .chartnav button{
- background:#0a151e!important;border-color:#23685e!important;color:#e3f0ee!important;
-}
-.panel{background:#06121a!important}
-
-</style>""", unsafe_allow_html=True)
+    .history-view{font-family:inherit;color:#f8fafc;max-width:1000px;margin:0 auto;padding:118px 0 22px}
+    .history-view .history-back{display:inline-block;color:#dcecff!important;text-decoration:none!important;font-size:14px;font-weight:800;margin-bottom:12px}
+    .history-view .history-head{margin-top:100px;position:relative;overflow:hidden;padding:23px 18px 20px;border:1px solid #286bb1;border-radius:20px;background:radial-gradient(ellipse at 92% 5%,#154f79 0%,transparent 48%),linear-gradient(145deg,#071b35,#060e22 78%);box-shadow:0 0 18px #057aff28,inset 0 0 25px #0b4b7c22}
+    .history-view .history-head:before{content:"";position:absolute;inset:0;pointer-events:none;background:linear-gradient(125deg,transparent 20%,#0aa9ff16 21%,transparent 23%,transparent 68%,#e9ad3218 69%,transparent 71%)}
+    .history-view .history-head-inner{position:relative;z-index:1;text-align:center}
+    .history-view .history-kicker{color:#f8c967;font-size:11px;font-weight:900;letter-spacing:2.5px;margin-bottom:7px}
+    .history-view .history-title{font-size:clamp(24px,5vw,38px);line-height:1.1;font-weight:1000;letter-spacing:.5px;color:#fff;text-shadow:0 0 20px #0c9fff55}
+    .history-view .history-version{display:inline-block;margin:10px auto 0;padding:5px 17px;border:1px solid #24baff;border-radius:999px;color:#e4f8ff;background:#071a37;font-size:13px;font-weight:900;box-shadow:0 0 12px #008fff55}
+    .history-view .history-sub{color:#b9cde4;font-size:12px;margin:14px 0 0}
+    .history-view .history-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:18px}
+    .history-view .history-stat{position:relative;min-width:0;padding:18px 5px 16px;text-align:center;border-radius:17px;background:linear-gradient(155deg,#101b31,#070f21);border:1px solid var(--stat-color);box-shadow:0 0 13px var(--stat-glow),inset 0 0 16px var(--stat-glow)}
+    .history-view .history-icon{font-size:23px;line-height:1.2;margin-bottom:8px;color:var(--stat-color)}
+    .history-view .history-label{font-size:12px;font-weight:850;color:#fff!important;margin-bottom:9px}
+    .history-view .history-value{font-size:clamp(21px,4.5vw,38px);line-height:1.1;font-weight:1000;color:var(--stat-color);font-variant-numeric:tabular-nums}
+    .history-view .history-foot{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:10px 16px;margin-top:17px;padding:13px 12px;border:1px solid #2368ad;border-radius:13px;background:#08162c;box-shadow:0 0 12px #037cfb22}
+    .history-view .history-chip{font-size:12px;font-weight:800;color:#e8f1ff}
+    .history-view .history-chip b{color:#f9c65b}
+    .history-view .history-disclaimer{flex-basis:100%;text-align:center;font-size:11px;line-height:1.5;color:#b7c9df}
+    @media(max-width:520px){
+      .history-view .history-head{padding:19px 12px 15px}
+      .history-view .history-stats{gap:7px}
+      .history-view .history-stat{padding:13px 2px 12px;border-radius:12px}
+      .history-view .history-icon{font-size:18px;margin-bottom:5px}
+      .history-view .history-label{font-size:10px;margin-bottom:7px}
+      .history-view .history-value{font-size:clamp(19px,5.1vw,27px)}
+      .history-view .history-foot{gap:7px 14px}
+    }
+    </style>""", unsafe_allow_html=True)
     df=load_history(2000); stats=history_stats(df)
     st.markdown(f"""
-    <a class="settings-back" href="?page=signal" target="_self">← Señal</a>
-    <div class="settings-title">⚙ Ajustes</div>
-    <div class="settings-sub">Historial y rendimiento · registro automático por ronda</div>
-    <div class="history-stats">
-      <div class="history-stat"><div class="history-label">Rondas</div><div class="history-value" style="color:#54c6f5">{stats["total"]}</div></div>
-      <div class="history-stat"><div class="history-label">Ganadas</div><div class="history-value" style="color:#00dfb5">{stats["wins"]}</div></div>
-      <div class="history-stat"><div class="history-label">Perdidas</div><div class="history-value" style="color:#e64b4b">{stats["losses"]}</div></div>
-      <div class="history-stat"><div class="history-label">Acierto</div><div class="history-value" style="color:#f7bd4d">{f"{stats['win_rate']:.1f}%" if stats['decided'] else "—"}</div></div>
-    </div>
-    <div class="history-note">Pendientes: {stats["pending"]} · NO TRADE: {stats["no_trade"]} · Acierto basado solo en resultados oficiales verificados.</div>
+    <section class="history-view">
+      <a class="history-back" href="?page=signal" target="_self">← Volver a Señal</a>
+      <div class="history-head">
+        <div class="history-head-inner">
+          <div class="history-kicker">JC ALPHA EDGE · REGISTRO</div>
+          <div class="history-title">BTC SIGNAL</div>
+          <div class="history-version">v4.6.1</div>
+          <div class="history-sub">Historial y rendimiento · registro automático por ronda</div>
+        </div>
+        <div class="history-stats">
+          <div class="history-stat" style="--stat-color:#45caff;--stat-glow:#079dff30"><div class="history-icon">▥</div><div class="history-label">Rondas</div><div class="history-value">{stats["total"]}</div></div>
+          <div class="history-stat" style="--stat-color:#16e6a4;--stat-glow:#04d99130"><div class="history-icon">✓</div><div class="history-label">Ganadas</div><div class="history-value">{stats["wins"]}</div></div>
+          <div class="history-stat" style="--stat-color:#ff5268;--stat-glow:#f8324a30"><div class="history-icon">✕</div><div class="history-label">Perdidas</div><div class="history-value">{stats["losses"]}</div></div>
+          <div class="history-stat" style="--stat-color:#ffcb5b;--stat-glow:#ffb52330"><div class="history-icon">◉</div><div class="history-label">Acierto</div><div class="history-value">{f"{stats['win_rate']:.1f}%" if stats['decided'] else "—"}</div></div>
+        </div>
+        <div class="history-foot">
+          <span class="history-chip">⏳ Pendientes: <b>{stats["pending"]}</b></span>
+          <span class="history-chip">⊘ NO TRADE: <b>{stats["no_trade"]}</b></span>
+          <div class="history-disclaimer">Acierto basado solo en resultados oficiales verificados. No representa ganancias garantizadas.</div>
+        </div>
+      </div>
+    </section>
     """, unsafe_allow_html=True)
-
 
 
 # =========================================================
