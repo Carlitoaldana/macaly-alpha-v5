@@ -1580,15 +1580,14 @@ class Bot:
 
 
 CORE_SERIES_15M = {
-    'BTC': 'KXBTC15M', 'ETH': 'KXETH15M', 'XRP': 'KXXRP15M',
+    'BTC': 'KXBTC15M', 'ETH': 'KXETH15M',
     'SOL': 'KXSOL15M',
 }
 EXTRA_SERIES_15M = {
-    'DOGE': 'KXDOGE15M', 'HYPE': 'KXHYPE15M',
+    'DOGE': 'KXDOGE15M', 'BNB': 'KXBNB15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-6x15-v11'
-DIRECTION_MIN = 4
+RADAR_REVISION = 'radar-5x15-v13'
 STRONG_DIRECTION_MIN = 3
 STRONG_DIRECTION_PCT = 70
 QUOTE_MAX_AGE = 25
@@ -1681,9 +1680,9 @@ def radar_decision(rows, entry_limit, now):
         return None, [], [], len(up), len(down)
     strong_up = sum(rows[asset]['yes'] > STRONG_DIRECTION_PCT for asset in up)
     strong_down = sum(100 - rows[asset]['yes'] > STRONG_DIRECTION_PCT for asset in down)
-    if len(up) >= DIRECTION_MIN and strong_up >= STRONG_DIRECTION_MIN:
+    if strong_up >= STRONG_DIRECTION_MIN:
         side, leaders, opposite, ask = 'UP', up, down, 'yes_ask'
-    elif len(down) >= DIRECTION_MIN and strong_down >= STRONG_DIRECTION_MIN:
+    elif strong_down >= STRONG_DIRECTION_MIN:
         side, leaders, opposite, ask = 'DOWN', down, up, 'no_ask'
     else:
         return None, [], [], len(up), len(down)
@@ -1706,7 +1705,7 @@ class PaperBot(Bot):
         self.snapshot['mode'] = 'SIMULACIÓN'
         self.snapshot['radar'] = [{'asset': asset, 'detail': 'Consultando'} for asset in SERIES_15M]
         self.snapshot['updated'] = stamp()
-        self.snapshot['radar_summary'] = 'Consultando las seis monedas del radar.'
+        self.snapshot['radar_summary'] = f'Consultando las {len(SERIES_15M)} monedas del radar.'
         if 'round_close' not in {r[1] for r in self.db.execute('PRAGMA table_info(trades)')}:
             self.db.execute('ALTER TABLE trades ADD COLUMN round_close TEXT')
         self.db.execute('CREATE INDEX IF NOT EXISTS trades_round_close ON trades(round_close)')
@@ -1881,8 +1880,8 @@ class PaperBot(Bot):
         if radar_count < len(SERIES_15M):
             summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
         elif majority is None:
-            summary = (f'Sin señal · {yes} UP / {no} DOWN · Se requieren {DIRECTION_MIN} del mismo lado'
-                       f' y {STRONG_DIRECTION_MIN} por encima del {STRONG_DIRECTION_PCT}%')
+            summary = (f'Sin señal · {yes} UP / {no} DOWN · Se requieren {STRONG_DIRECTION_MIN} del mismo lado'
+                       f' por encima del {STRONG_DIRECTION_PCT}%')
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
             opportunity = (' · Candidatas: ' + ', '.join(candidates)
@@ -2099,7 +2098,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <footer>
 <span class="gold" id="executionFooter">SIMULACIÓN</span>
-<br>6 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
+<br>5 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
 <span class="green"><span id="feedStatus">● Esperando datos</span></span>
 </footer>
 </aside>
@@ -2111,7 +2110,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <div>
 <small>MERCADO</small>
-<strong>6 MONEDAS · 15 MINUTOS</strong>
+<strong>5 MONEDAS · 15 MINUTOS</strong>
 </div>
 <div>
 <small>SESIÓN</small>
@@ -2198,7 +2197,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Cuatro monedas vigentes del mismo lado confirman la dirección · 50% exacto es neutral.</div>
+<div class="notice">Tres monedas del mismo lado por encima del 70% confirman la dirección · 50% exacto es neutral.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2206,7 +2205,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Plan de operación</h2>
 <div class="body">
 <div class="top-controls">
-<span>6 monedas · 15 minutos</span>
+<span>5 monedas · 15 minutos</span>
 <span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
 </div>
 <div class="strength">
@@ -2399,10 +2398,8 @@ const coinIcons = Object.freeze({
   "BTC": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAACv0lEQVR4AaxWA6xdQRB9URs7qW0rThvXiGvbdqPa/EZt27bNb9u83tOd4u733W16knc1u3Nmd2bOPp8scKpDLd2vUV/dr0GA7t/gPv9F6P71i+hHz/SNbDSGxvr+FxDQtC53Hqj71S/Q/OpD5kdjaQ7N/Xfiay1ra34N1nBnxcK52o/mkg/ypbxqPvG5BInUj3xJ74YR2LAzn5CkQCD1I5+GX8NOEitXIVcPgjiqz7nitluvdsBJfQ39cC9oIW2gBbWQSkeVNUHForoiJ+0NGHM4eVuYzzaCORaMi6NkglhTudUkqt2OvQkn+RnMF9s40QgihJP56bct4SEI2r4eUt1RLhXUszIrZsXpqAhWkgXr4z4wswROfpz07hGnUDhpkWkA4+ZsVAdm67C+neA10VNKrIjbR9KplPvwzigL885CWJ8Pg5XmiEDMUhhXxnv6Im4f6bdKAMb1aS6RkxcjbLwQ7fh7ro0C8uoK4qb831dqvU8HXBLry5HyDk8PBgQ8U0HcFECEUuvlRLgEpANaQFMR3NsAsQOODS20nVcAET46TuXz3wkCgsgpSAQzilEW1vswT3/ErRSAcX2qIC5K5cV3iJMnoCLM+8skW7F+oVIKrE/7IfJ/VDg6NZAL1HPXRruhH+8jowURoggV82/cnFXeHtAErCDJtZNqSgRw37MN9RN9eLvFwk56DAGS3O4Vx5IsixbN+OgZAHF7CpH9/VSVhUfiY95ZwFtvCIwLw0QHiBRJCZG3FId1hHFtCum9KDgPMNsgDZCSYqXDyHq1CwTrQzhXvbsoD6GAxs2ZUoeR8nHspL4CY4wLTHuYT9eBYD5cBf1kPxiXx4K6QQtupX4cS/0h8W8IJz8eTtZXend1X/u5+SbkNM2ayG+SzdSA1wl/n55Alye/SUb/RunAN8vp3zEZCl0z+ndOB7x7DgARoloEset8/QAAAABJRU5ErkJggg==",
   "ETH": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAACzklEQVR4AaxWA9ZcXRCco//fQjaRbCPriG1zFNu2bdu2bc6zvvFUXgVj9PuSPqeH93bVbdR9IalFIvivR1Tr3C2cWNwtrJz1/bn/2aHzM3/jf1zDtaF/ZX0jboduEWVJ17BidZ2YgMS5lnu4t93AAxbg/64RJeYHdBm0ne4yBmMFP3U4cVUEInDGEmeje0Tv1C2sfBQGxsZDNt8Fa5WPPWN6R8HJZeD0TT74tftJzFhjiNYzNjEa1jxI2gfPUOAl8ySAk1c99J2siMtRtyd+NxykTmAa38/dbMPafbZ4L7FqUh+k22euNUArJ0Afu0ATT0dFKTizUvCe0QS+Ktm6BA6cc9E9IotDzKLCBRGZPadd0OoRoM/baIrFitghSqcUfNRcFZlMoSmBM9fbMHCarCGJHaJ+Swk8eJFGtV2+W0mAvvmwI4pH7BAvEcnixdtMlNvbTxmcvdGGVbstzN9kYs8pp4JEdKku0YWzJPC81cK+kxToVg65XAGPXqZw+noJaNUei2B0zFpnYMsRm8Rw5KKHnrGWBJ6zBE4rAuzum4+SOFMErkug6FNW6dQFLNjcvCGJLSHgBzKK4BIC9Ijvw2YpzQlMVGxRCQZMVdjZ2HDAFhHgtFAvescFJZA04eKtJg6cdRkQY+dr2HfGrUtg3EKN/UJwLNxitmxEYovH8Mq9JDQzh2U7Lfh7MH2NgRNXPBJAeIlWnP34cp0NiDV7bdkYSoWIJ0toOdBevM/wdMyIf2qV8osRs1XsPPFrFA+edzkBIiEKJMU8HUeRls8XcOFWG0bOVZmFkhL6IzhyjiqW4qCXEU/ZVIrnbDCCXEbBr2PW/8nrdF0C2445/D/4dRz0gWToTBWOl68gcPyyh35TFPkDyV8+klHlKgj8WN3UtyQ2yShvlILqBJADQFmTjEYp5c1ycFZbCYz31AZKm+X075jQv2s2VDqn9O+eAwBc0aAXtcxwIQAAAABJRU5ErkJggg==",
   "SOL": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAIKADAAQAAAABAAAAIAAAAACshmLzAAADUklEQVRYCcVXT0gVYRCf2fe9P6lEGYaZdVILD3VSIqK0qINR0EWEOhdJRXgNQpKgkwVCQccgCy+JUEEheuiQdfAQWKERpKkkKVTW873dnWbWt49d37fre/LUvey3M79vfrPzzczOIuR5dVJfbNZMNhPhWQCqJ4IqRKiS7bye5vU0AI4h0kClSgx1YmsqH9O4Gqid+irNdPImA88T0dbV8KJHxF8E8FhFE7fuY+ts2J5AB67Si/hS6ucNQOrgVywNMxKoQ1wEwu54bMftHmxZ0uG0DshbW+l/zzi0h3SbCpXx8byNRLec00Ujx4HLS70HLDCf88lWF0oUjscpAKPlYfzCBy/O54Bz3qnk++KTu5Q4pWKJBm8kDFclZy5hXz9yYaJq4RAulzfrgCRcsc7cNa67C4eT3BmlcwSZUptYc7brmMJkXB1cojVyFEpwUudh5MeMOmiNNIDCSJhZre6rPQd3zJd+HZe1wwnQjtLhZtLJuaAm02Tsg7ZIozQXv5E8nr7bC9BtvoI/kNsCpFntiiYq1HJ71Xe4ZmM/tKnGPKhyIZP2PNwzX2vJBS0vLNwq09tzLbDEAIR+c1SrCxNaYMMbexz+QvjnQLg5B6g+yNig/TFIVSQ51XMElr9oOosX1VHYBiU6VahMItBvjcIXmgvFCTdeSj36zedRpkPuxXK4rk5CKWb7hg6mlSUpDT3mIEzQD61ehJyIf7KNSIf6RvNwlxNpkXKzWIf3yhIYhWvqBNTiTq/YtyZORTkCHiSgzqfxPEyyE1JKZyIHIcJpWeh12KiBcSsgCoQzSiYZdiLQASGcogV4YA4Xyr0qXri5CnCMK6EpDF0CMThi1K4pAikwIbiacIwjQAMcgfYgB8og7iTiHqM8CBIqf2q+C9QLtyEDpLRFHUrIO9QpWAs5VxY8MUdgyP6kM+3MjcJtyPQqA6QOdUUdh93Gdp0qVGaSBb3WCAzbnwNxwincm/45durKGZF4eg10t9gK5nLHsmxhy+gs02uxuVbaEw7hcuW+j/ymDqXikYQlAuo09wYeoYt9LY/lbuhd674IuMKN/DHJ5oBLLnfxMhataOKRpIsLdtGrK2jt7DW6xNbKN3ftaCPgKuWemZg3/ufU64Ss1+v3/D9/T4MrRetTGgAAAABJRU5ErkJggg==",
-  "XRP": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAA21BMVEUAAAArK1UkKzIkKTAkKTAjKS8kKi8rKzUkKzAkKTAjKS8kSUkjKS8kKi8kKS8nLDIkKi8oLTOHi47///+ChomDhoqGiYyFiIuHio2BhYiJjJCKjZCBhId/goaUl5omLDKVmJt9gYT+/v7Z2tubnqFbX2Th4uMrMTdhZmqMj5IkKS91eX3Ky83y8/MyOD3Bw8UzOD7V1tft7u50d3vs7e00OT/W19jj5OQ+Q0k9Q0g1OkDY2dri4+Q8Qkc1O0Dg4eI8QUY2PEHa29zf4OE7QEV7f4OfoaSdoKI6P0U8bs3jAAAAK3RSTlMABkeVv9nzGJbx/weC9Mcu4y3////////////////////////////////yG7j5mgAAATVJREFUeAGF0wO6w0AUBeCJk1P3PtuqbXP/GyryMijzf2qjuWSSphumZduWaegaO+S4HgTPddiuSDSGHbFoZOf1OA7ElY8kkjgimRLvJ3FU0gnOj+OE+H8cUZwU9Q+IAUgTXUBxSZQGENse4mLriugawjX/5zKmeeKdGwTSRJfweRrTEbgluoPvnugBAZ0Z4B6Jnp6B5xeiR3AGMyG8vtH7x8c7vb1CMJkF6fOLNr4+IVnMhuL75/f35xsKmz9wyt/OEchkc7lsBgpLDTJfIF8hrwZpgCuWqFzJ5ytVKhXBGbJQtTo1mthoNahek4XipW53qNuDr/dFnTYvNW9W/50GQwSGA3rvY8vl7R6NaTKFMJ3QeOS3mw/MbL5YQrFczGcAouEjFz604WMfvjjhqxe2vCHrvwbZMTAkWxjM4AAAAABJRU5ErkJggg==",
   "BNB": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAWlBMVEUAAAD/1VX0uzLzuzD0uzDzuy/zuy/0vzXzuzDzujD/20nzui/0ui/zuy/0vDL0ui/0uzPzuy/zui/zvDf87cv43Jb77cr////53Jf0wkj0w0r99+fzuzPzvjyEp4rmAAAAEnRSTlMABkeVv9nzGJbxB4L0xy7jLfK6UobZAAAA6ElEQVR42oVT2RKDIAxExVtrGw7P/v9vFkqqRDqTfdLZJUvCRlzI8kKWVVXKIs9Eirpp4UTb1De66wcgGPqOHB8hwRgVeUzwB9PzPI98oqjRP66/LLFLuEcf8/McK/qvwUB4ohi8SUN4DwMnGje/lvD7ThRtJnLKbxtV5KIAxGE9D+AV9gBEISR+vUFZxyvlFFa53wApSqzvyRWU1gpWL0KXUlSBD+WVnmetgk1QVCgwiQDH8fpZmLvFghbsJaM29dWmvtpkB8WOmn+s9LkNee40MIYEJo2cIZHjQsvGnl8cfvX45WXX/wODgTtdutF+1wAAAABJRU5ErkJggg==",
   "DOGE": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAolBMVEUAAADVqlXbtknKqjXGqjnIpjfGqTbEpzXDpjXEpzXEpzTEpzXDpzXDpjXEpjXEpjXDpzTDpjTDpjT////ayIL49erUv27byYXczIvez5Hf0JXh0pni1J3i1J7j1qHk16Xm2qzr4bzt5MPu5sfEqDj59uv6+O/7+fL8+vXJr0j28uH49OfNtljWwnbQuWDRu2bz7df8+/b8+/f+/fz+/v3z7tgLl5/YAAAAEnRSTlMABgcYLS5HgpWWv8fZ4/Hy8/TT2gOVAAAA6ElEQVR4XoWT53LEIAyEZV8CLhzBK7hL773X93+1TBzN2Qxzo+/nsqAFJJqoTNO5EFzXmIpKFq3HBt8uKKe2AzIGW2fbexT0s0N2lyjBcmezX9YLhwSpe2yh/89hsRU7FpD8OOaRj8fzZwjDX5EWk0H4OoTQElV+ZjhYrV72r5g5iuYrMpgZ3kY1fvLTtYiGmtKAE+a1iA11pQEP33whYkcOQrxkPo0xvgK44XdRHQUILJwB+OE7UcNkSPfMtymlo8ywR67IkJdQQ6rXVB9KfWrts9Tv1hpGbTmtadW21wdHHz19eNXx/wXfGj2DvsSdawAAAABJRU5ErkJggg==",
-  "HYPE": "data:image/png;base64,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",
   "NEAR": "data:image/png;base64,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"
 });
 function coinLabel(row){
@@ -2460,7 +2457,7 @@ function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
 const direction=active==='SÍ'?'UP':active==='NO'?'DOWN':null;
 const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=6?'SIN CONFIRMAR':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=5?'SIN CONFIRMAR':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.radar_entry_limit_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 renderPositions(s,fresh);$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
@@ -2670,8 +2667,8 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption(f'SIMULACIÓN · {len(SERIES_15M)} MONEDAS · {DIRECTION_MIN} DEL MISMO LADO, '
-               f'{STRONG_DIRECTION_MIN} POR ENCIMA DEL {STRONG_DIRECTION_PCT}% · SALDO VIRTUAL')
+    st.caption(f'SIMULACIÓN · {len(SERIES_15M)} MONEDAS · {STRONG_DIRECTION_MIN} DEL MISMO LADO '
+               f'POR ENCIMA DEL {STRONG_DIRECTION_PCT}% · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
