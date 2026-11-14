@@ -7,6 +7,12 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import sqlite3
 import json
+import logging
+import math
+import html
+import zlib
+from contextlib import contextmanager
+from pathlib import Path
 import threading
 import time
 import copy
@@ -979,9 +985,6 @@ if "micro_ticker" not in st.session_state:
 
 
 # Informational price plan; never predicts settlement or sends an order.
-import math
-import html
-from datetime import datetime,timezone
 
 def _plan_number(value):
     if isinstance(value,bool):return None
@@ -1138,7 +1141,6 @@ def _decode_round_payload(payload):
                 state[key] = datetime.fromisoformat(value)
             except ValueError:
                 state[key] = None
-    state['_restored_from_disk'] = True
     return state
 
 
@@ -1181,7 +1183,7 @@ def _write_state_to_connection(conn, state):
                 value = datetime.fromisoformat(value)
             state[key] = value
     preserve_exit_plan(state, saved)
-    keep = {key:value for key,value in state.items() if key != '_restored_from_disk'}
+    keep = dict(state)
     for key in ('detected_at','first_signal_time','active_since'):
         if isinstance(keep.get(key), datetime):
             keep[key] = keep[key].isoformat()
@@ -1237,7 +1239,6 @@ def _background_update_state(state, sig, market, seconds_left):
     def apply():
         latest = load_round_state(state['ticker'])
         current = latest if latest is not None else state
-        current.pop('_restored_from_disk',None)
         return _background_update_state_without_coordinator(current,sig,market,seconds_left)
     return _run_round_transaction(apply)
 
@@ -1251,111 +1252,150 @@ def _background_update_state(state, sig, market, seconds_left):
 
 LEGACY_HISTORY_DB = "btc_signal_history.db"
 HISTORY_DB = "btc_signal_history_v2.db"
+_history_log = logging.getLogger(__name__)
+_pending_history_writes = {}
+_pending_history_lock = threading.Lock()
 
+@contextmanager
 def _history_db():
     conn = sqlite3.connect(HISTORY_DB, timeout=5)
+    try:
+        _initialize_history_db(conn)
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
+def _initialize_history_db(conn):
     conn.execute('''CREATE TABLE IF NOT EXISTS round_history (
         ticker TEXT PRIMARY KEY, target REAL, final_btc REAL, final_outcome TEXT,
         bot_signal TEXT, result TEXT, first_signal TEXT, first_signal_time TEXT,
         closed_at TEXT NOT NULL)''')
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(round_history)")}
-        additions = {
-            "verification_status": "TEXT NOT NULL DEFAULT 'pending'",
-            "observed_outcome": "TEXT", "observed_result": "TEXT",
-            "official_result": "TEXT", "settlement_at": "TEXT", "verified_at": "TEXT",
-            "last_verification_attempt": "TEXT", "verified_expiration_value": "REAL",
-        }
-        migrated = False
-        for name, spec in additions.items():
-            if name not in columns:
-                conn.execute(f"ALTER TABLE round_history ADD COLUMN {name} {spec}")
-                migrated = True
-        if migrated:
-            conn.execute('''UPDATE round_history SET observed_outcome=final_outcome,
-                observed_result=result,
-                result=CASE WHEN first_signal IN ('UP','DOWN') THEN 'PENDIENTE' ELSE 'NO TRADE' END
-                WHERE verification_status != 'official' ''')
-        conn.execute("CREATE TABLE IF NOT EXISTS history_migrations (name TEXT PRIMARY KEY)")
-        migrated_legacy = conn.execute("SELECT 1 FROM history_migrations WHERE name='legacy_import_v1'").fetchone()
-        if not migrated_legacy:
-            from pathlib import Path
-            if Path(LEGACY_HISTORY_DB).exists():
-                legacy = sqlite3.connect('file:' + LEGACY_HISTORY_DB + '?mode=ro', uri=True, timeout=1)
-                try:
-                    legacy.row_factory = sqlite3.Row
-                    source_rows = legacy.execute('SELECT * FROM round_history').fetchall()
-                    allowed = {'ticker','target','final_btc','final_outcome','bot_signal','result',
-                               'first_signal','first_signal_time','closed_at'} | set(additions)
-                    for source_row in source_rows:
-                        values = dict(source_row)
-                        values['observed_outcome'] = values.get('observed_outcome') or values.get('final_outcome')
-                        values['observed_result'] = values.get('observed_result') or values.get('result')
-                        names = sorted(allowed.intersection(values))
-                        conn.execute('INSERT OR IGNORE INTO round_history (' + ','.join(names) +
-                                     ') VALUES (' + ','.join('?' for _ in names) + ')',
-                                     tuple(values[name] for name in names))
-                finally:
-                    legacy.close()
-            conn.execute("INSERT INTO history_migrations(name) VALUES('legacy_import_v1')")
-        conn.commit()
-        return conn
-    except Exception:
-        conn.close()
-        raise
+    conn.execute("BEGIN IMMEDIATE")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(round_history)")}
+    additions = {
+        "verification_status": "TEXT NOT NULL DEFAULT 'pending'",
+        "observed_outcome": "TEXT", "observed_result": "TEXT",
+        "official_result": "TEXT", "settlement_at": "TEXT", "verified_at": "TEXT",
+        "last_verification_attempt": "TEXT", "verified_expiration_value": "REAL",
+    }
+    migrated = False
+    for name, spec in additions.items():
+        if name not in columns:
+            conn.execute(f"ALTER TABLE round_history ADD COLUMN {name} {spec}")
+            migrated = True
+    if migrated:
+        conn.execute('''UPDATE round_history SET observed_outcome=final_outcome,
+            observed_result=result,
+            result=CASE WHEN first_signal IN ('UP','DOWN') THEN 'PENDIENTE' ELSE 'NO TRADE' END
+            WHERE verification_status != 'official' ''')
+    conn.execute("CREATE TABLE IF NOT EXISTS history_migrations (name TEXT PRIMARY KEY)")
+    migrated_legacy = conn.execute("SELECT 1 FROM history_migrations WHERE name='legacy_import_v1'").fetchone()
+    if not migrated_legacy:
+        if Path(LEGACY_HISTORY_DB).exists():
+            legacy = sqlite3.connect('file:' + LEGACY_HISTORY_DB + '?mode=ro', uri=True, timeout=1)
+            try:
+                legacy.row_factory = sqlite3.Row
+                source_rows = legacy.execute('SELECT * FROM round_history').fetchall()
+                allowed = {'ticker','target','final_btc','final_outcome','bot_signal','result',
+                           'first_signal','first_signal_time','closed_at'} | set(additions)
+                for source_row in source_rows:
+                    values = dict(source_row)
+                    values['observed_outcome'] = values.get('observed_outcome') or values.get('final_outcome')
+                    values['observed_result'] = values.get('observed_result') or values.get('result')
+                    names = sorted(allowed.intersection(values))
+                    conn.execute('INSERT OR IGNORE INTO round_history (' + ','.join(names) +
+                                 ') VALUES (' + ','.join('?' for _ in names) + ')',
+                                 tuple(values[name] for name in names))
+            finally:
+                legacy.close()
+        conn.execute("INSERT INTO history_migrations(name) VALUES('legacy_import_v1')")
+    conn.commit()
 
 
 def save_round_history(state):
-    """Guarda la observación; solamente Kalshi determina la evaluación final."""
+    """Guarda la ronda y deja en espera las escrituras que fallen."""
     if not state or not state.get("ticker"):
         return
+    ticker = state["ticker"]
+    snapshot = dict(state)
+    with _pending_history_lock:
+        previous = _pending_history_writes.get(ticker)
     try:
-        latest = load_round_state(state["ticker"])
-        canonical_first = bool(latest and latest.get("ticker") == state["ticker"]
-                               and latest.get("first_direction") in ("UP", "DOWN"))
-        if canonical_first:
-            state = dict(state)
-            for key in ("first_direction", "first_signal_time"):
-                state[key] = latest.get(key)
+        _persist_round_history(snapshot)
+    except sqlite3.Error as exc:
+        with _pending_history_lock:
+            _pending_history_writes[ticker] = snapshot
+        _history_log.warning("No se pudo guardar la ronda %s. Se reintentará: %s", ticker, exc)
+    else:
+        with _pending_history_lock:
+            if _pending_history_writes.get(ticker) is previous:
+                _pending_history_writes.pop(ticker, None)
+
+
+def _retry_history_writes():
+    with _pending_history_lock:
+        pending = list(_pending_history_writes.items())
+    for ticker, snapshot in pending:
+        try:
+            _persist_round_history(snapshot)
+        except sqlite3.Error as exc:
+            _history_log.warning("Sigue pendiente la escritura de %s: %s", ticker, exc)
+        else:
+            with _pending_history_lock:
+                if _pending_history_writes.get(ticker) is snapshot:
+                    _pending_history_writes.pop(ticker, None)
+
+
+def _persist_round_history(state):
+    """Guarda la observación; solamente Kalshi determina el resultado final."""
+    latest = load_round_state(state["ticker"])
+    canonical_first = bool(latest and latest.get("ticker") == state["ticker"]
+                           and latest.get("first_direction") in ("UP", "DOWN"))
+    if canonical_first:
+        state = dict(state)
+        for key in ("first_direction", "first_signal_time"):
+            state[key] = latest.get(key)
+    try:
         target = float(state["last_target"])
         price = float(state["last_live_price"])
-        if not np.isfinite(target) or not np.isfinite(price):
-            return
-        observed = "UP" if price > target else "DOWN" if price < target else "EMPATE"
-        first = state.get("first_direction")
-        first = first if first in ("UP", "DOWN") else None
-        pending = "PENDIENTE" if first else "NO TRADE"
-        observed_result = ("EMPATE" if observed == "EMPATE" else "GANADA" if first == observed else "PERDIDA") if first else "NO TRADE"
-        fst = state.get("first_signal_time")
-        if isinstance(fst, datetime):
-            fst = fst.isoformat()
-        with _history_db() as conn:
-            if canonical_first:
-                conn.execute('''UPDATE round_history SET first_signal=?,
-                    first_signal_time=COALESCE(?,first_signal_time),bot_signal=?,
-                    result=CASE WHEN verification_status='official' AND official_result IN ('yes','no')
-                        THEN CASE WHEN official_result=? THEN 'GANADA' ELSE 'PERDIDA' END
-                        ELSE result END WHERE ticker=?''',
-                    (first,fst,first,'yes' if first == 'UP' else 'no',state['ticker']))
-            conn.execute('''INSERT INTO round_history
-                (ticker,target,final_btc,final_outcome,bot_signal,result,first_signal,
-                 first_signal_time,closed_at,verification_status,observed_outcome,observed_result)
-                VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)
-                ON CONFLICT(ticker) DO UPDATE SET
-                    target=excluded.target,
-                    final_btc=CASE WHEN round_history.verification_status='official' THEN round_history.final_btc ELSE excluded.final_btc END,
-                    final_outcome=CASE WHEN round_history.verification_status='official' THEN round_history.final_outcome ELSE excluded.final_outcome END,
-                    bot_signal=COALESCE(round_history.first_signal,excluded.first_signal),
-                    result=CASE WHEN round_history.verification_status='official' THEN round_history.result ELSE excluded.result END,
-                    first_signal=COALESCE(round_history.first_signal,excluded.first_signal),
-                    first_signal_time=COALESCE(round_history.first_signal_time,excluded.first_signal_time),
-                    observed_outcome=excluded.observed_outcome,
-                    observed_result=excluded.observed_result''',
-                (state['ticker'], target, price, observed, first, pending, first, fst,
-                 datetime.now(timezone.utc).isoformat(), observed, observed_result))
-    except Exception:
-        pass
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return
+    if not np.isfinite(target) or not np.isfinite(price):
+        return
+    observed = "UP" if price > target else "DOWN" if price < target else "EMPATE"
+    first = state.get("first_direction")
+    first = first if first in ("UP", "DOWN") else None
+    pending = "PENDIENTE" if first else "NO TRADE"
+    observed_result = ("EMPATE" if observed == "EMPATE" else "GANADA" if first == observed else "PERDIDA") if first else "NO TRADE"
+    fst = state.get("first_signal_time")
+    if isinstance(fst, datetime):
+        fst = fst.isoformat()
+    with _history_db() as conn:
+        if canonical_first:
+            conn.execute('''UPDATE round_history SET first_signal=?,
+                first_signal_time=COALESCE(?,first_signal_time),bot_signal=?,
+                result=CASE WHEN verification_status='official' AND official_result IN ('yes','no')
+                    THEN CASE WHEN official_result=? THEN 'GANADA' ELSE 'PERDIDA' END
+                    ELSE result END WHERE ticker=?''',
+                (first,fst,first,'yes' if first == 'UP' else 'no',state['ticker']))
+        conn.execute('''INSERT INTO round_history
+            (ticker,target,final_btc,final_outcome,bot_signal,result,first_signal,
+             first_signal_time,closed_at,verification_status,observed_outcome,observed_result)
+            VALUES(?,?,?,?,?,?,?,?,?,'pending',?,?)
+            ON CONFLICT(ticker) DO UPDATE SET
+                target=excluded.target,
+                final_btc=CASE WHEN round_history.verification_status='official' THEN round_history.final_btc ELSE excluded.final_btc END,
+                final_outcome=CASE WHEN round_history.verification_status='official' THEN round_history.final_outcome ELSE excluded.final_outcome END,
+                bot_signal=COALESCE(round_history.first_signal,excluded.first_signal),
+                result=CASE WHEN round_history.verification_status='official' THEN round_history.result ELSE excluded.result END,
+                first_signal=COALESCE(round_history.first_signal,excluded.first_signal),
+                first_signal_time=COALESCE(round_history.first_signal_time,excluded.first_signal_time),
+                observed_outcome=excluded.observed_outcome,
+                observed_result=excluded.observed_result''',
+            (state['ticker'], target, price, observed, first, pending, first, fst,
+             datetime.now(timezone.utc).isoformat(), observed, observed_result))
 
 
 def verified_binary_outcome(market, ticker, now=None):
@@ -1606,18 +1646,18 @@ def reconcile_history_once(limit=4, fetch_market=None):
                     (outcome, expiration, outcome, market['result'], market['settlement_ts'],
                      datetime.now(timezone.utc).isoformat(), expiration, ticker))
             verified += 1
-        except Exception:
-            continue
+        except (sqlite3.Error, ValueError, requests.RequestException) as exc:
+            _history_log.warning("No se pudo verificar la ronda %s: %s", ticker, exc)
     return verified
 
 
 def _history_verification_loop():
-    started = time.monotonic()
     while True:
         try:
+            _retry_history_writes()
             reconcile_history_once()
-        except Exception as exc:
-            print(f"[ALPHA HISTORY VERIFY] {type(exc).__name__}: {exc}")
+        except Exception:
+            _history_log.exception("Falló el verificador del registro de rondas")
         time.sleep(30)
 
 
@@ -1629,24 +1669,21 @@ def start_history_verifier():
 
 
 def load_history(limit=100):
-    try:
-        with _history_db() as conn:
-            # Un registrador antiguo aún activo no puede convertir una observación en resultado oficial.
-            conn.execute('''UPDATE round_history SET
-                final_outcome=CASE official_result WHEN 'yes' THEN 'UP' WHEN 'no' THEN 'DOWN' ELSE final_outcome END,
-                final_btc=COALESCE(verified_expiration_value,final_btc)
-                WHERE verification_status='official' ''')
-            conn.execute('''UPDATE round_history SET bot_signal=first_signal,
-                result=CASE WHEN first_signal NOT IN ('UP','DOWN') OR first_signal IS NULL THEN 'NO TRADE'
-                            WHEN verification_status != 'official' THEN 'PENDIENTE'
-                            WHEN first_signal=final_outcome THEN 'GANADA' ELSE 'PERDIDA' END''')
-            rows = conn.execute('''SELECT ticker,target,final_btc,
-                CASE WHEN verification_status='official' THEN final_outcome ELSE 'PENDIENTE' END,
-                bot_signal,result,first_signal,first_signal_time,closed_at
-                FROM round_history ORDER BY closed_at DESC LIMIT ?''', (int(limit),)).fetchall()
-        return pd.DataFrame(rows, columns=['Ronda','Target','BTC final','Resultado oficial','Señal bot','Estado','1ª señal','Hora 1ª señal','Cierre'])
-    except Exception:
-        return pd.DataFrame()
+    with _history_db() as conn:
+        # Un registrador antiguo aún activo no puede convertir una observación en resultado oficial.
+        conn.execute('''UPDATE round_history SET
+            final_outcome=CASE official_result WHEN 'yes' THEN 'UP' WHEN 'no' THEN 'DOWN' ELSE final_outcome END,
+            final_btc=COALESCE(verified_expiration_value,final_btc)
+            WHERE verification_status='official' ''')
+        conn.execute('''UPDATE round_history SET bot_signal=first_signal,
+            result=CASE WHEN first_signal NOT IN ('UP','DOWN') OR first_signal IS NULL THEN 'NO TRADE'
+                        WHEN verification_status != 'official' THEN 'PENDIENTE'
+                        WHEN first_signal=final_outcome THEN 'GANADA' ELSE 'PERDIDA' END''')
+        rows = conn.execute('''SELECT ticker,target,final_btc,
+            CASE WHEN verification_status='official' THEN final_outcome ELSE 'PENDIENTE' END,
+            bot_signal,result,first_signal,first_signal_time,closed_at
+            FROM round_history ORDER BY closed_at DESC LIMIT ?''', (int(limit),)).fetchall()
+    return pd.DataFrame(rows, columns=['Ronda','Target','BTC final','Resultado oficial','Señal bot','Estado','1ª señal','Hora 1ª señal','Cierre'])
 
 
 def history_stats(df):
@@ -2936,7 +2973,6 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         st.session_state.rounds[ticker] = restored if restored is not None else new_round_state(ticker, seconds_left)
 
     state = st.session_state.rounds[ticker]
-    restored_from_disk = bool(state.pop("_restored_from_disk", False))
     if sig.get("data_valid") is False:
         confirm_round_candidate(state, None, market, seconds_left, now, sig)
         save_round_state(state)
@@ -2972,9 +3008,6 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
     # La señal oficial usa la dirección vigente del indicador.
     candidate = sig.get("candidate")
-    if restored_from_disk and candidate not in ("UP", "DOWN"):
-        # No se mantiene una señal antigua ante una lectura neutral actual.
-        pass
     confirm_round_candidate(state, candidate, market, seconds_left, now, sig)
 
     active = state.get("active_direction")
@@ -3044,7 +3077,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_multi_indicator49_v1"
+BACKGROUND_DATA_REVISION = "continuous_history_active_market_recent_support_candle_sources_early_signal_multi_indicator49_v2"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3075,62 +3108,6 @@ def _background_get_live_price(market):
     _BACKGROUND_PRICE_SOURCE.value = "COINBASE"
     return price
 
-# =========================================================
-# ALPHA AI SHADOW — observational only; NEVER alters UP/DOWN
-# Stores one immutable decision-time snapshot per ticker.
-# Training labels must come from official Kalshi settlement.
-# =========================================================
-SHADOW_AI_DB = "alpha_ai_shadow.db"
-SHADOW_FEATURES = ("rsi", "rsi3", "rsi5", "mom3", "mom5", "mom15", "vol_ratio",
-                   "technical_score", "target_score", "adx", "macd3", "macd5",
-                   "atr", "vwap_atr", "target_atr", "distance_pct")
-
-def _shadow_capture(ticker, sig, state, seconds_left):
-    """Read-only capture of existing engine output; no signal writes or model inference."""
-    if not ticker or not isinstance(sig, dict) or seconds_left is None:
-        return
-    try:
-        remaining = float(seconds_left)
-        if not 0 < remaining <= 900:
-            return
-        price = float(sig.get("price"))
-        target = float(state.get("last_target"))
-        if not np.isfinite(price) or not np.isfinite(target) or target <= 0:
-            return
-        def safe_float(value):
-            try:
-                number = float(value)
-                return number if np.isfinite(number) else None
-            except (TypeError, ValueError, OverflowError):
-                return None
-        features = {name: safe_float(sig.get(name)) for name in SHADOW_FEATURES}
-        # Store the engine's original proposal so the training label evaluates
-        # the proposal, not the AI-filtered display result.
-        signal = sig.get("candidate_raw", sig.get("candidate"))
-        if signal not in ("UP", "DOWN"):
-            # Wait for the first actual proposal; otherwise a neutral first poll
-            # would permanently occupy this ticker's one-snapshot slot.
-            return
-        with sqlite3.connect(SHADOW_AI_DB, timeout=3) as conn:
-            conn.execute("""CREATE TABLE IF NOT EXISTS snapshots (
-                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
-                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
-                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
-            conn.execute("""INSERT INTO snapshots
-                (ticker, observed_at, seconds_left, btc_price, target, candidate, features_json)
-                VALUES (?,?,?,?,?,?,?)
-                ON CONFLICT(ticker) DO UPDATE SET
-                    observed_at=excluded.observed_at,
-                    seconds_left=excluded.seconds_left,
-                    btc_price=excluded.btc_price,
-                    target=excluded.target,
-                    candidate=excluded.candidate,
-                    features_json=excluded.features_json
-                WHERE snapshots.candidate IS NULL AND excluded.candidate IS NOT NULL""",
-                (str(ticker), datetime.now(timezone.utc).isoformat(), remaining,
-                 price, target, signal, json.dumps(features, allow_nan=False)))
-    except (sqlite3.Error, TypeError, ValueError, OverflowError):
-        return
 
 def _background_update_state_without_coordinator(state, sig, market, seconds_left):
     now = datetime.now(timezone.utc)
@@ -3145,12 +3122,10 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     state["last_score"] = float(sig.get("final_score", 0.0))
     confirm_round_candidate(state, sig.get("candidate"), market, seconds_left, now, sig)
     save_round_state(state)
-    _shadow_capture(state.get("ticker"), sig, state, seconds_left)
     return state
 
 def _background_history_loop(stop_event=None):
     flow_state = {}
-    started = time.monotonic()
     active_ticker = None
     active_state = None
     while not (stop_event and stop_event.is_set()):
@@ -3167,8 +3142,6 @@ def _background_history_loop(stop_event=None):
             if ticker != active_ticker:
                 active_ticker = ticker
                 restored = load_round_state(ticker)
-                if restored:
-                    restored.pop("_restored_from_disk", None)
                 active_state = restored or new_round_state(ticker, get_seconds_remaining(market))
             seconds_left = get_seconds_remaining(market)
             target = get_target_from_market(market)
@@ -3184,7 +3157,6 @@ def _background_history_loop(stop_event=None):
             if stop_event and stop_event.is_set():
                 break
             active_state = _background_update_state(active_state, sig, market, seconds_left)
-            _shadow_capture(ticker, sig, active_state, seconds_left)
             if seconds_left is not None and seconds_left <= 0:
                 save_round_history(active_state)
         except Exception as exc:
@@ -3599,17 +3571,19 @@ def render_history_page():
       .history-view .history-foot{gap:7px 14px}
     }
     </style>""", unsafe_allow_html=True)
-    df=load_history(2000); stats=history_stats(df)
-    st.markdown(f"""
-    <section class="history-view">
-      <a class="history-back" href="?page=signal" target="_self">← Volver a Señal</a>
-      <div class="history-head">
-        <div class="history-head-inner">
-          <div class="history-kicker">JC ALPHA EDGE · REGISTRO</div>
-          <div class="history-title">BTC SIGNAL</div>
-          <div class="history-version">v4.6.1</div>
-          <div class="history-sub">Historial y rendimiento · registro automático por ronda</div>
-        </div>
+    try:
+        stats = history_stats(load_history(2000))
+    except sqlite3.Error as exc:
+        _history_log.warning("No se pudo leer el registro de rondas: %s", exc)
+        stats = None
+    with _pending_history_lock:
+        pending_writes = len(_pending_history_writes)
+    notice = ""
+    if stats is None:
+        notice = '<div class="history-foot" role="alert">Registro no disponible. Intenta actualizar en un momento.</div>'
+    elif pending_writes:
+        notice = f'<div class="history-foot" role="status">Rondas por guardar: {pending_writes}. Los totales pueden estar incompletos.</div>'
+    results = f"""
         <div class="history-stats">
           <div class="history-stat" style="--stat-color:#45caff;--stat-glow:#079dff30"><div class="history-icon">▥</div><div class="history-label">Rondas</div><div class="history-value">{stats["total"]}</div></div>
           <div class="history-stat" style="--stat-color:#16e6a4;--stat-glow:#04d99130"><div class="history-icon">✓</div><div class="history-label">Ganadas</div><div class="history-value">{stats["wins"]}</div></div>
@@ -3621,6 +3595,19 @@ def render_history_page():
           <span class="history-chip">⊘ NO TRADE: <b>{stats["no_trade"]}</b></span>
           <div class="history-disclaimer">Acierto basado solo en resultados oficiales verificados. No representa ganancias garantizadas.</div>
         </div>
+    """ if stats is not None else ""
+    st.markdown(f"""
+    <section class="history-view">
+      <a class="history-back" href="?page=signal" target="_self">← Volver a Señal</a>
+      <div class="history-head">
+        <div class="history-head-inner">
+          <div class="history-kicker">JC ALPHA EDGE · REGISTRO</div>
+          <div class="history-title">BTC SIGNAL</div>
+          <div class="history-version">v4.6.1</div>
+          <div class="history-sub">Historial y rendimiento · registro automático por ronda</div>
+        </div>
+        {notice}
+        {results}
       </div>
     </section>
     """, unsafe_allow_html=True)
@@ -3775,7 +3762,6 @@ def render_early_reversal_panel(result):
     </section>'''
 
 # Panel visual independiente del motor. Sin envío de órdenes.
-import html as _nh
 
 @st.cache_data(ttl=10, show_spinner=False)
 def _neon_chart_history(timeframe):
@@ -4716,8 +4702,6 @@ def live_dashboard():
     }
 
 
-import zlib
-
 SIGNAL_TRACE_DB = "btc_signal_decisions.db"
 _TRACE_CONTEXT = threading.local()
 
@@ -4759,169 +4743,6 @@ def _trace_event(kind, payload, ticker=None):
 
 
 # =========================================================
-# ALPHA AI GATE — supervised, conservative signal filter
-# Learns only from official Kalshi settlements. It can BLOCK a
-# weak UP/DOWN proposal, but it never invents or reverses a signal.
-# =========================================================
-AI_GATE_MIN_ROWS = 80
-AI_GATE_MIN_HOLDOUT = 15
-AI_GATE_MIN_BRIER_GAIN = 0.02
-AI_GATE_BLOCK_BELOW = 0.45
-_AI_GATE_CACHE = {"at": 0.0, "model": None, "status": "sin datos oficiales"}
-
-def _ai_sigmoid(z):
-    z = np.clip(np.asarray(z, dtype=float), -30.0, 30.0)
-    return 1.0 / (1.0 + np.exp(-z))
-
-def _ai_feature_vector(features, candidate=None):
-    values = []
-    for name in SHADOW_FEATURES:
-        try:
-            value = float(features.get(name))
-            if not np.isfinite(value):
-                value = np.nan
-        except (TypeError, ValueError, OverflowError):
-            value = np.nan
-        values.append(value)
-    # Direction matters: the same indicator values can mean different odds
-    # for a proposed UP versus DOWN signal.
-    values.append(1.0 if candidate == "UP" else 0.0 if candidate == "DOWN" else np.nan)
-    return np.asarray(values, dtype=float)
-
-def _ai_fit_logistic(X, y, epochs=900, lr=0.035):
-    means = np.nanmean(X, axis=0)
-    means = np.where(np.isfinite(means), means, 0.0)
-    X = np.where(np.isfinite(X), X, means)
-    scales = np.std(X, axis=0)
-    scales = np.where(scales < 1e-8, 1.0, scales)
-    Z = np.clip((X - means) / scales, -8, 8)
-    Z = np.column_stack([np.ones(len(Z)), Z])
-    weights = np.zeros(Z.shape[1], dtype=float)
-    # Full-batch gradient descent with mild L2 regularization.
-    for _ in range(epochs):
-        p = _ai_sigmoid(Z @ weights)
-        grad = (Z.T @ (p - y)) / len(y)
-        grad[1:] += 0.01 * weights[1:]
-        weights -= lr * grad
-    return {"means": means, "scales": scales, "weights": weights}
-
-def _ai_predict_model(model, X):
-    X = np.asarray(X, dtype=float)
-    means, scales = model["means"], model["scales"]
-    X = np.where(np.isfinite(X), X, means)
-    Z = np.clip((X - means) / scales, -8, 8)
-    Z = np.column_stack([np.ones(len(Z)), Z])
-    return _ai_sigmoid(Z @ model["weights"])
-
-def _ai_official_training_rows():
-    """Return only snapshots whose round has an official yes/no settlement."""
-    try:
-        with sqlite3.connect(SHADOW_AI_DB, timeout=2) as shadow:
-            shadow.row_factory = sqlite3.Row
-            shadow.execute("""CREATE TABLE IF NOT EXISTS snapshots (
-                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
-                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
-                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
-            snapshots = shadow.execute(
-                "SELECT ticker, observed_at, candidate, features_json "
-                "FROM snapshots WHERE candidate IN ('UP','DOWN') ORDER BY observed_at"
-            ).fetchall()
-        if not snapshots:
-            return []
-        with _history_db() as history:
-            history.row_factory = sqlite3.Row
-            try:
-                settled = {r["ticker"]: r["official_result"] for r in history.execute(
-                    "SELECT ticker, official_result FROM round_history "
-                    "WHERE verification_status='official' AND lower(official_result) IN ('yes','no')"
-                ).fetchall()}
-            except sqlite3.Error:
-                return []
-        rows = []
-        for row in snapshots:
-            outcome = settled.get(row["ticker"])
-            if outcome not in ("yes", "no"):
-                continue
-            candidate = row["candidate"]
-            won = (candidate == "UP" and outcome == "yes") or (candidate == "DOWN" and outcome == "no")
-            try:
-                features = json.loads(row["features_json"])
-            except (TypeError, ValueError):
-                continue
-            rows.append((_ai_feature_vector(features, candidate), 1.0 if won else 0.0, row["observed_at"]))
-        return rows
-    except (sqlite3.Error, OSError, TypeError, ValueError):
-        return []
-
-def _ai_gate_model(force=False):
-    now = time.monotonic()
-    if not force and now - _AI_GATE_CACHE["at"] < 60:
-        return _AI_GATE_CACHE["model"], _AI_GATE_CACHE["status"]
-    _AI_GATE_CACHE["at"] = now
-    _AI_GATE_CACHE["model"] = None
-    rows = _ai_official_training_rows()
-    if len(rows) < AI_GATE_MIN_ROWS:
-        status = f"IA en aprendizaje: {len(rows)}/{AI_GATE_MIN_ROWS} rondas con resultado oficial"
-        _AI_GATE_CACHE.update(model=None, status=status)
-        return None, status
-    X = np.vstack([r[0] for r in rows])
-    y = np.asarray([r[1] for r in rows], dtype=float)
-    split = max(int(len(rows) * 0.8), len(rows) - AI_GATE_MIN_HOLDOUT)
-    split = min(split, len(rows) - AI_GATE_MIN_HOLDOUT)
-    if split < 30 or len(np.unique(y[:split])) < 2 or len(np.unique(y[split:])) < 2:
-        status = "IA sin filtro: faltan resultados variados para validar"
-        _AI_GATE_CACHE.update(model=None, status=status)
-        return None, status
-    try:
-        validation_model = _ai_fit_logistic(X[:split], y[:split])
-        predictions = _ai_predict_model(validation_model, X[split:])
-        baseline = float(np.mean(y[:split]))
-        model_brier = float(np.mean((predictions - y[split:]) ** 2))
-        baseline_brier = float(np.mean((baseline - y[split:]) ** 2))
-        gain = baseline_brier - model_brier
-        if gain < AI_GATE_MIN_BRIER_GAIN:
-            status = f"IA en evaluación: no mejora el modelo base (ganancia Brier {gain:.3f}); no bloquea señales"
-            _AI_GATE_CACHE.update(model=None, status=status)
-            return None, status
-        model = _ai_fit_logistic(X, y)
-        status = f"Filtro IA validado en historial: {len(rows)} rondas oficiales; mejora Brier {gain:.3f}"
-        _AI_GATE_CACHE.update(model=model, status=status)
-        return model, status
-    except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
-        status = f"IA sin filtro por validación: {type(exc).__name__}"
-        _AI_GATE_CACHE.update(model=None, status=status)
-        return None, status
-
-def _apply_ai_signal_gate(sig):
-    """Only block a proposed signal when a validated model estimates weak odds."""
-    if not isinstance(sig, dict):
-        return sig
-    candidate = sig.get("candidate")
-    sig["candidate_raw"] = candidate
-    sig["ai_gate_active"] = False
-    sig["ai_win_probability"] = None
-    model, status = _ai_gate_model()
-    sig["ai_gate_status"] = status
-    if candidate not in ("UP", "DOWN") or model is None:
-        return sig
-    features = {name: sig.get(name) for name in SHADOW_FEATURES}
-    vector = _ai_feature_vector(features, candidate).reshape(1, -1)
-    try:
-        p_win = float(_ai_predict_model(model, vector)[0])
-    except (ValueError, TypeError, FloatingPointError):
-        return sig
-    sig["ai_win_probability"] = round(p_win * 100, 1)
-    if p_win < AI_GATE_BLOCK_BELOW:
-        sig["candidate"] = None
-        sig["quality"] = "NO TRADE · FILTRO IA"
-        sig["ai_gate_active"] = True
-        sig["ai_gate_reason"] = f"Probabilidad estimada de acierto {p_win:.1%}, bajo el umbral {AI_GATE_BLOCK_BELOW:.0%}"
-    else:
-        sig["ai_gate_active"] = True
-        sig["ai_gate_reason"] = f"Señal permitida; probabilidad estimada de acierto {p_win:.1%}"
-    return sig
-
-
 def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
     _TRACE_CONTEXT.build_id = None
     _TRACE_CONTEXT.build_payload = None
