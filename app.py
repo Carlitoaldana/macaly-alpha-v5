@@ -3348,7 +3348,7 @@ def render_history_page():
           <div class="history-disclaimer">Acierto basado solo en resultados oficiales verificados. No representa ganancias garantizadas.</div>
         </div>
     """ if stats is not None else ""
-    st.markdown(f"""
+    st.html(f"""
     <section class="history-view">
       <a class="history-back" href="?page=signal" target="_self">← Volver a Señal</a>
       <div class="history-head">
@@ -3362,7 +3362,7 @@ def render_history_page():
         {results}
       </div>
     </section>
-    """, unsafe_allow_html=True)
+    """)
 
 
 # =========================================================
