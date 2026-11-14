@@ -1178,7 +1178,7 @@ def valid_settings(raw):
         raise ValueError('Envía todos los ajustes; hay campos desconocidos o ausentes.')
     bounds = {'contracts':(1,1000), 'max_entry_cents':(2,99),
               'take_profit_pct':(0,100), 'stop_loss_pct':(0,100),
-              'max_entries_round':(1,2),
+              'max_entries_round':(1,1),
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
@@ -1587,8 +1587,9 @@ EXTRA_SERIES_15M = {
     'DOGE': 'KXDOGE15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-5x15-v7'
-DIRECTION_MIN = 3
+RADAR_REVISION = 'radar-5x15-v9'
+DIRECTION_MIN = 4
+ENTRY_WINDOW_SECONDS = 180
 QUOTE_MAX_AGE = 25
 
 
@@ -1672,19 +1673,22 @@ def valid_radar_rows(rows, now):
             if row['close'] == close and time.monotonic() - row['at'] <= QUOTE_MAX_AGE}
 
 
-def radar_decision(rows, entry_limit):
-    up = sorted((asset for asset, row in rows.items() if row['yes'] > 50),
-                key=lambda asset: (-rows[asset]['yes'], asset))
-    down = sorted((asset for asset, row in rows.items() if row['yes'] < 50),
-                  key=lambda asset: (rows[asset]['yes'], asset))
-    if len(up) >= DIRECTION_MIN:
-        side, leaders, opposite, ask = 'UP', up[:DIRECTION_MIN], down, 'yes_ask'
-    elif len(down) >= DIRECTION_MIN:
-        side, leaders, opposite, ask = 'DOWN', down[:DIRECTION_MIN], up, 'no_ask'
+def radar_decision(rows, entry_limit, now):
+    up = [asset for asset, row in rows.items() if row['yes'] > 50]
+    down = [asset for asset, row in rows.items() if row['yes'] < 50]
+    seconds_left = (round_close(now) - now).total_seconds()
+    if rows.keys() != SERIES_15M.keys() or not 0 < seconds_left <= ENTRY_WINDOW_SECONDS:
+        return None, [], [], len(up), len(down)
+    if len(up) == DIRECTION_MIN:
+        side, leaders, ask = 'UP', up, 'yes_ask'
+    elif len(down) == DIRECTION_MIN:
+        side, leaders, ask = 'DOWN', down, 'no_ask'
     else:
         return None, [], [], len(up), len(down)
-    candidates = sorted((asset for asset in opposite if rows[asset][ask] <= entry_limit),
-                        key=lambda asset: (rows[asset][ask], asset))
+    asset = next(asset for asset in rows if asset not in leaders)
+    yes = rows[asset]['yes']
+    opposite = yes < 50 if side == 'UP' else yes > 50
+    candidates = [asset] if opposite and rows[asset][ask] <= entry_limit else []
     return side, leaders, candidates, len(up), len(down)
 
 
@@ -1813,11 +1817,12 @@ class PaperBot(Bot):
                 if count >= self.settings['max_entries_round']:
                     notes[asset] = 'Límite de compras por ronda alcanzado'
                     break
-                fresh_rows = valid_radar_rows(rows, utcnow())
+                now = utcnow()
+                fresh_rows = valid_radar_rows(rows, now)
                 entry_limit = self.settings['radar_entry_limit_cents']
-                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit)
+                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit, now)
                 if fresh_side != side:
-                    notes[asset] = 'Se perdió la confirmación de tres monedas durante la verificación'
+                    notes[asset] = 'La confirmación de cuatro monedas o la ventana de entrada venció'
                     break
                 if asset not in eligible or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
@@ -1836,7 +1841,10 @@ class PaperBot(Bot):
                             'entry_asset': asset, 'entry_asset_yes_mid_pct': str(row['yes']),
                             'candidate_ask_cents': str(row['yes_ask' if side == 'UP' else 'no_ask']),
                             'cost': cost}
-                opened = stamp()
+                opened_at = utcnow()
+                if opened_at >= row['close']:
+                    break
+                opened = opened_at.isoformat()
                 with self.db:
                     self.db.execute(
                         '''INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,
@@ -1858,26 +1866,29 @@ class PaperBot(Bot):
                 self.last_quotes[asset] = rows[asset]
             except ValueError as exc:
                 errors[asset] = str(exc)
-        rows = valid_radar_rows(rows, utcnow())
+        now = utcnow()
+        rows = valid_radar_rows(rows, now)
         with self.lock:
             entry_limit = self.settings['radar_entry_limit_cents']
-        majority, _, candidates, _, _ = radar_decision(rows, entry_limit)
+        majority, _, candidates, _, _ = radar_decision(rows, entry_limit, now)
         notes = self._enter_radar(rows, candidates, majority)
         now = utcnow()
         display_rows = valid_radar_rows(rows, now)
         with self.lock:
             entry_limit = self.settings['radar_entry_limit_cents']
-        majority, leaders, candidates, yes, no = radar_decision(display_rows, entry_limit)
+        majority, leaders, candidates, yes, no = radar_decision(display_rows, entry_limit, now)
         radar_count = len(display_rows)
-        if radar_count < DIRECTION_MIN:
+        if (round_close(now) - now).total_seconds() > ENTRY_WINDOW_SECONDS:
+            summary = 'Esperando los últimos 3 minutos'
+        elif radar_count < len(SERIES_15M):
             summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
         elif majority is None:
-            summary = f'Sin mayoría de tres · {yes} SÍ / {no} NO'
+            summary = f'Sin cuatro del mismo lado · {yes} UP / {no} DOWN'
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
             opportunity = (' · Candidatas: ' + ', '.join(candidates)
                            if candidates else f' · Sin contrarias a {entry_limit}¢ o menos')
-            summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
+            summary = f'Mayoría {direction} · {yes} UP / {no} DOWN' + opportunity
         display = []
         for asset in SERIES_15M:
             row = display_rows.get(asset)
@@ -2251,7 +2262,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label for="radarRoundEntries">Compras máximas por ronda</label>
 <select id="radarRoundEntries" name="roundEntries">
 <option value="1" selected>1 compra</option>
-<option value="2">2 compras</option>
 </select>
 <small>Se aplica al total de la ronda de 15 minutos.</small>
 </div>
