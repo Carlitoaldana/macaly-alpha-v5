@@ -1178,7 +1178,7 @@ def valid_settings(raw):
         raise ValueError('Envía todos los ajustes; hay campos desconocidos o ausentes.')
     bounds = {'contracts':(1,1000), 'max_entry_cents':(2,99),
               'take_profit_pct':(0,100), 'stop_loss_pct':(0,100),
-              'max_entries_round':(1,2),
+              'max_entries_round':(1,1),
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
@@ -1584,11 +1584,11 @@ CORE_SERIES_15M = {
     'SOL': 'KXSOL15M',
 }
 EXTRA_SERIES_15M = {
-    'DOGE': 'KXDOGE15M',
+    'DOGE': 'KXDOGE15M', 'HYPE': 'KXHYPE15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-5x15-v7'
-DIRECTION_MIN = 3
+RADAR_REVISION = 'radar-6x15-v10'
+DIRECTION_MIN = 4
 QUOTE_MAX_AGE = 25
 
 
@@ -1672,15 +1672,15 @@ def valid_radar_rows(rows, now):
             if row['close'] == close and time.monotonic() - row['at'] <= QUOTE_MAX_AGE}
 
 
-def radar_decision(rows, entry_limit):
-    up = sorted((asset for asset, row in rows.items() if row['yes'] > 50),
-                key=lambda asset: (-rows[asset]['yes'], asset))
-    down = sorted((asset for asset, row in rows.items() if row['yes'] < 50),
-                  key=lambda asset: (rows[asset]['yes'], asset))
+def radar_decision(rows, entry_limit, now):
+    up = [asset for asset, row in rows.items() if row['yes'] > 50]
+    down = [asset for asset, row in rows.items() if row['yes'] < 50]
+    if rows.keys() != SERIES_15M.keys() or any(row["close"] <= now for row in rows.values()):
+        return None, [], [], len(up), len(down)
     if len(up) >= DIRECTION_MIN:
-        side, leaders, opposite, ask = 'UP', up[:DIRECTION_MIN], down, 'yes_ask'
+        side, leaders, opposite, ask = 'UP', up, down, 'yes_ask'
     elif len(down) >= DIRECTION_MIN:
-        side, leaders, opposite, ask = 'DOWN', down[:DIRECTION_MIN], up, 'no_ask'
+        side, leaders, opposite, ask = 'DOWN', down, up, 'no_ask'
     else:
         return None, [], [], len(up), len(down)
     candidates = sorted((asset for asset in opposite if rows[asset][ask] <= entry_limit),
@@ -1702,7 +1702,7 @@ class PaperBot(Bot):
         self.snapshot['mode'] = 'SIMULACIÓN'
         self.snapshot['radar'] = [{'asset': asset, 'detail': 'Consultando'} for asset in SERIES_15M]
         self.snapshot['updated'] = stamp()
-        self.snapshot['radar_summary'] = 'Consultando las cinco monedas del radar.'
+        self.snapshot['radar_summary'] = 'Consultando las seis monedas del radar.'
         if 'round_close' not in {r[1] for r in self.db.execute('PRAGMA table_info(trades)')}:
             self.db.execute('ALTER TABLE trades ADD COLUMN round_close TEXT')
         self.db.execute('CREATE INDEX IF NOT EXISTS trades_round_close ON trades(round_close)')
@@ -1813,11 +1813,12 @@ class PaperBot(Bot):
                 if count >= self.settings['max_entries_round']:
                     notes[asset] = 'Límite de compras por ronda alcanzado'
                     break
-                fresh_rows = valid_radar_rows(rows, utcnow())
+                now = utcnow()
+                fresh_rows = valid_radar_rows(rows, now)
                 entry_limit = self.settings['radar_entry_limit_cents']
-                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit)
+                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit, now)
                 if fresh_side != side:
-                    notes[asset] = 'Se perdió la confirmación de tres monedas durante la verificación'
+                    notes[asset] = 'La confirmación de cuatro monedas ya no está vigente'
                     break
                 if asset not in eligible or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
@@ -1836,7 +1837,10 @@ class PaperBot(Bot):
                             'entry_asset': asset, 'entry_asset_yes_mid_pct': str(row['yes']),
                             'candidate_ask_cents': str(row['yes_ask' if side == 'UP' else 'no_ask']),
                             'cost': cost}
-                opened = stamp()
+                opened_at = utcnow()
+                if opened_at >= row['close']:
+                    break
+                opened = opened_at.isoformat()
                 with self.db:
                     self.db.execute(
                         '''INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,
@@ -1858,26 +1862,27 @@ class PaperBot(Bot):
                 self.last_quotes[asset] = rows[asset]
             except ValueError as exc:
                 errors[asset] = str(exc)
-        rows = valid_radar_rows(rows, utcnow())
+        now = utcnow()
+        rows = valid_radar_rows(rows, now)
         with self.lock:
             entry_limit = self.settings['radar_entry_limit_cents']
-        majority, _, candidates, _, _ = radar_decision(rows, entry_limit)
+        majority, _, candidates, _, _ = radar_decision(rows, entry_limit, now)
         notes = self._enter_radar(rows, candidates, majority)
         now = utcnow()
         display_rows = valid_radar_rows(rows, now)
         with self.lock:
             entry_limit = self.settings['radar_entry_limit_cents']
-        majority, leaders, candidates, yes, no = radar_decision(display_rows, entry_limit)
+        majority, leaders, candidates, yes, no = radar_decision(display_rows, entry_limit, now)
         radar_count = len(display_rows)
-        if radar_count < DIRECTION_MIN:
+        if radar_count < len(SERIES_15M):
             summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
         elif majority is None:
-            summary = f'Sin mayoría de tres · {yes} SÍ / {no} NO'
+            summary = f'Sin cuatro del mismo lado · {yes} UP / {no} DOWN'
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
             opportunity = (' · Candidatas: ' + ', '.join(candidates)
                            if candidates else f' · Sin contrarias a {entry_limit}¢ o menos')
-            summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
+            summary = f'Mayoría {direction} · {yes} UP / {no} DOWN' + opportunity
         display = []
         for asset in SERIES_15M:
             row = display_rows.get(asset)
@@ -2089,7 +2094,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <footer>
 <span class="gold" id="executionFooter">SIMULACIÓN</span>
-<br>5 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
+<br>6 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
 <span class="green"><span id="feedStatus">● Esperando datos</span></span>
 </footer>
 </aside>
@@ -2101,7 +2106,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <div>
 <small>MERCADO</small>
-<strong>5 MONEDAS · 15 MINUTOS</strong>
+<strong>6 MONEDAS · 15 MINUTOS</strong>
 </div>
 <div>
 <small>SESIÓN</small>
@@ -2188,7 +2193,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Tres monedas vigentes del mismo lado confirman la dirección · 50% exacto es neutral.</div>
+<div class="notice">Cuatro monedas vigentes del mismo lado confirman la dirección · 50% exacto es neutral.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2196,7 +2201,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Plan de operación</h2>
 <div class="body">
 <div class="top-controls">
-<span>5 monedas · 15 minutos</span>
+<span>6 monedas · 15 minutos</span>
 <span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
 </div>
 <div class="strength">
@@ -2251,7 +2256,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label for="radarRoundEntries">Compras máximas por ronda</label>
 <select id="radarRoundEntries" name="roundEntries">
 <option value="1" selected>1 compra</option>
-<option value="2">2 compras</option>
 </select>
 <small>Se aplica al total de la ronda de 15 minutos.</small>
 </div>
@@ -2451,7 +2455,7 @@ function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
 const direction=active==='SÍ'?'UP':active==='NO'?'DOWN':null;
 const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=6?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.radar_entry_limit_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
 renderPositions(s,fresh);$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
@@ -2661,7 +2665,7 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · 5 MONEDAS · 3 PARA CONFIRMAR · SALDO VIRTUAL')
+    st.caption('SIMULACIÓN · 6 MONEDAS · 4 PARA CONFIRMAR · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
