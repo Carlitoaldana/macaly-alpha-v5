@@ -1526,13 +1526,10 @@ class Bot:
             return 'Entradas pausadas o posición en gestión.'
         if not signal or signal.get('data_valid') is not True:
             return 'Esperando datos válidos del mercado.'
+        # La dirección de compra es la primera señal registrada de la ronda.
+        # El cerebro puede cambiar su señal activa sin cambiar ni bloquear esta entrada.
+        # Se conservan los controles de datos, precio, liquidez, presupuesto y ronda.
         routes = None
-        if not isinstance(self,PaperBot):
-            if signal.get('candidate') != side:
-                return 'Esperando respaldo actual para una compra nueva.'
-            routes=engine._entry_route_checks(signal,engine.get_seconds_remaining(market))
-            if not routes.get('valid') or not any(r['complete'] for r in routes.get('sides',{}).get(side,[])):
-                return 'La señal ya no cumple los requisitos actuales de entrada.'
         if book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
             return 'Libro atrasado; esperando datos actuales.'
         actual=engine.get_seconds_remaining(market)
@@ -1604,11 +1601,12 @@ class Bot:
                 if p['ticker']==market['ticker']:
                     self._arm_take_profit(p,market,book)
                     self.manage(p,book,active,remaining)
-            message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
+            buy_side=state.get('first_direction')
+            message=self.enter(market,book,buy_side,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
             if not self.positions() and self.close_requested:
                 self.close_requested=False
-            if active is None:
-                message=state.get('opening_conflict') or 'El cerebro todavía no confirma una dirección.'
+            if buy_side is None and not had_position:
+                message=state.get('opening_conflict') or 'Esperando primera señal confirmada de la ronda.'
             self.snapshot={'status':'ACTIVO' if self.running else 'PAUSADO','message':message,
                            'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
                            'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
@@ -2160,7 +2158,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 .martingale-levels{display:grid;gap:4px;padding:8px 0 12px;border-bottom:1px solid #314369}
 .martingale-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 0;color:#e2eaff;font-size:11px}
 .martingale-row strong{color:var(--gold);font-variant-numeric:tabular-nums}
-.kalshi-chart-panel{margin-top:12px}.kalshi-chart-body{padding:12px 13px 14px;background:linear-gradient(160deg,#112b60,#0b1733 75%)}#kalshiChart{display:block;width:100%;height:clamp(170px,23vw,260px);overflow:visible}#chartPriceLine,#chartPriceDot{transition:stroke .18s,fill .18s}
 </style>
 </head>
 <body>
@@ -2267,20 +2264,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 </div>
-<article class="panel kalshi-chart-panel" aria-label="Gráfica BTC en vivo">
-<h2>BTC · Movimiento de la ronda</h2>
-<div class="kalshi-chart-body">
-<svg id="kalshiChart" viewBox="0 0 900 260" preserveAspectRatio="none" role="img" aria-label="Precio de BTC frente al objetivo de Kalshi">
-<defs><linearGradient id="priceGlow" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#24e4b6" stop-opacity=".17"/><stop offset="1" stop-color="#24e4b6" stop-opacity="0"/></linearGradient></defs>
-<line id="chartTargetLine" x1="18" x2="882" y1="130" y2="130" stroke="#efc864" stroke-width="1.4" stroke-dasharray="5 6" opacity=".85"/>
-<path id="chartFill" fill="url(#priceGlow)" d=""/>
-<path id="chartPriceLine" fill="none" stroke="#45edbe" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round" d=""/>
-<circle id="chartPriceDot" cx="0" cy="0" r="4.5" fill="#45edbe" stroke="#09142b" stroke-width="2" visibility="hidden"/>
-<text id="chartTargetLabel" x="878" y="122" text-anchor="end" fill="#efc864" font-size="12">OBJETIVO —</text>
-<text id="chartEmpty" x="450" y="130" text-anchor="middle" fill="#a6b8df" font-size="13">Esperando precios reales de esta ronda</text>
-</svg>
-</div>
-</article>
 <article class="panel performance">
 <h2>Performance</h2>
 <div class="body metrics">
@@ -2564,39 +2547,6 @@ function setRows(el,html){
   el.innerHTML=html;
   el.lastRenderedRows=html;
 }
-// Chart samples are only actual fresh snapshots, never generated or interpolated.
-const chartSamples=[];let chartTicker=null,chartLastStamp=null;
-function renderKalshiChart(s,fresh){
- const ticker=s.market?.ticker||null, stamp=s.updated;
- if(ticker!==chartTicker){chartTicker=ticker;chartLastStamp=null;chartSamples.length=0;}
- const price=Number(s.price),target=Number(s.target);
- if(fresh&&ticker&&stamp&&stamp!==chartLastStamp&&Number.isFinite(price)&&price>0){
-   const ms=Date.parse(stamp);
-   if(Number.isFinite(ms)&&(chartSamples.length===0||ms>chartSamples[chartSamples.length-1].t)){
-     chartSamples.push({t:ms,p:price});chartLastStamp=stamp;
-   }
- }
- const start=s.market?.open_time?Date.parse(s.market.open_time):NaN;
- const end=s.market?.close_time?Date.parse(s.market.close_time):NaN;
- if(Number.isFinite(start)&&Number.isFinite(end)&&end>start){while(chartSamples.length&&chartSamples[0].t<start)chartSamples.shift();}
- const points=chartSamples.filter(v=>!Number.isFinite(start)||v.t>=start);
- const line=$('#chartPriceLine'),fill=$('#chartFill'),dot=$('#chartPriceDot'),empty=$('#chartEmpty');
- if(!points.length){line.setAttribute('d','');fill.setAttribute('d','');dot.setAttribute('visibility','hidden');empty.textContent='Esperando precios reales de esta ronda';empty.style.display='';}
- else empty.style.display='none';
- const values=points.map(v=>v.p);if(Number.isFinite(target)&&target>0)values.push(target);
- if(!values.length){$('#chartTargetLine').style.display='none';$('#chartTargetLabel').textContent='OBJETIVO —';return;}
- const lo=Math.min(...values),hi=Math.max(...values),pad=Math.max((hi-lo)*.18,lo*.00002,1);
- const min=lo-pad,max=hi+pad,y=p=>238-(p-min)/(max-min)*214;
- const x=v=>Number.isFinite(start)&&Number.isFinite(end)&&end>start?18+Math.max(0,Math.min(1,(v.t-start)/(end-start)))*864:(points.length<2?18:18+(v.t-points[0].t)/Math.max(1,points[points.length-1].t-points[0].t)*864);
- const hasTarget=Number.isFinite(target)&&target>0,ty=hasTarget?y(target):130;
- $('#chartTargetLine').style.display=hasTarget?'':'none';$('#chartTargetLine').setAttribute('y1',ty);$('#chartTargetLine').setAttribute('y2',ty);
- $('#chartTargetLabel').textContent=hasTarget?'OBJETIVO '+target.toLocaleString('en-US',{maximumFractionDigits:2}):'OBJETIVO —';$('#chartTargetLabel').setAttribute('y',Math.max(16,ty-8));
- if(!points.length)return;
- const d=points.map((v,i)=>(i?'L':'M')+x(v).toFixed(2)+' '+y(v.p).toFixed(2)).join(' ');
- const last=points[points.length-1],xx=x(last),yy=y(last.p),color=hasTarget&&last.p<target?'#fb6478':'#45edbe';
- line.setAttribute('d',d);line.setAttribute('stroke',color);dot.setAttribute('cx',xx);dot.setAttribute('cy',yy);dot.setAttribute('fill',color);dot.setAttribute('visibility','visible');
- fill.setAttribute('d',d+' L'+xx.toFixed(2)+' 240 L'+x(points[0]).toFixed(2)+' 240 Z');fill.setAttribute('opacity',hasTarget&&last.p<target?'.12':'.8');
-}
 let settingsSignature='';
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 setText($('#status'),s.status);setText($('#sideStatus'),s.running?'ACTIVO':'PAUSADO');$('#radar').classList.toggle('paused',!fresh);setText($('#radarSignal'),active||'ALPHA');setText($('#radarMode'),active?'CONFIRMADA':'ESPERANDO');setText($('#activeSignal'),active||'ESPERANDO');setText($('#firstSignal'),s.first_signal||'—');setText($('#marketLabel'),fresh?' · DATOS ACTIVOS':' · SIN DATOS');setText($('#feedStatus'),fresh?'● Mercado conectado':'● Esperando datos');setText($('#liveMessage'),(s.mode||'REAL')+' · '+s.message);const linked=!!s.execution_mode;setText($('#start'),s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL');$('#start').disabled=!linked;setText($('#executionModeLabel'),'● '+(s.mode||'REAL'));setText($('#executionFooter'),s.mode||'ENTORNO REAL');setText($('#accountTypeLabel'),s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar'));for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
@@ -2609,7 +2559,7 @@ if(!loaded||(!dirty&&settingsSignature!==signature)){settingsSignature=signature
 martingalePreview();
 setRows($('#entriesRows'),s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join(''));$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 setRows($('#logs'),s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join(''));
-renderKalshiChart(s,fresh);setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
+setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;setText($('#connectionNotice'),(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:''));height();tick()}
 function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));setText($('#roundClock'),String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00')}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){setText($('#marketLabel'),' · DATOS ATRASADOS');setText($('#activeSignal'),'ESPERANDO');$('#radar').classList.add('paused')}}
 window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&acknowledged.has(reply.id))reply=null;if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
