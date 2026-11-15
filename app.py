@@ -1147,8 +1147,8 @@ DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=50,
                 fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10,
-                martingale_enabled=False, martingale_levels=4)
-MARTINGALE_SETTINGS = ('martingale_enabled', 'martingale_levels','risk_pct')
+                martingale_enabled=False, martingale_levels=4, martingale_initial=0.50)
+MARTINGALE_SETTINGS = ('martingale_enabled', 'martingale_levels', 'martingale_initial')
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -1181,11 +1181,11 @@ def valid_settings(raw):
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
               'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
-              'martingale_levels':(1,12)}
+              'martingale_levels':(1,12), 'martingale_initial':(0.01,100000)}
     out = {}
     for key, (low, high) in bounds.items():
         v = raw[key]
-        money_setting = key == 'max_trade_dollars'
+        money_setting = key in ('max_trade_dollars', 'martingale_initial')
         if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (not money_setting and int(v) != v) or not low <= v <= high:
             raise ValueError(f'Valor inválido para {key}: {low}–{high}.')
         out[key] = round(float(v), 2) if money_setting else int(v)
@@ -1906,6 +1906,7 @@ class ConnectedBot(Bot):
 
 class PaperBot(Bot):
     """Virtual ledger and public GET-only feed; never owns an account client."""
+    execution_mode = "paper"
     def __init__(self, db_path=None, feed=None):
         super().__init__(db_path, feed or MarketData())
         self.snapshot['mode'] = 'SIMULACIÓN'
@@ -1914,24 +1915,18 @@ class PaperBot(Bot):
         enabled = self.settings['martingale_enabled']
         maximum = self.settings['martingale_levels']
         level = min(maximum, max(1, int(self.kv('martingale_level') or 1))) if enabled else 1
-        locked_initial = self.kv('martingale_base') if enabled else None
-        cash = Decimal(str(max(0,self.totals()['cash']))) if locked_initial is None else None
-        initial = (cash*self.settings['risk_pct']/100).quantize(Decimal('0.01'),rounding='ROUND_DOWN') if cash is not None else Decimal(str(locked_initial))
+        initial = Decimal(str(self.settings['martingale_initial']))
         return {'enabled':enabled, 'level':level, 'maximum':maximum,
-                'initial':float(initial),'locked':locked_initial is not None,
-                'budget':float(initial * 2 ** (level-1))}
+                'initial':float(initial), 'budget':float(initial * 2 ** (level-1))}
 
     def reset_martingale(self):
         self.put('martingale_level',1)
-        self.put('martingale_base',None)
 
     def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
         # Book depth, budget, round limit and fresh UT signal checked by enter().
         plan = self.martingale_plan()
         evidence = {'mode':'paper','brain':SIGNAL_ENGINE_REVISION,
                     'martingale_level':plan['level'] if plan['enabled'] else None}
-        if plan['enabled'] and not plan['locked']:
-            self.put('martingale_base',plan['initial'])
         self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp_pct,sl_pct,reverse,entry_evidence) VALUES (?,?,?,?,?,?,?,?,?,?)',
             (market['ticker'],side,quantity,price,fee,stamp(),self.settings['take_profit_pct'],self.settings['stop_loss_pct'],int(self.settings['close_on_reverse']),dumps(evidence)))
         note = f" · Nivel {plan['level']} · presupuesto USD {plan['budget']:.2f}" if plan['enabled'] else ''
@@ -2293,7 +2288,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 <div class="controls">
-<button class="primary" id="start">▶ INICIAR REAL</button>
+<button class="primary" id="start" disabled>▶ INICIAR PRUEBA</button>
 <button id="pause">Ⅱ PAUSAR</button>
 <button class="danger" id="close">□ CERRAR TODO</button>
 </div>
@@ -2337,7 +2332,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="hidden" name="maxTrade" value="10">
 
 <div class="field">
-<label>Porcentaje del saldo por apuesta (%)<small>Con martingala, fija el monto del primer nivel.</small></label>
+<label>Porcentaje del saldo por apuesta (%)<small>Se aplica cuando la martingala está apagada.</small></label>
 <select name="riskPct"><option value="5">5%</option><option value="10" selected>10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
 </div>
 <div class="field">
@@ -2345,6 +2340,10 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input id="martingaleEnabled" type="checkbox" name="martingale" aria-controls="martingaleFields">
 </div>
 <div id="martingaleFields" class="hidden">
+<div class="field">
+<label for="martingaleInitial">Monto inicial ($)</label>
+<input id="martingaleInitial" name="martingaleInitial" type="number" value="0.50" min="0.01" max="100000" step="0.01" inputmode="decimal" required>
+</div>
 <div class="field">
 <label for="martingaleLevels">Máximo de niveles</label>
 <input id="martingaleLevels" type="number" name="martingaleLevels" value="4" min="1" max="12" step="1" inputmode="numeric" required>
@@ -2493,7 +2492,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',martingale:'martingale_enabled',martingaleLevels:'martingale_levels',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',martingale:'martingale_enabled',martingaleLevels:'martingale_levels',martingaleInitial:'martingale_initial',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
@@ -2506,18 +2505,14 @@ $('#start').onclick=()=>{if(current?.execution_mode==='live'&&!confirm('¿Inicia
 const form=$('#settings');
 let levelLayout='';
 function martingalePreview(){
-  const {martingale,martingaleLevels,balance,riskPct}=form.elements;
+  const {martingale,martingaleLevels,martingaleInitial}=form.elements;
   const enabled=martingale.checked;
   $('#martingaleFields').classList.toggle('hidden',!enabled);
   martingaleLevels.disabled=!enabled;
+  martingaleInitial.disabled=!enabled;
   if(!enabled)return;
   const levels=martingaleLevels.validity.valid?martingaleLevels.valueAsNumber:0;
-  const plan=current?.martingale;
-  const editedCapital=balance.valueAsNumber!==current?.settings.starting_balance;
-  const cash=editedCapital?balance.valueAsNumber:current?.totals.cash??0;
-  const risk=Number(riskPct.value);
-  const keepBase=plan?.locked&&!editedCapital&&levels===plan.maximum&&risk===current?.settings.risk_pct;
-  const initial=keepBase?plan.initial:Math.floor(Math.round(Math.max(0,cash)*10000)*risk/10000)/100;
+  const initial=martingaleInitial.validity.valid?martingaleInitial.valueAsNumber:NaN;
   const layout=JSON.stringify([levels,initial]);
   if(layout===levelLayout)return;
   levelLayout=layout;
@@ -2532,7 +2527,7 @@ function martingalePreview(){
 form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';martingalePreview()};
 form.onsubmit=e=>{
   e.preventDefault();const cfg={};
-  for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse','martingale','martingaleLevels']){
+  for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse','martingale','martingaleLevels','martingaleInitial']){
     const el=form.elements[name];
     if(!el.disabled)cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value);
   }
@@ -2541,20 +2536,31 @@ form.onsubmit=e=>{
 };
 $('#testApi').onclick=()=>{const key_id=$('#apiKey').value.trim(),pem=$('#privateKey').value;if(!key_id||!pem.trim()){toast('Para REAL completa el API Key ID y la clave privada PEM.');return}action('verify_demo',{environment:'live',accept_real:true,key_id,pem})};
 $('#exportCSV').onclick=()=>action('export');
+function setText(el,value){
+  const text=String(value??'');
+  if(el.textContent!==text)el.textContent=text;
+}
+function setRows(el,html){
+  if(el.lastRenderedRows===html)return;
+  el.innerHTML=html;
+  el.lastRenderedRows=html;
+}
+let settingsSignature='';
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'REAL')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent=s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL';$('#start').disabled=!linked;$('#executionModeLabel').textContent='● '+(s.mode||'REAL');$('#executionFooter').textContent=s.mode||'ENTORNO REAL';$('#accountTypeLabel').textContent=s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar');for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
-$('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
-let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+(s.execution_mode==='live'?' · Cuenta: '+money(s.account_balance):' · virtual');
-if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}el.value=String(value)}}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
+setText($('#status'),s.status);setText($('#sideStatus'),s.running?'ACTIVO':'PAUSADO');$('#radar').classList.toggle('paused',!fresh);setText($('#radarSignal'),active||'ALPHA');setText($('#radarMode'),active?'CONFIRMADA':'ESPERANDO');setText($('#activeSignal'),active||'ESPERANDO');setText($('#firstSignal'),s.first_signal||'—');setText($('#marketLabel'),fresh?' · DATOS ACTIVOS':' · SIN DATOS');setText($('#feedStatus'),fresh?'● Mercado conectado':'● Esperando datos');setText($('#liveMessage'),(s.mode||'REAL')+' · '+s.message);const linked=!!s.execution_mode;setText($('#start'),s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL');$('#start').disabled=!linked;setText($('#executionModeLabel'),'● '+(s.mode||'REAL'));setText($('#executionFooter'),s.mode||'ENTORNO REAL');setText($('#accountTypeLabel'),s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar'));for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
+setText($('#radarNotice'),(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada'));setText($('#entryLimit'),s.settings.max_entry_cents+' ¢');setText($('#goalDisplay'),money(s.settings.daily_goal_dollars));setText($('#sessionTime'),'MIAMI · '+localtime(new Date().toISOString()));
+let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{setText(metrics[i],(value>0?'+':'')+money(value));metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';setText($('#progressText'),progress.toFixed(0)+'% · '+s.totals.completed+' cerradas');setText($('.mini-radar strong'),progress.toFixed(0)+'%');
+let count=s.positions.reduce((n,p)=>n+p.quantity,0);setText($('#openContracts'),count+' CONTRATOS');setText($('#positionSide'),s.positions[0]?.side||'SIN POSICIÓN');let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
+setText($('#positionPaid'),money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0)));setText($('#unrealized'),marked?((net>0?'+':'')+money(net)):'—');$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';setText($('#positionNote'),s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones');setText($('#cashLabel'),'Disponible del bot: '+money(s.totals.cash)+(s.execution_mode==='live'?' · Cuenta: '+money(s.account_balance):' · virtual'));
+const signature=JSON.stringify(s.settings);
+if(!loaded||(!dirty&&settingsSignature!==signature)){settingsSignature=signature;for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}if(el.value!==String(value))el.value=String(value)}}loaded=true;setText($('#savedState'),'AJUSTES DEL SERVIDOR')}form.elements.balance.disabled=s.running||s.positions.length>0;
 martingalePreview();
-$('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
-$('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
-$('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
-endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:'');height();tick()}
-function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+setRows($('#entriesRows'),s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join(''));$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
+setRows($('#logs'),s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join(''));
+setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
+endAt=s.market?.close_time?Date.parse(s.market.close_time):null;setText($('#connectionNotice'),(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:''));height();tick()}
+function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));setText($('#roundClock'),String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00')}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){setText($('#marketLabel'),' · DATOS ATRASADOS');setText($('#activeSignal'),'ESPERANDO');$('#radar').classList.add('paused')}}
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&acknowledged.has(reply.id))reply=null;if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
@@ -2565,7 +2571,7 @@ class Controller:
         self.bot=bot
         self.connection_root=bot
         self.seen={}
-        self.connection={'message':('Prueba virtual · datos públicos; sin órdenes reales.' if isinstance(bot,PaperBot) else 'REAL · Cuenta pendiente de conectar.')}
+        self.connection={'message':('Prueba virtual · datos públicos; sin órdenes reales.' if getattr(bot,'execution_mode',None)=='paper' else 'REAL · Cuenta pendiente de conectar.')}
         active=[]  # Explicit mode selection owns which ledger is shown.
         if len(active)==1:
             self.bot=active[0]
@@ -2583,10 +2589,10 @@ class Controller:
             payload=event.get('payload',{})
             if not isinstance(payload,dict):raise ValueError('Solicitud inválida.')
             if action=='command':
-                if not isinstance(self.bot,(ConnectedBot,PaperBot)):raise ValueError('Conecta la cuenta REAL de Kalshi antes de operar.')
+                if getattr(self.bot,'execution_mode',None)!='paper' and not isinstance(self.bot,ConnectedBot):raise ValueError('Conecta la cuenta REAL de Kalshi antes de operar.')
                 command=payload.get('command')
                 self.bot.command(command)
-                reply['message']={'start':('Prueba virtual activada.' if isinstance(self.bot,PaperBot) else 'Operaciones en Kalshi activadas.'),'pause':'Entradas pausadas; salidas vigiladas.',
+                reply['message']={'start':('Prueba virtual activada.' if getattr(self.bot,'execution_mode',None)=='paper' else 'Operaciones en Kalshi activadas.'),'pause':'Entradas pausadas; salidas vigiladas.',
                                   'close':'Cierre solicitado; esperando liquidez actual.'}[command]
             elif action=='settings':
                 self.bot.save_settings(payload);reply['saved_settings']=dict(self.bot.settings);reply['message']='Ajustes guardados. Meta acumulada: $'+str(self.bot.settings['daily_goal_dollars'])+' de ganancia; no se reinicia cada día.'
@@ -2595,7 +2601,7 @@ class Controller:
                 reply['message']='Kalshi responde: '+market['ticker']
                 self.connection={'message':'Consulta pública verificada: '+market['ticker'],'verified_at':stamp()}
             elif action=='verify_demo':
-                if isinstance(self.bot,PaperBot):raise ValueError('Apaga Dinero virtual antes de conectar una cuenta real.')
+                if getattr(self.bot,'execution_mode',None)=='paper':raise ValueError('Apaga Dinero virtual antes de conectar una cuenta real.')
                 self.auto_disabled=False
                 self.connection=_connect_kalshi(self,payload)
                 reply['message']=self.connection['message']
@@ -2640,8 +2646,8 @@ class Controller:
         with self.bot.lock:
             result['has_trades']=bool(self.bot.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone())
         result['connection']=self.connection.copy()
-        result['mode']='SIMULACIÓN' if isinstance(self.bot,PaperBot) else 'REAL'
-        if not isinstance(self.bot,(ConnectedBot,PaperBot)):
+        result['mode']='SIMULACIÓN' if getattr(self.bot,'execution_mode',None)=='paper' else 'REAL'
+        if getattr(self.bot,'execution_mode',None)!='paper' and not isinstance(self.bot,ConnectedBot):
             result.update(running=False,execution_mode=None)
             if result.get('status') != 'SIN DATOS':
                 result['message']='Lectura activa · conecta una cuenta solo para operar en real.'
@@ -2689,10 +2695,17 @@ def _auto_connect_saved(controller,credentials):
 
 
 
+PAPER_RUNTIME_REVISION = "martingale_sim_stable_v2"
+
 def _refresh_runtime_bot(root, paper_mode):
     """Rebind cached resources after Streamlit re-executes class definitions."""
     with root.lock:
+        if paper_mode and getattr(root,"runtime_revision",None)==PAPER_RUNTIME_REVISION:
+            root.start_worker()
+            return root
         root.__class__=PaperBot if paper_mode else Bot
+        if paper_mode:
+            root.runtime_revision=PAPER_RUNTIME_REVISION
         root.settings={key:root.settings.get(key,value) for key,value in DEFAULTS.items()}
         root.feed.__class__=MarketData
         for linked in getattr(root,'connected_accounts',{}).values():
@@ -2759,6 +2772,8 @@ def _shared_runtime_bot(paper_mode):
                 fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
             bot=PaperBot(db) if paper_mode else Bot(db)
             bot._process_lock=held
+            if paper_mode:
+                bot.runtime_revision=PAPER_RUNTIME_REVISION
             bot.start_worker()
         except Exception:
             if bot is not None:
@@ -2794,40 +2809,18 @@ def streamlit_main():
             else:st.error('Contraseña incorrecta.')
         st.stop()
 
-    if 'alpha_restore_mode' in st.session_state:
-        st.session_state.alpha_paper_switch=st.session_state.pop('alpha_restore_mode')
-    st.toggle('Dinero virtual · prueba temporal', value=True, key='alpha_paper_switch')
-    paper_mode=True  # Safety: simulation-only build
-    previous_mode=st.session_state.get('alpha_previous_mode')
-    previous=st.session_state.get('alpha_controller')
-    if previous is not None and previous_mode is not None:
-        previous.__class__=Controller
-        _refresh_runtime_bot(previous.connection_root, previous_mode)
-    if previous is not None and previous_mode is not None and previous_mode != paper_mode:
-        with previous.bot.lock:
-            busy_mode=previous.bot.running or bool(previous.bot.positions())
-        if busy_mode:
-            st.error('Pausa las entradas y cierra o espera las posiciones del entorno anterior antes de cambiar el switch.')
-            if st.button('Volver al entorno anterior'):
-                st.session_state.alpha_restore_mode=previous_mode
-                st.rerun()
-            st.stop()
     try:
-        bot=_shared_runtime_bot(paper_mode)
+        bot=_shared_runtime_bot(True)
     except (OSError,RuntimeError):
-        st.error('El motor anterior sigue ocupando el historial. Reinicia la app una vez para cargar esta versión; no se iniciaron nuevas operaciones.')
+        st.error('El motor anterior sigue ocupando el historial. Reinicia la app para cargar esta versión.')
         st.stop()
-    if previous is None or previous_mode != paper_mode:
-        st.session_state.alpha_controller=Controller(bot)
+    controller=st.session_state.get('alpha_controller')
+    if controller is None or controller.bot is not bot:
+        controller=Controller(bot)
+        st.session_state.alpha_controller=controller
         st.session_state.alpha_reply=None
-    controller=st.session_state.alpha_controller
     controller.__class__=Controller
-    st.session_state.alpha_previous_mode=paper_mode
-    if paper_mode:
-        st.caption('MODO PRUEBA · SALDO VIRTUAL')
-    else:
-        st.caption('MODO REAL · Lectura activa. Conecta e inicia para operar.')
-    saved_credentials=_saved_kalshi_credentials(st.secrets)
+    st.caption('MODO PRUEBA · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
@@ -2837,7 +2830,6 @@ def streamlit_main():
 
     @st.fragment(run_every=2)
     def live_terminal():
-        _auto_connect_saved(controller,saved_credentials)
         event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
         if isinstance(event,dict) and event.get('action')=='ack':
             st.session_state.alpha_reply=None
@@ -2845,7 +2837,6 @@ def streamlit_main():
             reply=controller.handle(event)
             if reply:
                 st.session_state.alpha_reply=reply
-                st.rerun()
     live_terminal()
 
 if __name__=='__main__':
