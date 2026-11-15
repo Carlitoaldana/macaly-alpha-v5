@@ -1,15 +1,18 @@
 """JC Alpha Edge · BTC 15 min.
 
 Instalación: python -m pip install numpy pandas cryptography requests streamlit
-Inicio: python JC_Alpha_Edge_Critik2.py
-Abre http://127.0.0.1:8765 para operar exclusivamente en simulación.
+Streamlit: streamlit run JC_Alpha_Edge_Critik2.py
+Inicio local alternativo: python JC_Alpha_Edge_Critik2.py
+Todas las operaciones son simuladas.
 """
 import ast
 import base64
+import hashlib
 import json
 import math
 import os
 import re
+import tempfile
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -50,21 +53,33 @@ def load_engine():
     return symbols
 
 
+BALANCE_PATH = "/trade-api/v2/portfolio/balance"
+
+
 def account_status(environment, key_id, private_key):
-    path = "/trade-api/v2/portfolio/balance"
     timestamp = str(time.time_ns() // 1_000_000)
     key = serialization.load_pem_private_key(private_key.encode(), password=None)
     if not isinstance(key, rsa.RSAPrivateKey):
         raise ValueError("Usa una clave privada RSA de Kalshi.")
     signature = key.sign(
-        f"{timestamp}GET{path}".encode(),
+        f"{timestamp}GET{BALANCE_PATH}".encode(),
         padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
         hashes.SHA256(),
     )
-    request = Request(KALSHI[environment] + path, headers={
+    return read_balance(environment, key_id, timestamp, base64.b64encode(signature).decode())
+
+
+def read_balance(environment, key_id, timestamp, signature):
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", key_id):
+        raise ValueError("Identificador de API inválido.")
+    if not re.fullmatch(r"[0-9]{13}", timestamp) or abs(time.time_ns() // 1_000_000 - int(timestamp)) > 30_000:
+        raise ValueError("La firma venció. Comprueba la hora del dispositivo y vuelve a verificar.")
+    if not re.fullmatch(r"[A-Za-z0-9+/]{100,1500}={0,2}", signature):
+        raise ValueError("Firma de cuenta inválida.")
+    request = Request(KALSHI[environment] + BALANCE_PATH, headers={
         "KALSHI-ACCESS-KEY": key_id,
         "KALSHI-ACCESS-TIMESTAMP": timestamp,
-        "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode(),
+        "KALSHI-ACCESS-SIGNATURE": signature,
     })
     started = time.monotonic()
     with urlopen(request, timeout=8) as response:
@@ -293,6 +308,67 @@ class Handler(BaseHTTPRequestHandler):
             self.respond({"error": "Comprueba el identificador, el entorno y la clave PEM."}, 400)
         except OSError:
             self.respond({"error": "Kalshi no respondió a la consulta."}, 502)
+
+
+def component_request(feed, operation, params):
+    try:
+        if operation == "market":
+            mode = params.get("mode")
+            if mode not in ("sim", "live"):
+                raise ValueError("Fuente inválida.")
+            advance = min(900, max(0, int(params.get("advance", 0))))
+            return feed.snapshot(mode, advance)
+        if operation == "result":
+            return {"winner": feed.outcome(params["ticker"])}
+        if operation == "balance":
+            return read_balance(params["environment"], params["key_id"],
+                                params["timestamp"], params["signature"])
+        raise ValueError("Solicitud desconocida.")
+    except HTTPError as exc:
+        return {"error": f"Kalshi respondió HTTP {exc.code}. Vuelve a intentar."}
+    except (KeyError, TypeError, ValueError) as exc:
+        if operation == "balance":
+            return {"error": "Comprueba el entorno, el identificador y la clave."}
+        return {"error": str(exc) if isinstance(exc, ValueError) else "Respuesta incompleta."}
+    except (OSError, RuntimeError) as exc:
+        if operation != "balance":
+            print(f"Lectura de mercado: {type(exc).__name__}: {exc}", flush=True)
+        return {"error": "Kalshi no respondió al consultar el saldo." if operation == "balance" else str(exc)}
+
+
+def streamlit_main():
+    import streamlit as st
+    import streamlit.components.v1 as components
+
+    st.set_page_config(page_title="JC Alpha Edge · BTC 15 min", layout="wide")
+    st.markdown("""<style>
+    [data-testid="stAppViewContainer"], [data-testid="stHeader"] {background:#060b0a}
+    [data-testid="stHeader"] {display:none}
+    [data-testid="stMainBlockContainer"] {padding:0;max-width:none}
+    iframe {display:block}
+    </style>""", unsafe_allow_html=True)
+
+    @st.cache_resource
+    def component_dir(version):
+        directory = Path(tempfile.mkdtemp(prefix=f"jc-alpha-{version}-"))
+        hosted = HTML_SOURCE.replace('lang="es"', 'lang="es" data-streamlit="true"', 1)
+        (directory / "index.html").write_text(hosted, encoding="utf-8")
+        return directory
+
+    if "critik_feed" not in st.session_state:
+        st.session_state.critik_feed = Feed()
+    version = hashlib.sha256(HTML_SOURCE.encode()).hexdigest()[:12]
+    terminal = components.declare_component("jc_alpha_critik2", path=str(component_dir(version)))
+    reply = st.session_state.get("critik_reply")
+    request = terminal(key="jc_alpha_terminal", reply=reply, default=None)
+    if isinstance(request, dict) and isinstance(request.get("id"), str) and (
+        reply is None or request["id"] != reply["id"]
+    ):
+        payload = request.get("params")
+        data = (component_request(st.session_state.critik_feed, request.get("operation"), payload)
+                if isinstance(payload, dict) else {"error": "Solicitud incompleta."})
+        st.session_state.critik_reply = {"id": request["id"], "payload": data}
+        st.rerun()
 
 
 # Motor original de Alpha Edge integrado para ejecutar este archivo por separado.
@@ -5990,6 +6066,67 @@ const get = id => document.getElementById(id);
 const money = new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'});
 const time = new Intl.DateTimeFormat('es-US',{hour:'numeric',minute:'2-digit',timeZone:'America/New_York'});
 const set = (id,text) => {get(id).textContent=text;};
+const hosted = document.documentElement.dataset.streamlit === 'true';
+let bridgeReady=false, bridgeActive=null, bridgeSequence=0;
+const bridgeQueue=[];
+function bridgePost(type, values={}) {
+  window.parent.postMessage({isStreamlitMessage:true,type,...values},location.origin);
+}
+function bridgeSend() {
+  if(!bridgeReady || bridgeActive || !bridgeQueue.length)return;
+  bridgeActive=bridgeQueue.shift();
+  const {id,operation,params}=bridgeActive;
+  bridgeActive.timer=setTimeout(()=>{
+    const pending=bridgeActive;bridgeActive=null;
+    pending.reject(new Error('La consulta tardó demasiado. Volviendo a intentar.'));
+    bridgeSend();
+  },45000);
+  bridgePost('streamlit:setComponentValue',{value:{id,operation,params},dataType:'json'});
+}
+if(hosted) {
+  const frameSize=()=>bridgePost('streamlit:setFrameHeight',{height:window.parent.innerHeight});
+  window.addEventListener('message',event=>{
+    if(event.source!==window.parent || event.origin!==location.origin || event.data?.type!=='streamlit:render')return;
+    bridgeReady=true;frameSize();
+    const reply=event.data.args?.reply;
+    if(bridgeActive && reply?.id===bridgeActive.id) {
+      const pending=bridgeActive;bridgeActive=null;clearTimeout(pending.timer);
+      pending.resolve({ok:!reply.payload.error,json:async()=>reply.payload});
+    }
+    bridgeSend();
+  });
+  window.parent.addEventListener('resize',frameSize);
+  bridgePost('streamlit:componentReady',{apiVersion:1});
+}
+function der(tag,bytes) {
+  const length=bytes.length;
+  const header=length<128?[tag,length]:length<256?[tag,129,length]:[tag,130,length>>8,length&255];
+  return Uint8Array.from([...header,...bytes]);
+}
+async function signedBalance({environment,key_id,private_key}) {
+  const match=private_key.trim().match(/^-----BEGIN (RSA PRIVATE KEY|PRIVATE KEY)-----\s+([A-Za-z0-9+/=\s]+?)\s*-----END \1-----$/);
+  if(!match || !window.crypto?.subtle)throw new Error('Usa una clave privada PEM de Kalshi y una conexión HTTPS.');
+  let keyBytes=Uint8Array.from(atob(match[2].replace(/\s/g,'')),char=>char.charCodeAt(0));
+  if(match[1]==='RSA PRIVATE KEY') {
+    const algorithm=[48,13,6,9,42,134,72,134,247,13,1,1,1,5,0];
+    keyBytes=der(48,Uint8Array.from([2,1,0,...algorithm,...der(4,keyBytes)]));
+  }
+  const key=await crypto.subtle.importKey('pkcs8',keyBytes,{name:'RSA-PSS',hash:'SHA-256'},false,['sign']);
+  const timestamp=String(Date.now());
+  const text=new TextEncoder().encode(timestamp+'GET/trade-api/v2/portfolio/balance');
+  const signature=await crypto.subtle.sign({name:'RSA-PSS',saltLength:32},key,text);
+  return {environment,key_id,timestamp,signature:btoa(String.fromCharCode(...new Uint8Array(signature)))};
+}
+async function requestData(path, options) {
+  if(!hosted)return fetch(path,options);
+  const url=new URL(path,location.origin);
+  const operation={'/api/market':'market','/api/result':'result','/api/kalshi':'balance'}[url.pathname];
+  const params=operation==='balance'?await signedBalance(JSON.parse(options.body)):Object.fromEntries(url.searchParams);
+  return new Promise((resolve,reject)=>{
+    bridgeQueue.push({id:Date.now()+'-'+(++bridgeSequence),operation,params,resolve,reject});
+    bridgeSend();
+  });
+}
 const defaults = {martingale:true,sizing:'manual',initial:.50,limit:45,profit:90,levels:4,stopWin:false,startSound:false,sounds:false,directions:[]};
 function read(key, fallback) {
   try { return JSON.parse(localStorage.getItem(key)) ?? fallback; }
@@ -6081,7 +6218,7 @@ async function settleExpired() {
   if(!p || (p.ticker===snapshot?.ticker && leftSeconds()>0) || Date.now()-checkedResult<5000) return;
   const settledBook=book;
   checkedResult=Date.now();
-  const response=await fetch('/api/result?ticker='+encodeURIComponent(p.ticker));
+  const response=await requestData('/api/result?ticker='+encodeURIComponent(p.ticker));
   const {winner}=await response.json();
   if(book!==settledBook || book.position!==p) return;
   if(!response.ok || !winner){set('notice','Esperando el resultado de la ronda anterior.');return;}
@@ -6138,7 +6275,7 @@ async function refresh(advance=0) {
   if(busy)return;
   busy=true;const requested=mode;get('advance').disabled=true;
   try {
-    const response=await fetch('/api/market?mode='+requested+'&advance='+advance);
+    const response=await requestData('/api/market?mode='+requested+'&advance='+advance);
     const data=await response.json();if(!response.ok)throw new Error(data.error);
     if(requested!==mode)return;
     set('notice',data.quote_error||'');snapshot=data;received=Date.now();
@@ -6191,7 +6328,7 @@ get('connect').onsubmit=async event=>{
   const body=Object.fromEntries(new FormData(f));
   f.elements.private_key.value='';f.elements.key_id.value='';
   set('connection','Verificando…');account=null;
-  try {const response=await fetch('/api/kalshi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  try {const response=await requestData('/api/kalshi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     const data=await response.json();if(!response.ok)throw new Error(data.error);account=data;reportAccount();
   } catch(error){reportAccount();set('connection',error.message);}
   finally{btn.disabled=false;}
@@ -6203,7 +6340,7 @@ loadForm(settings);renderBook();reportAccount();refresh();setInterval(()=>refres
 '''
 )
 
-if __name__ == "__main__":
+def local_main():
     # Keep Alpha Edge's existing relative diagnostic databases out of the source directory.
     data_dir = ROOT / "data"
     data_dir.mkdir(exist_ok=True)
@@ -6212,3 +6349,12 @@ if __name__ == "__main__":
     server.feed = Feed()
     print(f"Abre http://127.0.0.1:{server.server_port}", flush=True)
     server.serve_forever()
+
+
+if __name__ == "__main__":
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+
+    if get_script_run_ctx(suppress_warning=True):
+        streamlit_main()
+    else:
+        local_main()
