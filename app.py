@@ -1146,7 +1146,9 @@ DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=50,
-                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10)
+                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10,
+                martingale_enabled=False, martingale_initial=0.50, martingale_levels=4)
+MARTINGALE_SETTINGS = ('martingale_enabled', 'martingale_initial', 'martingale_levels')
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -1178,16 +1180,19 @@ def valid_settings(raw):
               'max_entries_round':(1,100),
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
-              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100)}
+              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
+              'martingale_initial':(0.01,100000), 'martingale_levels':(1,12)}
     out = {}
     for key, (low, high) in bounds.items():
         v = raw[key]
-        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (key != 'max_trade_dollars' and int(v) != v) or not low <= v <= high:
+        money_setting = key in ('max_trade_dollars', 'martingale_initial')
+        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (not money_setting and int(v) != v) or not low <= v <= high:
             raise ValueError(f'Valor inválido para {key}: {low}–{high}.')
-        out[key] = round(float(v), 2) if key == 'max_trade_dollars' else int(v)
-    if not isinstance(raw['close_on_reverse'], bool):
-        raise ValueError('El cierre por cambio de señal debe ser sí o no.')
-    out['close_on_reverse'] = raw['close_on_reverse']
+        out[key] = round(float(v), 2) if money_setting else int(v)
+    for key in ('close_on_reverse', 'martingale_enabled'):
+        if not isinstance(raw[key], bool):
+            raise ValueError(f'El ajuste {key} debe ser sí o no.')
+        out[key] = raw[key]
     return out
 
 class MarketData:
@@ -1386,6 +1391,11 @@ class Bot:
             merged = dict(self.settings)
             merged.update(raw)
             settings = valid_settings(merged)
+            reset_progression = isinstance(self,PaperBot) and any(
+                settings[key] != self.settings[key] for key in (*MARTINGALE_SETTINGS, 'starting_balance')
+            )
+            if reset_progression and self.positions():
+                raise ValueError('Espera al cierre de la posición virtual antes de cambiar la martingala.')
             account_message=''
             if settings['starting_balance'] != self.settings['starting_balance']:
                 if self.running or self.positions():
@@ -1396,6 +1406,8 @@ class Bot:
                 account_message=f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
             self.settings=settings
             self.put('settings',settings)
+            if reset_progression:
+                self.put('martingale_level',1)
             self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
                             (settings['take_profit_pct'],))
             self.event('AJUSTES',account_message+'Ajustes guardados. Meta de ganancia acumulada; Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
@@ -1519,7 +1531,13 @@ class Bot:
             return 'Meta de ganancia acumulada alcanzada.'
         count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
         if count>=s['max_entries_round']:return 'Máximo de entradas de esta ronda alcanzado.'
-        budget=float((Decimal(str(max(0.0,total['cash'])))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
+        progression = self.martingale_plan() if isinstance(self,PaperBot) else None
+        if progression and progression['enabled']:
+            budget = progression['budget']
+            if budget > total['cash']:
+                return f"Saldo virtual insuficiente para el nivel {progression['level']}."
+        else:
+            budget=float((Decimal(str(max(0.0,total['cash'])))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
         if budget<=0:return 'Saldo disponible agotado.'
         sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
         if sized is None:return 'Sin liquidez suficiente para el importe configurado dentro del precio máximo.'
@@ -1883,11 +1901,23 @@ class PaperBot(Bot):
         super().__init__(db_path, feed or MarketData())
         self.snapshot['mode'] = 'SIMULACIÓN'
 
+    def martingale_plan(self):
+        enabled = self.settings['martingale_enabled']
+        maximum = self.settings['martingale_levels']
+        initial = Decimal(str(self.settings['martingale_initial']))
+        level = min(maximum, max(1, int(self.kv('martingale_level') or 1))) if enabled else 1
+        return {'enabled':enabled, 'level':level, 'maximum':maximum,
+                'budget':float(initial * 2 ** (level-1))}
+
     def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
         # Book depth, budget, round limit and fresh UT signal checked by enter().
+        plan = self.martingale_plan()
+        evidence = {'mode':'paper','brain':SIGNAL_ENGINE_REVISION,
+                    'martingale_level':plan['level'] if plan['enabled'] else None}
         self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp_pct,sl_pct,reverse,entry_evidence) VALUES (?,?,?,?,?,?,?,?,?,?)',
-            (market['ticker'],side,quantity,price,fee,stamp(),self.settings['take_profit_pct'],self.settings['stop_loss_pct'],int(self.settings['close_on_reverse']),dumps({'mode':'paper','brain':SIGNAL_ENGINE_REVISION})))
-        self.event('ENTRADA VIRTUAL',f'{side} · {quantity} contrato(s) · {price:.2f}¢ · saldo virtual')
+            (market['ticker'],side,quantity,price,fee,stamp(),self.settings['take_profit_pct'],self.settings['stop_loss_pct'],int(self.settings['close_on_reverse']),dumps(evidence)))
+        note = f" · Nivel {plan['level']} · presupuesto USD {plan['budget']:.2f}" if plan['enabled'] else ''
+        self.event('ENTRADA VIRTUAL',f'{side} · {quantity} contrato(s) · {price:.2f}¢ · saldo virtual'+note)
         return 'Compra virtual registrada; no se envió ninguna orden.'
 
     def _close(self,p,price,reason,settlement=False):
@@ -1895,13 +1925,32 @@ class PaperBot(Bot):
         pnl=(price-p['entry'])*p['quantity']/100-p['entry_fee']-fee
         cur=self.db.execute('UPDATE trades SET exit=?,exit_fee=?,closed=?,reason=?,pnl=? WHERE id=? AND closed IS NULL',
             (price,fee,stamp(),reason,pnl,p['id']))
-        if cur.rowcount:self.event('SALIDA VIRTUAL',f"#{p['id']} · {reason} · neto virtual ${pnl:.2f}")
+        if cur.rowcount:
+            note = self.advance_martingale(p,pnl)
+            self.event('SALIDA VIRTUAL',f"#{p['id']} · {reason} · neto virtual ${pnl:.2f}"+note)
         self.db.commit()
 
+    def advance_martingale(self,p,pnl):
+        opened_level = json.loads(p.get('entry_evidence') or '{}').get('martingale_level')
+        plan = self.martingale_plan()
+        if not plan['enabled'] or not opened_level or abs(pnl) < 1e-8:
+            return ''
+        if pnl > 0:
+            self.put('martingale_level',1)
+            return ' · Martingala vuelve al nivel 1.'
+        if opened_level >= plan['maximum']:
+            self.put('martingale_level',1)
+            self.running=False
+            return ' · Último nivel perdido. Entradas pausadas; próximo inicio en nivel 1.'
+        self.put('martingale_level',opened_level+1)
+        return f' · Martingala sube al nivel {opened_level+1}.'
+
     def view(self):
-        result=super().view()
-        result.update(mode='SIMULACIÓN',execution_mode='paper',pending_orders=0,account_balance=None)
-        return result
+        with self.lock:
+            result=super().view()
+            result.update(mode='SIMULACIÓN',execution_mode='paper',pending_orders=0,account_balance=None,
+                          martingale=self.martingale_plan())
+            return result
 
 
 def _connect_kalshi(controller,payload):
@@ -2267,8 +2316,24 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <input type="hidden" name="maxTrade" value="10">
 
 <div class="field">
-<label>Porcentaje del saldo por apuesta (%)<small>Se recalcula con el saldo disponible asignado al bot antes de cada compra.</small></label>
+<label>Porcentaje del saldo por apuesta (%)<small>Se aplica cuando la martingala está desactivada.</small></label>
 <select name="riskPct"><option value="5">5%</option><option value="10" selected>10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
+</div>
+<div class="field">
+<label>Martingala automática ×2<small>Solo para operación virtual</small></label>
+<input type="checkbox" name="martingale">
+</div>
+<div class="field">
+<label>Monto inicial de martingala ($)</label>
+<input type="number" name="martingaleInitial" value="0.50" min="0.01" max="100000" step="0.01" required>
+</div>
+<div class="field">
+<label>Máximo de niveles<small>Al perder el último nivel, se pausan las entradas.</small></label>
+<input type="number" name="martingaleLevels" value="4" min="1" max="12" step="1" required>
+</div>
+<div class="field">
+<small id="martingalePreview"></small>
+<small id="martingaleCurrent"></small>
 </div>
 <div class="field">
 <label>Máximo de entradas por ronda</label>
@@ -2412,7 +2477,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
+const names={balance:'starting_balance',goal:'daily_goal_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',martingale:'martingale_enabled',martingaleInitial:'martingale_initial',martingaleLevels:'martingale_levels',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
 const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
 let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
@@ -2422,8 +2487,15 @@ function busy(on){for(const s of ['#start','#pause','#close','#testApi','#export
 function action(action,payload={}){if(pending){toast('Esperando confirmación del servidor.');return}let id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);pending=id;busy(true);post('streamlit:setComponentValue',{value:{id,action,payload},dataType:'json'});setTimeout(()=>{if(pending===id){pending=null;busy(false);toast('Sin confirmación del servidor. Revisa Registro antes de repetir.')}},25000)}
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
 $('#start').onclick=()=>{if(current?.execution_mode==='live'&&!confirm('¿Iniciar el bot en tu cuenta REAL de Kalshi con los ajustes actuales?'))return;action('command',{command:'start'})};$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y cerrar las posiciones del bot en el modo actual?'))action('command',{command:'close'})};
-const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
+const form=$('#settings');
+function martingalePreview(){
+  const {martingale,martingaleInitial,martingaleLevels}=form.elements;
+  const initial=martingaleInitial.valueAsNumber, levels=martingaleLevels.valueAsNumber;
+  const configured=martingale.checked&&martingaleInitial.validity.valid&&martingaleLevels.validity.valid;
+  $('#martingalePreview').textContent=configured?'Montos por nivel · '+Array.from({length:levels},(_,i)=>money(initial*2**i)).join(' → '):'';
+}
+form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';martingalePreview()};
+form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse','martingale','martingaleInitial','martingaleLevels']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
 $('#testApi').onclick=()=>{const key_id=$('#apiKey').value.trim(),pem=$('#privateKey').value;if(!key_id||!pem.trim()){toast('Para REAL completa el API Key ID y la clave privada PEM.');return}action('verify_demo',{environment:'live',accept_real:true,key_id,pem})};
 $('#exportCSV').onclick=()=>action('export');
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
@@ -2433,6 +2505,9 @@ let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.t
 let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
 $('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+(s.execution_mode==='live'?' · Cuenta: '+money(s.account_balance):' · virtual');
 if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}el.value=String(value)}}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
+martingalePreview();
+const plan=s.martingale;
+$('#martingaleCurrent').textContent=plan?.enabled?'Nivel activo '+plan.level+' de '+plan.maximum+' · '+money(plan.budget):'Martingala desactivada';
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
 $('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
@@ -2577,6 +2652,7 @@ def _refresh_runtime_bot(root, paper_mode):
     """Rebind cached resources after Streamlit re-executes class definitions."""
     with root.lock:
         root.__class__=PaperBot if paper_mode else Bot
+        root.settings={**DEFAULTS,**root.settings}
         root.feed.__class__=MarketData
         for linked in getattr(root,'connected_accounts',{}).values():
             with linked.lock:
