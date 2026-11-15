@@ -1524,11 +1524,15 @@ class Bot:
         s=self.settings
         if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
             return 'Entradas pausadas o posición en gestión.'
-        if not signal or signal.get('data_valid') is not True or signal.get('candidate') != side:
-            return 'Esperando respaldo actual para una compra nueva.'
-        routes=engine._entry_route_checks(signal,engine.get_seconds_remaining(market))
-        if not routes.get('valid') or not any(r['complete'] for r in routes.get('sides',{}).get(side,[])):
-            return 'La señal ya no cumple los requisitos actuales de entrada.'
+        if not signal or signal.get('data_valid') is not True:
+            return 'Esperando datos válidos del mercado.'
+        routes = None
+        if not isinstance(self,PaperBot):
+            if signal.get('candidate') != side:
+                return 'Esperando respaldo actual para una compra nueva.'
+            routes=engine._entry_route_checks(signal,engine.get_seconds_remaining(market))
+            if not routes.get('valid') or not any(r['complete'] for r in routes.get('sides',{}).get(side,[])):
+                return 'La señal ya no cumple los requisitos actuales de entrada.'
         if book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
             return 'Libro atrasado; esperando datos actuales.'
         actual=engine.get_seconds_remaining(market)
@@ -1923,7 +1927,7 @@ class PaperBot(Bot):
         self.put('martingale_level',1)
 
     def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
-        # Book depth, budget, round limit and fresh UT signal checked by enter().
+        # step() supplies the radar's confirmed direction for this round.
         plan = self.martingale_plan()
         evidence = {'mode':'paper','brain':SIGNAL_ENGINE_REVISION,
                     'martingale_level':plan['level'] if plan['enabled'] else None}
@@ -2695,7 +2699,7 @@ def _auto_connect_saved(controller,credentials):
 
 
 
-PAPER_RUNTIME_REVISION = "martingale_sim_stable_v2"
+PAPER_RUNTIME_REVISION = "martingale_sim_stable_v3"
 
 def _refresh_runtime_bot(root, paper_mode):
     """Rebind cached resources after Streamlit re-executes class definitions."""
