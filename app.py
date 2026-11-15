@@ -1526,13 +1526,10 @@ class Bot:
             return 'Entradas pausadas o posición en gestión.'
         if not signal or signal.get('data_valid') is not True:
             return 'Esperando datos válidos del mercado.'
+        # La dirección de compra es la primera señal registrada de la ronda.
+        # El cerebro puede cambiar su señal activa sin cambiar ni bloquear esta entrada.
+        # Se conservan los controles de datos, precio, liquidez, presupuesto y ronda.
         routes = None
-        if not isinstance(self,PaperBot):
-            if signal.get('candidate') != side:
-                return 'Esperando respaldo actual para una compra nueva.'
-            routes=engine._entry_route_checks(signal,engine.get_seconds_remaining(market))
-            if not routes.get('valid') or not any(r['complete'] for r in routes.get('sides',{}).get(side,[])):
-                return 'La señal ya no cumple los requisitos actuales de entrada.'
         if book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
             return 'Libro atrasado; esperando datos actuales.'
         actual=engine.get_seconds_remaining(market)
@@ -1604,11 +1601,12 @@ class Bot:
                 if p['ticker']==market['ticker']:
                     self._arm_take_profit(p,market,book)
                     self.manage(p,book,active,remaining)
-            message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
+            buy_side=state.get('first_direction')
+            message=self.enter(market,book,buy_side,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
             if not self.positions() and self.close_requested:
                 self.close_requested=False
-            if active is None:
-                message=state.get('opening_conflict') or 'El cerebro todavía no confirma una dirección.'
+            if buy_side is None and not had_position:
+                message=state.get('opening_conflict') or 'Esperando primera señal confirmada de la ronda.'
             self.snapshot={'status':'ACTIVO' if self.running else 'PAUSADO','message':message,
                            'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
                            'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
