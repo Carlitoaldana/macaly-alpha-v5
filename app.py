@@ -210,6 +210,7 @@ def extract_kalshi_btc_price(data):
         try:
             price = _valid_live_observation(value, pd.to_datetime(stamp, unit="s", utc=True), "KALSHI LIVE")
             _PRICE_OBSERVATIONS.kalshi_points = [(t, p) for t, _, p in timed_points if stamp - 90 <= t <= stamp]
+            _PRICE_OBSERVATIONS.chart_points = [(t, p) for t, _, p in timed_points if stamp - 900 <= t <= stamp]
             return price
         except (ValueError, TypeError, OverflowError):
             return None
@@ -1195,6 +1196,22 @@ def valid_settings(raw):
         out[key] = raw[key]
     return out
 
+def round_price_chart(market, signal, previous):
+    """Keep the timestamped Kalshi price series isolated from the trading signal."""
+    ticker = market.get('ticker')
+    close = pd.to_datetime(market.get('close_time'), utc=True, errors='coerce')
+    if not ticker or pd.isna(close):
+        return None
+    start = close.timestamp() - 900
+    end = close.timestamp()
+    points = dict(previous['points']) if previous and previous['ticker'] == ticker else {}
+    if signal.get('price_source') == 'KALSHI LIVE':
+        for observed_at, price in getattr(_PRICE_OBSERVATIONS, 'chart_points', ()):
+            if start <= observed_at < end:
+                points[observed_at] = price
+    return {'ticker':ticker, 'start':start, 'end':end, 'points':sorted(points.items())}
+
+
 class MarketData:
     def __init__(self):
         self.candles = None
@@ -1613,6 +1630,7 @@ class Bot:
                            'price':sig['price'],'source':sig['price_source'],'quality':sig['quality'],
                            'rsi':sig['rsi'],'ema':sig['ema'],'metrics':clean_json(sig),'updated':stamp(),
                            'book':book,'target':engine.get_target_from_market(market),
+                           'price_chart':round_price_chart(market,sig,self.snapshot.get('price_chart')),
                            'retention':state.get('retention_warning')}
 
     def loop(self):
@@ -2158,6 +2176,15 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 .martingale-levels{display:grid;gap:4px;padding:8px 0 12px;border-bottom:1px solid #314369}
 .martingale-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 0;color:#e2eaff;font-size:11px}
 .martingale-row strong{color:var(--gold);font-variant-numeric:tabular-nums}
+.price-chart{margin-top:12px}
+.price-chart h2{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.price-chart h2 span{color:var(--muted);text-transform:none;letter-spacing:0;font-weight:500}
+.chart-quotes{display:flex;gap:24px;margin:0 0 10px;flex-wrap:wrap}
+.chart-quotes small{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}
+.chart-quotes strong{font-size:clamp(16px,3vw,25px);font-variant-numeric:tabular-nums}
+#chartTarget{color:var(--gold)}
+#chartDistance{font-size:11px;margin-left:7px;white-space:nowrap;font-weight:700}
+#roundPriceCanvas{display:block;width:100%;height:clamp(160px,30vw,240px)}
 </style>
 </head>
 <body>
@@ -2295,6 +2322,16 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <button class="danger" id="close">□ CERRAR TODO</button>
 </div>
 <div class="notice"><span id="radarNotice">El radar sigue las señales confirmadas. Pausar entradas conserva la gestión de salidas.</span></div>
+<article class="panel price-chart">
+<h2>BTC · Ronda actual <span id="chartStatus">Esperando precios de Kalshi</span></h2>
+<div class="body">
+<div class="chart-quotes">
+<div><small>Target Kalshi</small><strong id="chartTarget">—</strong></div>
+<div><small>BTC actual · Kalshi</small><strong id="chartPrice">—</strong><span id="chartDistance"></span></div>
+</div>
+<canvas id="roundPriceCanvas" role="img" aria-label="Precio de BTC durante la ronda frente al target de Kalshi"></canvas>
+</div>
+</article>
 </section>
 <section id="operacion" class="page hidden">
 <article class="panel" style="margin-bottom:12px">
@@ -2547,6 +2584,91 @@ function setRows(el,html){
   el.innerHTML=html;
   el.lastRenderedRows=html;
 }
+let lastChartKey='';
+const chartClock=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+function drawRoundPrice(state,now=Date.now()){
+  const series=state?.price_chart;
+  const points=series?.points||[];
+  const latest=points.at(-1);
+  const target=state?.target;
+  const canvas=$('#roundPriceCanvas');
+  const w=canvas.clientWidth, h=canvas.clientHeight;
+  if(!w||!h)return;
+  const ratio=window.devicePixelRatio||1;
+  const fresh=latest&&now-latest[0]*1000<=30000&&now<series.end*1000;
+  const key=JSON.stringify([w,h,ratio,series,target,!!fresh]);
+  if(key===lastChartKey)return;
+  lastChartKey=key;
+  setText($('#chartStatus'),fresh?'Kalshi en vivo':latest?'Último dato de Kalshi':'Esperando precios de Kalshi');
+  setText($('#chartTarget'),money(target));
+  setText($('#chartPrice'),money(latest?.[1]));
+  const distance=latest&&Number.isFinite(target)?latest[1]-target:null;
+  const green='#34d399', red='#f87171', gold='#efc864', muted='#a6b8df';
+  const directionColor=price=>!Number.isFinite(target)||price===target?gold:price>target?green:red;
+  setText($('#chartDistance'),distance===null?'':(distance>0?'+':'')+money(distance));
+  $('#chartDistance').style.color=latest?directionColor(latest[1]):muted;
+  if(canvas.width!==Math.round(w*ratio))canvas.width=Math.round(w*ratio);
+  if(canvas.height!==Math.round(h*ratio))canvas.height=Math.round(h*ratio);
+  const ctx=canvas.getContext('2d');
+  ctx.setTransform(ratio,0,0,ratio,0,0);
+  ctx.clearRect(0,0,w,h);
+  ctx.font='11px system-ui,sans-serif';
+  if(!latest){
+    ctx.fillStyle=muted;ctx.textAlign='center';ctx.fillText('Esperando datos de la ronda',w/2,h/2);
+    return;
+  }
+
+  const left=8,right=w-82,top=25,bottom=h-24;
+  if(right<=left)return;
+  const prices=points.map(point=>point[1]);
+  const min=Math.min(...prices),max=Math.max(...prices),pad=Math.max((max-min)*.13,1);
+  const low=min-pad,high=max+pad;
+  const end=Math.min(series.end,Math.max(series.start+60,latest[0]+12));
+  const x=t=>left+(t-series.start)/(end-series.start)*(right-left);
+  const y=price=>top+(high-price)/(high-low)*(bottom-top);
+  const visibleTarget=Number.isFinite(target)&&target>=low&&target<=high;
+
+  ctx.strokeStyle='#253957';ctx.fillStyle=muted;ctx.textAlign='left';ctx.lineWidth=1;
+  for(let i=0;i<4;i++){
+    const rate=i/3, py=top+(bottom-top)*rate;
+    ctx.beginPath();ctx.moveTo(left,py);ctx.lineTo(right,py);ctx.stroke();
+    ctx.fillText(money(high-(high-low)*rate),right+6,py+4);
+  }
+  ctx.textAlign='center';
+  for(let i=0;i<3;i++){
+    const t=series.start+(end-series.start)*i/2;
+    ctx.fillText(chartClock.format(new Date(t*1000)),Math.max(21,x(t)),h-5);
+  }
+  if(Number.isFinite(target)){
+    const ty=visibleTarget?y(target):target>high?top:bottom;
+    ctx.strokeStyle=gold;ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(left,ty);ctx.lineTo(right,ty);ctx.stroke();ctx.setLineDash([]);
+    ctx.fillStyle=gold;ctx.textAlign='left';
+    const label=visibleTarget?'Target Kalshi':target>high?'Target Kalshi ↑':'Target Kalshi ↓';
+    const width=ctx.measureText(label).width+8;
+    ctx.fillStyle='#0b132c';ctx.fillRect(left,ty-12,width,12);ctx.fillStyle=gold;ctx.fillText(label,left+3,ty-3);
+  }
+  const curve=new Path2D();
+  curve.moveTo(x(points[0][0]),y(points[0][1]));
+  for(let i=1;i<points.length;i++){
+    const [a,p]=points[i-1], [b,q]=points[i];
+    const ax=x(a), bx=x(b), drift=(bx-ax)/3;
+    curve.bezierCurveTo(ax+drift,y(p),bx-drift,y(q),bx,y(q));
+  }
+  function stroke(color,from,to){
+    if(to<=from)return;
+    ctx.save();ctx.beginPath();ctx.rect(left-4,from,right-left+8,to-from);ctx.clip();
+    ctx.strokeStyle=color;ctx.lineWidth=2.4;ctx.lineCap='round';ctx.stroke(curve);ctx.restore();
+  }
+  if(visibleTarget){const split=y(target);stroke(green,top,split);stroke(red,split,bottom);}
+  else stroke(directionColor(latest[1]),top,bottom);
+  if(fresh){
+    ctx.globalAlpha=.22;ctx.fillStyle=directionColor(latest[1]);
+    ctx.beginPath();ctx.arc(x(latest[0]),y(latest[1]),8,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+  }
+  ctx.fillStyle=directionColor(latest[1]);
+  ctx.beginPath();ctx.arc(x(latest[0]),y(latest[1]),4,0,Math.PI*2);ctx.fill();
+}
+new ResizeObserver(()=>drawRoundPrice(current)).observe($('#roundPriceCanvas'));
 let settingsSignature='';
 function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
 setText($('#status'),s.status);setText($('#sideStatus'),s.running?'ACTIVO':'PAUSADO');$('#radar').classList.toggle('paused',!fresh);setText($('#radarSignal'),active||'ALPHA');setText($('#radarMode'),active?'CONFIRMADA':'ESPERANDO');setText($('#activeSignal'),active||'ESPERANDO');setText($('#firstSignal'),s.first_signal||'—');setText($('#marketLabel'),fresh?' · DATOS ACTIVOS':' · SIN DATOS');setText($('#feedStatus'),fresh?'● Mercado conectado':'● Esperando datos');setText($('#liveMessage'),(s.mode||'REAL')+' · '+s.message);const linked=!!s.execution_mode;setText($('#start'),s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL');$('#start').disabled=!linked;setText($('#executionModeLabel'),'● '+(s.mode||'REAL'));setText($('#executionFooter'),s.mode||'ENTORNO REAL');setText($('#accountTypeLabel'),s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar'));for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
@@ -2561,7 +2683,7 @@ setRows($('#entriesRows'),s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><
 setRows($('#logs'),s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join(''));
 setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;setText($('#connectionNotice'),(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:''));height();tick()}
-function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));setText($('#roundClock'),String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00')}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){setText($('#marketLabel'),' · DATOS ATRASADOS');setText($('#activeSignal'),'ESPERANDO');$('#radar').classList.add('paused')}}
+function tick(){drawRoundPrice(current);if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));setText($('#roundClock'),String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00')}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){setText($('#marketLabel'),' · DATOS ATRASADOS');setText($('#activeSignal'),'ESPERANDO');$('#radar').classList.add('paused')}}
 window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&acknowledged.has(reply.id))reply=null;if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
@@ -2697,7 +2819,7 @@ def _auto_connect_saved(controller,credentials):
 
 
 
-PAPER_RUNTIME_REVISION = "martingale_sim_stable_v3"
+PAPER_RUNTIME_REVISION = "martingale_sim_kalshi_chart_v1"
 
 def _refresh_runtime_bot(root, paper_mode):
     """Rebind cached resources after Streamlit re-executes class definitions."""
