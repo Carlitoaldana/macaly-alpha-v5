@@ -2184,7 +2184,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 .chart-quotes strong{font-size:clamp(16px,3vw,25px);font-variant-numeric:tabular-nums}
 #chartTarget{color:var(--gold)}
 #chartDistance{font-size:11px;margin-left:7px;white-space:nowrap;font-weight:700}
-#roundPriceCanvas{display:block;width:100%;height:clamp(160px,30vw,240px)}
+#roundPriceCanvas{display:block;width:100%;height:clamp(290px,48vw,450px)}
 </style>
 </head>
 <body>
@@ -2584,50 +2584,94 @@ function setRows(el,html){
   el.innerHTML=html;
   el.lastRenderedRows=html;
 }
-let lastChartKey='';
 const chartClock=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+const reducedChartMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
+let chartModel=null, chartFrame=0, chartKey='';
+const mixChart=(a,b,f)=>a+(b-a)*f;
+function chartBounds(series,latest){
+  const start=Math.max(series.start,latest[0]-240);
+  const end=Math.max(start+45,latest[0]+14);
+  const windowPoints=series.points.filter(point=>point[0]>=start);
+  const prices=windowPoints.map(point=>point[1]);
+  const min=Math.min(...prices),max=Math.max(...prices),pad=Math.max((max-min)*.13,1);
+  return {start,end,low:min-pad,high:max+pad};
+}
+function chartFrameAt(model,now){
+  const p=model.duration?Math.min(1,Math.max(0,(now-model.began)/model.duration)):1;
+  const progress=1-(1-p)**2;
+  const position=mixChart(model.fromTime,model.latest[0],progress);
+  const bounds={};
+  for(const key of ['start','end','low','high'])bounds[key]=mixChart(model.from[key],model.to[key],progress);
+  return {position,bounds,done:p>=1};
+}
+function chartTip(points,stamp){
+  for(let i=1;i<points.length;i++){
+    const [a,p]=points[i-1],[b,q]=points[i];
+    if(stamp<=b){
+      const t=Math.max(0,(stamp-a)/(b-a));
+      return [Math.max(a,stamp),mixChart(p,q,t*t*(3-2*t))];
+    }
+  }
+  return points.at(-1);
+}
+function animatePriceChart(now){
+  chartFrame=0;
+  const model=chartModel;
+  if(!model)return;
+  const frame=chartFrameAt(model,now);
+  paintRoundPrice(model.state,model.fresh,frame);
+  if(!frame.done)chartFrame=requestAnimationFrame(animatePriceChart);
+}
 function drawRoundPrice(state,now=Date.now()){
   const series=state?.price_chart;
-  const points=series?.points||[];
-  const latest=points.at(-1);
-  const target=state?.target;
+  const points=series?.points||[], latest=points.at(-1);
   const canvas=$('#roundPriceCanvas');
-  const w=canvas.clientWidth, h=canvas.clientHeight;
-  if(!w||!h)return;
-  const ratio=window.devicePixelRatio||1;
+  if(!canvas.clientWidth||!canvas.clientHeight)return;
   const fresh=latest&&now-latest[0]*1000<=30000&&now<series.end*1000;
-  const key=JSON.stringify([w,h,ratio,series,target,!!fresh]);
-  if(key===lastChartKey)return;
-  lastChartKey=key;
+  const key=JSON.stringify([canvas.clientWidth,canvas.clientHeight,window.devicePixelRatio,series,state?.target,!!fresh]);
+  if(key===chartKey)return;
+  chartKey=key;
   setText($('#chartStatus'),fresh?'Kalshi en vivo':latest?'Último dato de Kalshi':'Esperando precios de Kalshi');
-  setText($('#chartTarget'),money(target));
+  setText($('#chartTarget'),money(state?.target));
   setText($('#chartPrice'),money(latest?.[1]));
+  const target=state?.target;
   const distance=latest&&Number.isFinite(target)?latest[1]-target:null;
-  const green='#34d399', red='#f87171', gold='#efc864', muted='#a6b8df';
-  const directionColor=price=>!Number.isFinite(target)||price===target?gold:price>target?green:red;
   setText($('#chartDistance'),distance===null?'':(distance>0?'+':'')+money(distance));
-  $('#chartDistance').style.color=latest?directionColor(latest[1]):muted;
+  $('#chartDistance').style.color=distance>0?'#34d399':distance<0?'#f87171':'#efc864';
+  if(chartFrame){cancelAnimationFrame(chartFrame);chartFrame=0;}
+  if(!latest){chartModel=null;paintRoundPrice(state,false,null);return;}
+  const began=performance.now();
+  const previous=chartModel?.state.price_chart.ticker===series.ticker?chartFrameAt(chartModel,began):null;
+  const to=chartBounds(series,latest);
+  const animate=previous&&fresh&&!reducedChartMotion.matches&&latest[0]>previous.position;
+  chartModel={state,fresh,latest,to,from:animate?previous.bounds:to,
+    fromTime:animate?Math.max(points[0][0],previous.position):latest[0],began,duration:animate?1050:0};
+  animatePriceChart(began);
+}
+function paintRoundPrice(state,fresh,frame){
+  const series=state?.price_chart,points=series?.points||[],latest=points.at(-1);
+  const target=state?.target;
+  const canvas=$('#roundPriceCanvas'),w=canvas.clientWidth,h=canvas.clientHeight;
+  if(!w||!h)return;
+  const ratio=Math.min(2,window.devicePixelRatio||1);
   if(canvas.width!==Math.round(w*ratio))canvas.width=Math.round(w*ratio);
   if(canvas.height!==Math.round(h*ratio))canvas.height=Math.round(h*ratio);
   const ctx=canvas.getContext('2d');
-  ctx.setTransform(ratio,0,0,ratio,0,0);
-  ctx.clearRect(0,0,w,h);
+  ctx.setTransform(ratio,0,0,ratio,0,0);ctx.clearRect(0,0,w,h);
   ctx.font='11px system-ui,sans-serif';
+  const green='#34d399',red='#f87171',gold='#efc864',muted='#a6b8df';
+  const directionColor=price=>!Number.isFinite(target)||price===target?gold:price>target?green:red;
   if(!latest){
     ctx.fillStyle=muted;ctx.textAlign='center';ctx.fillText('Esperando datos de la ronda',w/2,h/2);
     return;
   }
-
   const left=8,right=w-82,top=25,bottom=h-24;
   if(right<=left)return;
-  const prices=points.map(point=>point[1]);
-  const min=Math.min(...prices),max=Math.max(...prices),pad=Math.max((max-min)*.13,1);
-  const low=min-pad,high=max+pad;
-  const end=Math.min(series.end,Math.max(series.start+60,latest[0]+12));
-  const x=t=>left+(t-series.start)/(end-series.start)*(right-left);
+  const {start,end,low,high}=frame.bounds;
+  const tip=chartTip(points,frame.position);
+  const x=t=>left+(t-start)/(end-start)*(right-left);
   const y=price=>top+(high-price)/(high-low)*(bottom-top);
   const visibleTarget=Number.isFinite(target)&&target>=low&&target<=high;
-
   ctx.strokeStyle='#253957';ctx.fillStyle=muted;ctx.textAlign='left';ctx.lineWidth=1;
   for(let i=0;i<4;i++){
     const rate=i/3, py=top+(bottom-top)*rate;
@@ -2636,7 +2680,7 @@ function drawRoundPrice(state,now=Date.now()){
   }
   ctx.textAlign='center';
   for(let i=0;i<3;i++){
-    const t=series.start+(end-series.start)*i/2;
+    const t=start+(end-start)*i/2;
     ctx.fillText(chartClock.format(new Date(t*1000)),Math.max(21,x(t)),h-5);
   }
   if(Number.isFinite(target)){
@@ -2647,26 +2691,36 @@ function drawRoundPrice(state,now=Date.now()){
     const width=ctx.measureText(label).width+8;
     ctx.fillStyle='#0b132c';ctx.fillRect(left,ty-12,width,12);ctx.fillStyle=gold;ctx.fillText(label,left+3,ty-3);
   }
-  const curve=new Path2D();
-  curve.moveTo(x(points[0][0]),y(points[0][1]));
-  for(let i=1;i<points.length;i++){
-    const [a,p]=points[i-1], [b,q]=points[i];
+  const startIndex=points.findIndex(point=>point[0]>=start);
+  const visible=points.slice(Math.max(0,startIndex-1));
+  const curve=new Path2D(), area=new Path2D();
+  curve.moveTo(x(visible[0][0]),y(visible[0][1]));
+  area.moveTo(x(visible[0][0]),y(visible[0][1]));
+  for(let i=1;i<visible.length;i++){
+    const [a,p]=visible[i-1], [b,q]=visible[i];
     const ax=x(a), bx=x(b), drift=(bx-ax)/3;
-    curve.bezierCurveTo(ax+drift,y(p),bx-drift,y(q),bx,y(q));
+    for(const path of [curve,area])path.bezierCurveTo(ax+drift,y(p),bx-drift,y(q),bx,y(q));
   }
+  const tipX=x(tip[0]),tipY=y(tip[1]);
+  area.lineTo(x(latest[0]),bottom);area.lineTo(x(visible[0][0]),bottom);area.closePath();
+  ctx.save();ctx.beginPath();ctx.rect(left,top,Math.max(0,tipX-left),bottom-top);ctx.clip();
+  const fill=ctx.createLinearGradient(0,top,0,bottom);
+  fill.addColorStop(0,directionColor(tip[1])+'30');fill.addColorStop(1,'#0b132c00');
+  ctx.fillStyle=fill;ctx.fill(area);
   function stroke(color,from,to){
     if(to<=from)return;
     ctx.save();ctx.beginPath();ctx.rect(left-4,from,right-left+8,to-from);ctx.clip();
     ctx.strokeStyle=color;ctx.lineWidth=2.4;ctx.lineCap='round';ctx.stroke(curve);ctx.restore();
   }
   if(visibleTarget){const split=y(target);stroke(green,top,split);stroke(red,split,bottom);}
-  else stroke(directionColor(latest[1]),top,bottom);
+  else stroke(directionColor(tip[1]),top,bottom);
+  ctx.restore();
   if(fresh){
-    ctx.globalAlpha=.22;ctx.fillStyle=directionColor(latest[1]);
-    ctx.beginPath();ctx.arc(x(latest[0]),y(latest[1]),8,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+    ctx.globalAlpha=.22;ctx.fillStyle=directionColor(tip[1]);
+    ctx.beginPath();ctx.arc(tipX,tipY,8,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
   }
-  ctx.fillStyle=directionColor(latest[1]);
-  ctx.beginPath();ctx.arc(x(latest[0]),y(latest[1]),4,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle=directionColor(tip[1]);
+  ctx.beginPath();ctx.arc(tipX,tipY,4,0,Math.PI*2);ctx.fill();
 }
 new ResizeObserver(()=>drawRoundPrice(current)).observe($('#roundPriceCanvas'));
 let settingsSignature='';
