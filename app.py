@@ -4758,10 +4758,6 @@ def live_dashboard():
         st.error("Error de velas BTC/USD: " + btc_error)
     if live_price_error and live_btc_price is None:
         st.warning("Coinbase live: " + live_price_error)
-    if kalshi_live_error and coinbase_live_price is not None:
-        st.warning(
-            "Kalshi BTC live falló temporalmente; usando Coinbase."
-        )
     if kalshi_error:
         if market and market.get("_round_refresh_error"):
             st.warning("Kalshi no pudo refrescar: se conserva el target verificado de esta ronda y se reintentará. Cotización de contrato no disponible.")
