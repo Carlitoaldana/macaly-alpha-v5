@@ -2590,6 +2590,13 @@ function setRows(el,html){
 const chartClock=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
 // In the reference plot, an existing feature moves about 1/30 of the width per second.
 const chartWindowSeconds=30;
+const chartFinalWindowSeconds=30;
+const chartStrongDistanceFraction=.0005;
+function chartNearClose(series,latest,now){
+  const secondsRemaining=series?.end-now/1000;
+  return !!latest&&secondsRemaining>0&&secondsRemaining<=chartFinalWindowSeconds
+    &&now-latest[0]*1000<=10000;
+}
 const reducedChartMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
 let chartModel=null, chartFrame=0, chartKey='';
 const mixChart=(a,b,f)=>a+(b-a)*f;
@@ -2639,7 +2646,7 @@ function animatePriceChart(now){
   const model=chartModel;
   if(!model)return;
   const frame=chartFrameAt(model,now);
-  paintRoundPrice(model.state,model.fresh,frame);
+  paintRoundPrice(model.state,model.fresh,frame,model.nearClose);
   if(!frame.done)chartFrame=requestAnimationFrame(animatePriceChart);
 }
 function drawRoundPrice(state,now=Date.now()){
@@ -2648,7 +2655,8 @@ function drawRoundPrice(state,now=Date.now()){
   const canvas=$('#roundPriceCanvas');
   if(!canvas.clientWidth||!canvas.clientHeight)return;
   const fresh=latest&&now-latest[0]*1000<=30000&&now<series.end*1000;
-  const key=JSON.stringify([canvas.clientWidth,canvas.clientHeight,window.devicePixelRatio,series,state?.target,!!fresh]);
+  const nearClose=chartNearClose(series,latest,now);
+  const key=JSON.stringify([canvas.clientWidth,canvas.clientHeight,window.devicePixelRatio,series,state?.target,!!fresh,nearClose]);
   if(key===chartKey)return;
   chartKey=key;
   setText($('#chartStatus'),fresh?'Kalshi en vivo':latest?'Último dato de Kalshi':'Esperando precios de Kalshi');
@@ -2667,11 +2675,11 @@ function drawRoundPrice(state,now=Date.now()){
   const fromTime=previous?Math.max(points[0][0],previous.position):latest[0];
   const gap=latest[0]-fromTime;
   const animate=previous&&previousModel.fresh&&fresh&&!reducedChartMotion.matches&&gap>0&&gap<=5;
-  chartModel={state,fresh,latest,to,from:animate?previous.bounds:to,
+  chartModel={state,fresh,nearClose,latest,to,from:animate?previous.bounds:to,
     fromTime:animate?fromTime:latest[0],began,duration:animate?gap*1000:0};
   animatePriceChart(began);
 }
-function paintRoundPrice(state,fresh,frame){
+function paintRoundPrice(state,fresh,frame,nearClose=false){
   const series=state?.price_chart,points=series?.points||[],latest=points.at(-1);
   const target=state?.target;
   const canvas=$('#roundPriceCanvas'),w=canvas.clientWidth,h=canvas.clientHeight;
@@ -2706,7 +2714,12 @@ function paintRoundPrice(state,fresh,frame){
   if(Number.isFinite(target)&&tip[1]!==target){
     const above=tip[1]>target;
     const range=above?high-target:target-low;
-    const fillHeight=railHeight*Math.min(1,Math.abs(tip[1]-target)/range);
+    const distance=Math.abs(tip[1]-target);
+    const strongDistance=target*chartStrongDistanceFraction;
+    const latestDistance=(latest[1]-target)*(above?1:-1);
+    const fillRange=nearClose&&strongDistance>0&&latestDistance>=strongDistance
+      ?Math.min(range,strongDistance):range;
+    const fillHeight=railHeight*Math.min(1,distance/fillRange);
     const fillTop=above?bottom-fillHeight:top;
     const barColor=ctx.createLinearGradient(0,above?bottom:top,0,above?fillTop:fillTop+fillHeight);
     barColor.addColorStop(0,above?'#08735a':'#8a243b');
