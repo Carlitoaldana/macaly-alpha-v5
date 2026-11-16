@@ -2584,32 +2584,49 @@ function setRows(el,html){
   el.innerHTML=html;
   el.lastRenderedRows=html;
 }
-const chartClock=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+const chartClock=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
+// In the reference plot, an existing feature moves about 1/30 of the width per second.
+const chartWindowSeconds=30;
 const reducedChartMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
 let chartModel=null, chartFrame=0, chartKey='';
 const mixChart=(a,b,f)=>a+(b-a)*f;
 function chartBounds(series,latest){
-  const start=Math.max(series.start,latest[0]-240);
-  const end=Math.max(start+45,latest[0]+14);
-  const windowPoints=series.points.filter(point=>point[0]>=start);
-  const prices=windowPoints.map(point=>point[1]);
-  const min=Math.min(...prices),max=Math.max(...prices),pad=Math.max((max-min)*.13,1);
-  return {start,end,low:min-pad,high:max+pad};
+  const start=latest[0]-chartWindowSeconds;
+  const prices=series.points.filter(point=>point[0]>=start).map(point=>point[1]);
+  prices.push(chartTip(series.points,start)[1]);
+  const min=Math.min(...prices),max=Math.max(...prices),pad=Math.max((max-min)*.12,.5);
+  return {low:min-pad,high:max+pad};
 }
 function chartFrameAt(model,now){
   const p=model.duration?Math.min(1,Math.max(0,(now-model.began)/model.duration)):1;
   const progress=1-(1-p)**2;
-  const position=mixChart(model.fromTime,model.latest[0],progress);
-  const bounds={};
-  for(const key of ['start','end','low','high'])bounds[key]=mixChart(model.from[key],model.to[key],progress);
+  const position=mixChart(model.fromTime,model.latest[0],p);
+  const bounds={
+    low:mixChart(model.from.low,model.to.low,progress),
+    high:mixChart(model.from.high,model.to.high,progress)
+  };
   return {position,bounds,done:p>=1};
 }
+function chartSlope(points,i){
+  const [t,p]=points[i],before=points[i-1],after=points[i+1];
+  const left=before?(p-before[1])/(t-before[0]):null;
+  const right=after?(after[1]-p)/(after[0]-t):null;
+  if(left===null||right===null)return left??right??0;
+  if(left*right<=0)return 0;
+  const dtLeft=t-before[0],dtRight=after[0]-t;
+  const a=2*dtRight+dtLeft,b=dtRight+2*dtLeft;
+  return (a+b)/(a/left+b/right);
+}
 function chartTip(points,stamp){
+  if(stamp<=points[0][0])return points[0];
   for(let i=1;i<points.length;i++){
     const [a,p]=points[i-1],[b,q]=points[i];
     if(stamp<=b){
-      const t=Math.max(0,(stamp-a)/(b-a));
-      return [Math.max(a,stamp),mixChart(p,q,t*t*(3-2*t))];
+      const dt=b-a,t=(stamp-a)/dt,u=1-t;
+      const p1=p+chartSlope(points,i-1)*dt/3;
+      const q1=q-chartSlope(points,i)*dt/3;
+      const price=u*u*u*p+3*u*u*t*p1+3*u*t*t*q1+t*t*t*q;
+      return [stamp,price];
     }
   }
   return points.at(-1);
@@ -2641,11 +2658,14 @@ function drawRoundPrice(state,now=Date.now()){
   if(chartFrame){cancelAnimationFrame(chartFrame);chartFrame=0;}
   if(!latest){chartModel=null;paintRoundPrice(state,false,null);return;}
   const began=performance.now();
-  const previous=chartModel?.state.price_chart.ticker===series.ticker?chartFrameAt(chartModel,began):null;
+  const previousModel=chartModel?.state.price_chart.ticker===series.ticker?chartModel:null;
+  const previous=previousModel?chartFrameAt(previousModel,began):null;
   const to=chartBounds(series,latest);
-  const animate=previous&&fresh&&!reducedChartMotion.matches&&latest[0]>previous.position;
+  const fromTime=previous?Math.max(points[0][0],previous.position):latest[0];
+  const gap=latest[0]-fromTime;
+  const animate=previous&&previousModel.fresh&&fresh&&!reducedChartMotion.matches&&gap>0&&gap<=5;
   chartModel={state,fresh,latest,to,from:animate?previous.bounds:to,
-    fromTime:animate?Math.max(points[0][0],previous.position):latest[0],began,duration:animate?1050:0};
+    fromTime:animate?fromTime:latest[0],began,duration:animate?gap*1000:0};
   animatePriceChart(began);
 }
 function paintRoundPrice(state,fresh,frame){
@@ -2667,42 +2687,53 @@ function paintRoundPrice(state,fresh,frame){
   }
   const left=8,right=w-82,top=25,bottom=h-24;
   if(right<=left)return;
-  const {start,end,low,high}=frame.bounds;
-  const tip=chartTip(points,frame.position);
-  const x=t=>left+(t-start)/(end-start)*(right-left);
+  const end=frame.position,start=end-chartWindowSeconds;
+  const tip=chartTip(points,end);
+  const low=Math.min(frame.bounds.low,tip[1]-.25);
+  const high=Math.max(frame.bounds.high,tip[1]+.25);
+  const x=t=>left+(t-start)/chartWindowSeconds*(right-left);
   const y=price=>top+(high-price)/(high-low)*(bottom-top);
+  const tipX=x(tip[0]),tipY=y(tip[1]);
   const visibleTarget=Number.isFinite(target)&&target>=low&&target<=high;
   ctx.strokeStyle='#253957';ctx.fillStyle=muted;ctx.textAlign='left';ctx.lineWidth=1;
   for(let i=0;i<4;i++){
     const rate=i/3, py=top+(bottom-top)*rate;
     ctx.beginPath();ctx.moveTo(left,py);ctx.lineTo(right,py);ctx.stroke();
-    ctx.fillText(money(high-(high-low)*rate),right+6,py+4);
+    if(!fresh||Math.abs(py-tipY)>14)ctx.fillText(money(high-(high-low)*rate),right+10,py+4);
   }
   ctx.textAlign='center';
-  for(let i=0;i<3;i++){
-    const t=start+(end-start)*i/2;
-    ctx.fillText(chartClock.format(new Date(t*1000)),Math.max(21,x(t)),h-5);
+  const tickSeconds=w<480?10:5;
+  for(let t=Math.ceil(start/tickSeconds)*tickSeconds;t<=end;t+=tickSeconds){
+    const tx=x(t);
+    if(tx>=left+23&&tx<=right-23)ctx.fillText(chartClock.format(new Date(t*1000)),tx,h-5);
   }
   if(Number.isFinite(target)){
-    const ty=visibleTarget?y(target):target>high?top:bottom;
-    ctx.strokeStyle=gold;ctx.setLineDash([5,5]);ctx.beginPath();ctx.moveTo(left,ty);ctx.lineTo(right,ty);ctx.stroke();ctx.setLineDash([]);
-    ctx.fillStyle=gold;ctx.textAlign='left';
+    const ty=visibleTarget?y(target):target>high?top-9:bottom+5;
+    ctx.strokeStyle=gold;ctx.setLineDash(visibleTarget?[5,5]:[]);
+    ctx.beginPath();ctx.moveTo(left,ty);ctx.lineTo(right,ty);ctx.stroke();ctx.setLineDash([]);
     const label=visibleTarget?'Target Kalshi':target>high?'Target Kalshi ↑':'Target Kalshi ↓';
-    const width=ctx.measureText(label).width+8;
-    ctx.fillStyle='#0b132c';ctx.fillRect(left,ty-12,width,12);ctx.fillStyle=gold;ctx.fillText(label,left+3,ty-3);
+    ctx.textAlign=visibleTarget?'left':'center';
+    const width=ctx.measureText(label).width+10;
+    const labelX=visibleTarget?left+5:(left+right)/2;
+    ctx.fillStyle='#0b132c';
+    ctx.fillRect(visibleTarget?left:labelX-width/2,ty-8,width,16);
+    ctx.fillStyle=gold;ctx.fillText(label,labelX,ty+4);
   }
-  const startIndex=points.findIndex(point=>point[0]>=start);
-  const visible=points.slice(Math.max(0,startIndex-1));
-  const curve=new Path2D(), area=new Path2D();
-  curve.moveTo(x(visible[0][0]),y(visible[0][1]));
-  area.moveTo(x(visible[0][0]),y(visible[0][1]));
-  for(let i=1;i<visible.length;i++){
-    const [a,p]=visible[i-1], [b,q]=visible[i];
-    const ax=x(a), bx=x(b), drift=(bx-ax)/3;
-    for(const path of [curve,area])path.bezierCurveTo(ax+drift,y(p),bx-drift,y(q),bx,y(q));
+  const firstIndex=Math.max(0,points.findIndex(point=>point[0]>=start)-1);
+  const [firstTime,firstPrice]=points[firstIndex],firstX=x(firstTime),firstY=y(firstPrice);
+  const curve=new Path2D(),area=new Path2D();
+  curve.moveTo(firstX,firstY);
+  area.moveTo(firstX,firstY);
+  let lastX=firstX;
+  for(let i=firstIndex+1;i<points.length&&points[i-1][0]<end;i++){
+    const [a,p]=points[i-1],[b,q]=points[i];
+    const dt=b-a,ax=x(a),bx=x(b),drift=(bx-ax)/3;
+    const p1=p+chartSlope(points,i-1)*dt/3;
+    const q1=q-chartSlope(points,i)*dt/3;
+    for(const path of [curve,area])path.bezierCurveTo(ax+drift,y(p1),bx-drift,y(q1),bx,y(q));
+    lastX=bx;
   }
-  const tipX=x(tip[0]),tipY=y(tip[1]);
-  area.lineTo(x(latest[0]),bottom);area.lineTo(x(visible[0][0]),bottom);area.closePath();
+  area.lineTo(lastX,bottom);area.lineTo(firstX,bottom);area.closePath();
   ctx.save();ctx.beginPath();ctx.rect(left,top,Math.max(0,tipX-left),bottom-top);ctx.clip();
   const fill=ctx.createLinearGradient(0,top,0,bottom);
   fill.addColorStop(0,directionColor(tip[1])+'30');fill.addColorStop(1,'#0b132c00');
@@ -2721,6 +2752,10 @@ function paintRoundPrice(state,fresh,frame){
   }
   ctx.fillStyle=directionColor(tip[1]);
   ctx.beginPath();ctx.arc(tipX,tipY,4,0,Math.PI*2);ctx.fill();
+  if(fresh){
+    ctx.textAlign='left';ctx.font='600 11px system-ui,sans-serif';
+    ctx.fillText(money(tip[1]),right+10,tipY+4);
+  }
 }
 new ResizeObserver(()=>drawRoundPrice(current)).observe($('#roundPriceCanvas'));
 let settingsSignature='';
