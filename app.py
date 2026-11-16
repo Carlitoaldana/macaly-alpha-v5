@@ -3079,23 +3079,10 @@ def _background_get_market():
     return get_kalshi_btc_market()
 
 def _background_get_live_price(market):
+    # El motor en segundo plano usa exclusivamente el ticker de Coinbase.
+    # Kalshi solo se consulta para identificar ronda, tiempo y target.
     _BACKGROUND_PRICE_SOURCE.value = None
-    try:
-        if market:
-            price = get_kalshi_live_btc(market)
-            _BACKGROUND_PRICE_SOURCE.value = "KALSHI LIVE"
-            return float(price)
-    except Exception:
-        pass
-    response = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-USD/ticker",
-        headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
-        params={"_": int(datetime.now(timezone.utc).timestamp())},
-        timeout=6,
-    )
-    response.raise_for_status()
-    data = response.json()
-    price = _valid_live_observation(data.get("price"), data.get("time"), "COINBASE")
+    price = get_btc_live_price()
     _BACKGROUND_PRICE_SOURCE.value = "COINBASE"
     return price
 
@@ -4237,7 +4224,6 @@ def live_dashboard():
     btc_error = ""
     live_price_error = ""
     kalshi_error = ""
-    kalshi_live_error = ""
 
     try:
         btc_df = add_indicators(get_btc_data())
@@ -4267,26 +4253,13 @@ def live_dashboard():
             float(btc_df.iloc[-1]["close"]) if btc_ok else None
         )
 
-    kalshi_live_price = None
-    kalshi_live_ok = False
-
-    if market:
-        try:
-            kalshi_live_price = get_kalshi_live_btc(market)
-            kalshi_live_ok = True
-        except Exception as error:
-            kalshi_live_error = str(error)
-
-    if kalshi_live_price is not None:
-        live_btc_price = kalshi_live_price
-        source = "KALSHI LIVE"
-    else:
-        live_btc_price = coinbase_live_price
-        source = (
-            "COINBASE"
-            if coinbase_live_ok else
-            "COINBASE CANDLE" if live_btc_price is not None else "SIN DATOS"
-        )
+    # Coinbase es la única fuente del precio utilizado para las señales.
+    # Si falla el ticker, se conserva el fallback existente a vela Coinbase.
+    live_btc_price = coinbase_live_price
+    source = (
+        "COINBASE" if coinbase_live_ok else
+        "COINBASE CANDLE" if live_btc_price is not None else "SIN DATOS"
+    )
 
     if market:
         ticker = market.get("ticker", "--")
