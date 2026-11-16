@@ -2385,6 +2385,9 @@ def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvo
     return ctx
 
 
+OPENING_TARGET_LEVEL_MIN_DISTANCE_USD = 60.0
+
+
 def _opening_level_gate(df, price, atr, rvol, target=None):
     """Opening protection based on the SAME previous 20 candles as the chart.
 
@@ -2404,8 +2407,16 @@ def _opening_level_gate(df, price, atr, rvol, target=None):
         return result
     support, resistance = ctx["support"], ctx["resistance"]
     width = float(atr) * .65
-    near_support = abs(float(target)-support) <= width
-    near_resistance = abs(float(target)-resistance) <= width
+    support_distance = abs(float(target) - support)
+    resistance_distance = abs(float(target) - resistance)
+    near_support = support_distance <= width
+    near_resistance = resistance_distance <= width
+    target_width = max(width, OPENING_TARGET_LEVEL_MIN_DISTANCE_USD)
+    first_signal_blocked = {}
+    if resistance_distance <= target_width and not (ctx["break_up"] and price > resistance):
+        first_signal_blocked["UP"] = "Target cerca de la resistencia · esperando ruptura alcista"
+    if support_distance <= target_width and not (ctx["break_down"] and price < support):
+        first_signal_blocked["DOWN"] = "Target cerca del soporte · esperando ruptura bajista"
     blocked = []
     if near_resistance and not ctx["break_up"]:
         blocked.append("UP")
@@ -2418,6 +2429,7 @@ def _opening_level_gate(df, price, atr, rvol, target=None):
     if abs(float(price)-support) <= width and not ctx["break_down"]:
         blocked.append("DOWN")
     result.update(blocked=list(dict.fromkeys(blocked)),
+                  first_signal_blocked=first_signal_blocked,
                   reason="OPENING_LEVEL_CAUTION" if blocked else "NONE",
                   support=support, resistance=resistance,
                   break_up=ctx["break_up"], break_down=ctx["break_down"])
@@ -2799,13 +2811,17 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     # evidence contradicts it. Keep the active signal while reassessing.
     if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
         candidate = None
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
+    level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
+    candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Opening-only veto. Once the round has a confirmed first direction,
     # subsequent retention/reversal is governed by its separate checks.
-    if (state.get("first_direction") not in ("UP", "DOWN")
-            and candidate in level_gate.get("blocked", ["UP", "DOWN"])):
-        candidate = None
+    if state.get("first_direction") not in ("UP", "DOWN"):
+        if level_wait:
+            state["opening_conflict"] = level_wait
+            candidate = None
+        elif candidate in level_gate.get("blocked", ["UP", "DOWN"]):
+            candidate = None
 
     # Recalcular el cierre aquí: las consultas de red pueden agotar el contador.
     closed = seconds_left is not None and seconds_left <= 0
