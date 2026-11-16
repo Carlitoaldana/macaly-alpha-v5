@@ -3814,6 +3814,48 @@ def _neon_chart_history(timeframe):
     return frame.sort_values("time").drop_duplicates("time")
 
 
+def _chart_ut_markers(candles, atr_period=10, sensitivity=1.0):
+    """UT Bot Alerts by QuantNomad, using regular candles and Wilder's ATR."""
+    ranges = []
+    markers = []
+    previous_close = None
+    atr = None
+    stop = None
+    for candle in candles.itertuples(index=False):
+        close = float(candle.close)
+        high = float(candle.high)
+        low = float(candle.low)
+        true_range = high - low
+        if previous_close is not None:
+            true_range = max(true_range, abs(high - previous_close), abs(low - previous_close))
+        prior_close, previous_close = previous_close, close
+
+        if atr is None:
+            ranges.append(true_range)
+            if len(ranges) < atr_period:
+                continue
+            atr = sum(ranges) / atr_period
+        else:
+            atr += (true_range - atr) / atr_period
+        gap = sensitivity * atr
+        prior_stop = stop
+        reference = 0.0 if prior_stop is None else prior_stop
+        if close > reference and prior_close is not None and prior_close > reference:
+            stop = max(reference, close - gap)
+        elif close < reference and prior_close is not None and prior_close < reference:
+            stop = min(reference, close + gap)
+        else:
+            stop = close - gap if close > reference else close + gap
+
+        if prior_stop is None:
+            continue
+        if prior_close <= prior_stop and close > stop:
+            markers.append({"time": int(candle.time.timestamp()), "direction": "UP"})
+        elif prior_close >= prior_stop and close < stop:
+            markers.append({"time": int(candle.time.timestamp()), "direction": "DOWN"})
+    return markers
+
+
 def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=None, round_df=None):
     intervals = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1D": 1440}
     minutes = intervals[timeframe]
@@ -3831,6 +3873,7 @@ def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=
         frame.loc[idx, "close"] = price
         frame.loc[idx, "high"] = max(float(frame.loc[idx, "high"]), price)
         frame.loc[idx, "low"] = min(float(frame.loc[idx, "low"]), price)
+    reversal_markers = _chart_ut_markers(frame)
     close = frame["close"].astype(float)
     frame["ema9"] = close.ewm(span=9, adjust=False).mean()
     frame["ema21"] = close.ewm(span=21, adjust=False).mean()
@@ -3870,7 +3913,10 @@ def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=
     recent_levels = rows[-21:-1]
     support = min((r["low"] for r in recent_levels), default=None)
     resistance = max((r["high"] for r in recent_levels), default=None)
-    return {"rows": rows, "candle_source": df.attrs.get("candle_source", "COINBASE"), "timeframe": timeframe, "price": price or latest,
+    if rows:
+        reversal_markers = [mark for mark in reversal_markers if mark["time"] >= rows[0]["t"]]
+    return {"rows": rows, "reversal_markers": reversal_markers,
+            "candle_source": df.attrs.get("candle_source", "COINBASE"), "timeframe": timeframe, "price": price or latest,
             "target": float(target) if target is not None else None,
             "signal": active if active in ("UP", "DOWN") else "ESPERANDO",
             "up": float(sig.get("up_probability", 50)),
@@ -4067,6 +4113,11 @@ function redrawData(preserve=true){
  const newC=chartRows(D),newN=newC.length;
  if(!newN){applyingData=false;return;}
  candleSeries.setData(newC);
+ candleSeries.setMarkers((D.reversal_markers||[]).map(mark => {
+  const up=mark.direction==='UP';
+  return {time:mark.time,position:up?'belowBar':'aboveBar',
+          shape:up?'arrowUp':'arrowDown',color:up?'#38eac3':'#ff7777',size:1.6};
+ }));
  for(const k of ['ema9','ema21','vwap']){overlays[k].setData(seriesRows(k));overlays[k].applyOptions({visible:!!toggles[k]});}
  volumeSeries.setData((D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r.volume)).map(r=>({time:r.t,value:r.volume,color:r.close>=r.open?'#00dfb573':'#e64b4b73'})));
  volumeSeries.applyOptions({visible:!!toggles.volume});
