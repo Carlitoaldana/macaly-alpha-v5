@@ -2179,9 +2179,11 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 .price-chart{margin-top:12px}
 .price-chart h2{display:flex;justify-content:space-between;gap:10px;align-items:center}
 .price-chart h2 span{color:var(--muted);text-transform:none;letter-spacing:0;font-weight:500}
-.chart-quotes{display:flex;gap:24px;margin:0 0 10px;flex-wrap:wrap}
+.chart-quotes{display:flex;gap:10px 16px;margin:0 0 10px;flex-wrap:wrap}
 .chart-quotes small{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}
 .chart-quotes strong{font-size:clamp(16px,3vw,25px);font-variant-numeric:tabular-nums}
+.chart-round-clock{margin-left:auto;text-align:right;flex:none}
+.chart-round-clock strong{color:var(--gold)}
 #chartTarget{color:var(--gold)}
 #chartDistance{font-size:11px;margin-left:7px;white-space:nowrap;font-weight:700}
 #roundPriceCanvas{display:block;width:100%;height:clamp(290px,48vw,450px)}
@@ -2328,6 +2330,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <div class="chart-quotes">
 <div><small>Target Kalshi</small><strong id="chartTarget">—</strong></div>
 <div><small>BTC actual · Kalshi</small><strong id="chartPrice">—</strong><span id="chartDistance"></span></div>
+<div class="chart-round-clock"><small>Tiempo restante</small><strong id="chartRoundClock" role="timer">—</strong></div>
 </div>
 <canvas id="roundPriceCanvas" role="img" aria-label="Precio de BTC durante la ronda frente al target de Kalshi"></canvas>
 </div>
@@ -2685,7 +2688,7 @@ function paintRoundPrice(state,fresh,frame){
     ctx.fillStyle=muted;ctx.textAlign='center';ctx.fillText('Esperando datos de la ronda',w/2,h/2);
     return;
   }
-  const left=8,right=w-82,top=25,bottom=h-24;
+  const left=20,right=w-82,top=25,bottom=h-24;
   if(right<=left)return;
   const end=frame.position,start=end-chartWindowSeconds;
   const tip=chartTip(points,end);
@@ -2695,6 +2698,28 @@ function paintRoundPrice(state,fresh,frame){
   const y=price=>top+(high-price)/(high-low)*(bottom-top);
   const tipX=x(tip[0]),tipY=y(tip[1]);
   const visibleTarget=Number.isFinite(target)&&target>=low&&target<=high;
+  const railX=3,railWidth=6,railHeight=bottom-top;
+  ctx.fillStyle='#253957';
+  ctx.beginPath();
+  ctx.roundRect(railX,top,railWidth,railHeight,railWidth/2);
+  ctx.fill();
+  if(Number.isFinite(target)&&tip[1]!==target){
+    const above=tip[1]>target;
+    const range=above?high-target:target-low;
+    const fillHeight=railHeight*Math.min(1,Math.abs(tip[1]-target)/range);
+    const fillTop=above?bottom-fillHeight:top;
+    const barColor=ctx.createLinearGradient(0,above?bottom:top,0,above?fillTop:fillTop+fillHeight);
+    barColor.addColorStop(0,above?'#08735a':'#8a243b');
+    barColor.addColorStop(1,above?'#37ffb6':'#ff4869');
+    ctx.save();
+    ctx.shadowColor=above?'#37ffb6':'#ff4869';
+    ctx.shadowBlur=7;
+    ctx.fillStyle=barColor;
+    ctx.beginPath();
+    ctx.roundRect(railX,fillTop,railWidth,fillHeight,railWidth/2);
+    ctx.fill();
+    ctx.restore();
+  }
   ctx.strokeStyle='#253957';ctx.fillStyle=muted;ctx.textAlign='left';ctx.lineWidth=1;
   for(let i=0;i<4;i++){
     const rate=i/3, py=top+(bottom-top)*rate;
@@ -2772,7 +2797,19 @@ setRows($('#entriesRows'),s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><
 setRows($('#logs'),s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join(''));
 setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;setText($('#connectionNotice'),(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:''));height();tick()}
-function tick(){drawRoundPrice(current);if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));setText($('#roundClock'),String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00')}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){setText($('#marketLabel'),' · DATOS ATRASADOS');setText($('#activeSignal'),'ESPERANDO');$('#radar').classList.add('paused')}}
+function tick(){
+  const now=Date.now();
+  drawRoundPrice(current,now);
+  const sec=Number.isFinite(endAt)?Math.max(0,Math.floor((endAt-now)/1000)):null;
+  const remaining=sec===null?'—':String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0');
+  setText($('#roundClock'),remaining+' / 15:00');
+  setText($('#chartRoundClock'),remaining);
+  if(current?.updated&&now-Date.parse(current.updated)>15000){
+    setText($('#marketLabel'),' · DATOS ATRASADOS');
+    setText($('#activeSignal'),'ESPERANDO');
+    $('#radar').classList.add('paused');
+  }
+}
 window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&acknowledged.has(reply.id))reply=null;if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
