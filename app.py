@@ -4224,6 +4224,7 @@ def live_dashboard():
     btc_error = ""
     live_price_error = ""
     kalshi_error = ""
+    kalshi_live_error = ""
 
     try:
         btc_df = add_indicators(get_btc_data())
@@ -4253,13 +4254,26 @@ def live_dashboard():
             float(btc_df.iloc[-1]["close"]) if btc_ok else None
         )
 
-    # Coinbase es la única fuente del precio utilizado para las señales.
-    # Si falla el ticker, se conserva el fallback existente a vela Coinbase.
-    live_btc_price = coinbase_live_price
-    source = (
-        "COINBASE" if coinbase_live_ok else
-        "COINBASE CANDLE" if live_btc_price is not None else "SIN DATOS"
-    )
+    kalshi_live_price = None
+    kalshi_live_ok = False
+
+    if market:
+        try:
+            kalshi_live_price = get_kalshi_live_btc(market)
+            kalshi_live_ok = True
+        except Exception as error:
+            kalshi_live_error = str(error)
+
+    if kalshi_live_price is not None:
+        live_btc_price = kalshi_live_price
+        source = "KALSHI LIVE"
+    else:
+        live_btc_price = coinbase_live_price
+        source = (
+            "COINBASE"
+            if coinbase_live_ok else
+            "COINBASE CANDLE" if live_btc_price is not None else "SIN DATOS"
+        )
 
     if market:
         ticker = market.get("ticker", "--")
@@ -4276,9 +4290,14 @@ def live_dashboard():
     except Exception:
         whale = None
 
+    # Cerebro: Coinbase en tiempo real. Pantalla: Kalshi, sin cambiar su cotización.
+    brain_price = coinbase_live_price
+    brain_source = "COINBASE" if coinbase_live_ok else (
+        "COINBASE CANDLE" if brain_price is not None else "SIN DATOS"
+    )
     if btc_ok:
         sig = build_signal(
-            btc_df, target, seconds_left, live_btc_price, source, whale=whale
+            btc_df, target, seconds_left, brain_price, brain_source, whale=whale
         )
     else:
         _TRACE_CONTEXT.build_id = None
@@ -4286,7 +4305,7 @@ def live_dashboard():
         sig = {
             "data_valid": False,
             "data_error": btc_error,
-            "price": live_btc_price if live_btc_price is not None else 0,
+            "price": brain_price if brain_price is not None else 0,
             "candle_price": 0,
             "rsi": 50,
             "mom3": 0,
@@ -4308,7 +4327,7 @@ def live_dashboard():
         ticker, sig, market, seconds_left
     )
     # Cinta live de segundos para el Lector de Cierre.
-    update_micro_tape(ticker, live_btc_price, source)
+    update_micro_tape(ticker, brain_price, brain_source)
     micro = micro_reading()
     # El panel permanece visible; solo la predicción se activa en los últimos 90 segundos.
     # La cinta de precios y las métricas continúan actualizándose durante toda la ronda.
@@ -4366,8 +4385,10 @@ def live_dashboard():
 
     market_live = kalshi_ok and live_btc_price is not None
 
-    distance = sig["distance"]
-    distance_pct = sig.get("distance_pct")
+    # Distancia y precio visibles siguen el feed de Kalshi del bot original.
+    distance = (float(live_btc_price) - float(target)) if live_btc_price is not None and target is not None else None
+    distance_pct = (distance / float(target) * 100) if distance is not None and target else None
+    display_btc_price = live_btc_price if live_btc_price is not None else sig["price"]
     up = int(sig["up_probability"])
     down = int(sig["down_probability"])
     target_text = f"${target:,.0f}" if target is not None else "--"
@@ -4598,7 +4619,7 @@ def live_dashboard():
   <div class="rgrid">
     <div class="rcard keycard">
       <div class="bigicon btcicon">₿</div>
-      <div><div class="rlabel">BTC</div><div class="rvalue">${sig["price"]:,.0f}</div>
+      <div><div class="rlabel">BTC</div><div class="rvalue">${display_btc_price:,.0f}</div>
       <div class="rdelta {'green' if sig["mom3"] >= 0 else 'red'}">{btc_delta}</div></div>
     </div>
     <div class="rcard keycard">
@@ -4758,6 +4779,10 @@ def live_dashboard():
         st.error("Error de velas BTC/USD: " + btc_error)
     if live_price_error and live_btc_price is None:
         st.warning("Coinbase live: " + live_price_error)
+    if kalshi_live_error and coinbase_live_price is not None:
+        st.warning(
+            "Kalshi BTC live falló temporalmente; usando Coinbase."
+        )
     if kalshi_error:
         if market and market.get("_round_refresh_error"):
             st.warning("Kalshi no pudo refrescar: se conserva el target verificado de esta ronda y se reintentará. Cotización de contrato no disponible.")
