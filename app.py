@@ -1589,7 +1589,7 @@ EXTRA_SERIES_15M = {
     'NEAR': 'KXNEAR15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-6x15-v10-4x70'
+RADAR_REVISION = 'radar-6x15-4x70-v9'
 DIRECTION_MIN = 4
 DIRECTION_CONFIDENCE_MIN = 70
 ROUND_LIMIT = 2
@@ -1879,7 +1879,7 @@ class PaperBot(Bot):
                 entry_limit = self.settings['radar_entry_limit_cents']
                 fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit)
                 if fresh_side != side:
-                    notes[asset] = 'Se perdió la confirmación de cuatro monedas al 70 % durante la verificación'
+                    notes[asset] = 'Se perdió la confirmación de cuatro monedas al 70% durante la verificación'
                     break
                 if asset not in eligible or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
@@ -2169,7 +2169,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <footer>
 <span class="gold" id="executionFooter">SIMULACIÓN</span>
-<br>5 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
+<br>6 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
 <span class="green"><span id="feedStatus">● Esperando datos</span></span>
 </footer>
 </aside>
@@ -2181,7 +2181,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <div>
 <small>MERCADO</small>
-<strong>5 MONEDAS · 15 MINUTOS</strong>
+<strong>6 MONEDAS · 15 MINUTOS</strong>
 </div>
 <div>
 <small>SESIÓN</small>
@@ -2268,7 +2268,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Tres monedas vigentes del mismo lado confirman la dirección · 50% exacto es neutral · Hasta dos monedas distintas por ronda.</div>
+<div class="notice">Cuatro monedas vigentes con al menos 70% en la misma dirección confirman la señal · Por debajo de 70% no cuenta · Hasta dos monedas distintas por ronda.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2276,7 +2276,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <h2>Plan de operación</h2>
 <div class="body">
 <div class="top-controls">
-<span>5 monedas · 15 minutos</span>
+<span>6 monedas · 15 minutos</span>
 <span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
 </div>
 <div class="strength">
@@ -2734,7 +2734,7 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · 6 MONEDAS · 4 AL 70 % PARA CONFIRMAR · SALDO VIRTUAL')
+    st.caption('SIMULACIÓN · 6 MONEDAS · 4 AL 70% PARA CONFIRMAR · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
