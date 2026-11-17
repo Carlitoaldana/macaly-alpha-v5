@@ -25,18 +25,8 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# =========================================================
-# CONFIGURACIÓN ORIGINAL
-# =========================================================
-
-NEW_ROUND_WAIT = 8
-NEW_ENTRY_LOCK = 75
-
-# Dos lecturas coherentes, separadas por al menos 2 s (mínimo 2 s).
-SIGNAL_CONFIRM_READINGS = 2
-SIGNAL_CONFIRM_INTERVAL = 2.0
-# Caducidad operativa: una pausa >10s reinicia las lecturas pendientes.
-SIGNAL_CONFIRM_MAX_GAP = 10.0
+MICRO_LOOKBACK_TOLERANCE = 2.0
+MICRO_MAX_GAP = 10.0
 LIVE_PRICE_MAX_AGE = 30.0
 _PRICE_OBSERVATIONS = threading.local()
 
@@ -54,12 +44,6 @@ def _valid_live_observation(price, observed_at, source):
     return value
 
 
-UP_THRESHOLD = 4.0
-DOWN_THRESHOLD = -4.0
-
-FLIP_UP_THRESHOLD = 4.75
-FLIP_DOWN_THRESHOLD = -4.75
-FLIP_CONFIRMATIONS = 2
 
 # =========================================================
 # DISEÑO MOBILE — BASADO EN LA REFERENCIA APROBADA
@@ -1106,11 +1090,6 @@ def new_round_state(ticker, seconds_left):
         "reversal_text": "",
         "fresh_samples": [],
         "candidate_history": [],
-        "pending_direction": None,
-        "pending_count": 0,
-        "pending_since": None,
-        "pending_last_at": None,
-        "pending_price_source": None,
     }
 
 # =========================================================
@@ -1994,7 +1973,7 @@ def get_kalshi_live_btc(market):
 # INDICADORES ORIGINALES
 # =========================================================
 
-def _indicator_frame(df):
+def _indicator_frame(df, minutes):
     x = df.copy().sort_values("time").reset_index(drop=True)
     close, high, low = x["close"], x["high"], x["low"]
     x["ema9"] = close.ewm(span=9, adjust=False).mean()
@@ -2008,25 +1987,37 @@ def _indicator_frame(df):
     rsi = rsi.mask((ag == 0) & (al > 0), 0.0)
     x["rsi"] = rsi.fillna(50.0)
     e12=close.ewm(span=12,adjust=False).mean(); e26=close.ewm(span=26,adjust=False).mean()
-    x["macd"]=e12-e26; x["macd_signal"]=x["macd"].ewm(span=9,adjust=False).mean(); x["macd_hist"]=x["macd"]-x["macd_signal"]
+    macd = e12 - e26
+    x["macd_hist"] = macd - macd.ewm(span=9, adjust=False).mean()
     prev=close.shift(1); tr=pd.concat([(high-low),(high-prev).abs(),(low-prev).abs()],axis=1).max(axis=1)
     x["atr"]=tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
-    up=high.diff(); dn=-low.diff(); plus=up.where((up>dn)&(up>0),0.0); minus=dn.where((dn>up)&(dn>0),0.0)
-    atr=x["atr"].replace(0,np.nan); pdi=100*plus.ewm(alpha=1/14,adjust=False).mean()/atr; mdi=100*minus.ewm(alpha=1/14,adjust=False).mean()/atr
-    dx=100*(pdi-mdi).abs()/(pdi+mdi).replace(0,np.nan)
-    x["plus_di"]=pdi; x["minus_di"]=mdi; x["adx"]=dx.ewm(alpha=1/14,adjust=False).mean()
-    typical=(high+low+close)/3; vol=x["volume"].fillna(0); x["vwap"]=(typical*vol).rolling(60,min_periods=1).sum()/vol.rolling(60,min_periods=1).sum().replace(0,np.nan)
-    x["vol_ratio"]=vol/vol.rolling(20).mean().replace(0,np.nan)
+    if minutes != 1:
+        up = high.diff()
+        dn = -low.diff()
+        plus = up.where((up > dn) & (up > 0), 0.0)
+        minus = dn.where((dn > up) & (dn > 0), 0.0)
+        atr = x["atr"].replace(0, np.nan)
+        pdi = 100 * plus.ewm(alpha=1/14, adjust=False).mean() / atr
+        mdi = 100 * minus.ewm(alpha=1/14, adjust=False).mean() / atr
+        x["plus_di"] = pdi
+        x["minus_di"] = mdi
+        if minutes == 3:
+            dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, np.nan)
+            x["adx"] = dx.ewm(alpha=1/14, adjust=False).mean()
+    else:
+        typical = (high + low + close) / 3
+        vol = x["volume"].fillna(0)
+        x["vwap"] = (typical * vol).rolling(60, min_periods=1).sum() / vol.rolling(60, min_periods=1).sum().replace(0, np.nan)
+        x["vol_ratio"] = vol / vol.rolling(20).mean().replace(0, np.nan)
     return x
 
 def _resample_indicators(df, minutes):
-    if minutes == 1: return _indicator_frame(df)
     x=df.set_index("time").resample(f"{minutes}min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna().reset_index()
-    return _indicator_frame(x)
+    return _indicator_frame(x, minutes)
 
 def add_indicators(df):
-    x=_indicator_frame(df)
-    x["mom3"]=x["close"].pct_change(3)*100; x["mom5"]=x["close"].pct_change(5)*100; x["mom15"]=x["close"].pct_change(15)*100
+    x=_indicator_frame(df, 1)
+    x["mom3"]=x["close"].pct_change(3)*100; x["mom15"]=x["close"].pct_change(15)*100
     return x
 
 def get_target_from_market(market):
@@ -2104,40 +2095,6 @@ def get_no_ask(market):
     if yes_bid is not None:
         return max(0.0, min(1.0, 1.0 - yes_bid))
     return None
-
-
-# =========================================================
-# PROBABILIDAD ORIGINAL
-# =========================================================
-
-def estimated_probabilities(
-    final_score, distance, seconds_left, mom3, mom5
-):
-    score = float(np.clip(final_score, -10, 10))
-    up_prob = 50 + score * 4.2
-
-    if mom3 > 0.04:
-        up_prob += 3
-    elif mom3 < -0.04:
-        up_prob -= 3
-
-    if mom5 > 0.06:
-        up_prob += 2
-    elif mom5 < -0.06:
-        up_prob -= 2
-
-    if (
-        distance is not None
-        and seconds_left is not None
-        and seconds_left <= 180
-    ):
-        if distance > 0:
-            up_prob += 3
-        elif distance < 0:
-            up_prob -= 3
-
-    up_prob = float(np.clip(up_prob, 5, 95))
-    return round(up_prob), round(100 - up_prob)
 
 
 # =========================================================
@@ -2437,22 +2394,22 @@ def _opening_level_gate(df, price, atr, rvol, target=None):
 
 
 def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
-    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
-    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
+    one=add_indicators(df); three=_resample_indicators(df,3)
+    l1,l3=one.iloc[-1],three.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
     def direction(row):
         bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
         bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
         return "UP" if bull else "DOWN" if bear else "NEUTRAL"
-    d3,d5=direction(l3),direction(l5)
+    d3=direction(l3)
     atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
     distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
     target_atr=(distance/atr) if distance is not None else 0.0
     vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
     adx3 = float(l3["adx"]) if pd.notna(l3["adx"]) else 0.0
-    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
+    rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"])
     rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
-    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
+    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
     impulse = _internal_impulse_context(one, price, atr, mom3, mom15, rvol)
     # Evaluate all routes for both directions before choosing any candidate.
     flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
@@ -2516,14 +2473,14 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if d3=="UP" else "BAJISTA" if d3=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"adx3":adx3,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"mom3":mom3,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"adx3":adx3,"plus_di":float(l3["plus_di"]),"minus_di":float(l3["minus_di"]),"macd3":float(l3["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
     """PRESEÑAL INDEPENDIENTE Y REACTIVA.
 
     Usa la lectura ACTUAL y, a medida que se acerca
-    el cierre, reduce el peso de señales lentas (3M/5M) y aumenta el peso de la
+    el cierre, reduce el peso de los indicadores de 3 minutos y aumenta el peso de la
     posición actual frente al target. Así puede girar UP/DOWN sin quedarse
     pegada a una tendencia vieja.
     """
@@ -2533,13 +2490,9 @@ def build_presignal(sig, seconds_left):
     ema = sig.get("ema")
     rsi1 = float(sig.get("rsi", 50) or 50)
     rsi3 = float(sig.get("rsi3", 50) or 50)
-    rsi5 = float(sig.get("rsi5", 50) or 50)
     mom3 = float(sig.get("mom3", 0) or 0)
-    mom5 = float(sig.get("mom5", 0) or 0)
     trend3 = sig.get("trend3", "NEUTRAL")
-    trend5 = sig.get("trend5", "NEUTRAL")
     macd3 = float(sig.get("macd3", 0) or 0)
-    macd5 = float(sig.get("macd5", 0) or 0)
     plus_di = float(sig.get("plus_di", 0) or 0)
     minus_di = float(sig.get("minus_di", 0) or 0)
     vwap_atr = float(sig.get("vwap_atr", 0) or 0)
@@ -2554,27 +2507,19 @@ def build_presignal(sig, seconds_left):
 
     if trend3 == "UP": bull += 1.10 * slow
     elif trend3 == "DOWN": bear += 1.10 * slow
-    if trend5 == "UP": bull += 0.90 * slow
-    elif trend5 == "DOWN": bear += 0.90 * slow
 
     if rsi1 >= 52: bull += 0.90
     elif rsi1 <= 48: bear += 0.90
     if rsi3 >= 51: bull += 0.55 * slow
     elif rsi3 <= 49: bear += 0.55 * slow
-    if rsi5 >= 52: bull += 0.30 * slow
-    elif rsi5 <= 48: bear += 0.30 * slow
 
     if mom3 > 0.015: bull += 1.15
     elif mom3 < -0.015: bear += 1.15
     elif mom3 > 0: bull += 0.30
     elif mom3 < 0: bear += 0.30
-    if mom5 > 0.025: bull += 0.55 * slow
-    elif mom5 < -0.025: bear += 0.55 * slow
 
     if macd3 > 0: bull += 0.70 * slow
     elif macd3 < 0: bear += 0.70 * slow
-    if macd5 > 0: bull += 0.35 * slow
-    elif macd5 < 0: bear += 0.35 * slow
     if plus_di > minus_di: bull += 0.50 * slow
     elif minus_di > plus_di: bear += 0.50 * slow
 
@@ -2779,9 +2724,7 @@ def _update_public_profit_alert(state, signal, market, seconds_left):
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """One confirmation path for foreground and background. Neutral readings
-    cancel pending candidates, never erase a confirmed active direction.
-    """
+    """Confirm a qualifying candidate from the current reading."""
     # A candidate is not a confirmation when the available directional
     # evidence contradicts it. Keep the active signal while reassessing.
     if candidate in ("UP", "DOWN") and not _direction_consistent(candidate, signal, state.get("active_direction")):
@@ -2811,103 +2754,26 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             closed = seconds_left <= 0
     if closed:
         _reset_withdrawal(state)
-        for key in ("pending_direction", "pending_since", "pending_last_at", "pending_price_source",
-                    "active_direction", "active_since"):
-            state[key] = None
-        state["pending_count"] = 0
+        state.update(active_direction=None, active_since=None)
         return
-    # La primera señal puede confirmarse desde la apertura con datos en vivo
-    # y un reloj de ronda válido.
     if state.get("first_direction") is None and seconds_left is None:
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        state["pending_price_source"] = None
         state["opening_conflict"] = "Esperando el reloj de la ronda"
         return
     if signal is not None and signal.get("data_valid") is False:
         _reset_withdrawal(state)
-        # Una interrupción no demuestra neutralidad ni permite confirmar.
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        if seconds_left is not None and seconds_left <= 0:
-            state["active_direction"] = None
-            state["active_since"] = None
-        return
-    source = signal.get("price_source") if signal else None
-    if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
-        if state.get("pending_count", 0) and state.get("pending_price_source") != source:
-            # Tres lecturas deben pertenecer a una misma referencia de precio.
-            state["pending_direction"] = None
-            state["pending_count"] = 0
-            state["pending_since"] = None
-            state["pending_last_at"] = None
-        state["pending_price_source"] = source
-    if candidate not in ("UP", "DOWN"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        _review_active_retention(state, signal, seconds_left, now)
         return
 
     _review_active_retention(state, signal, seconds_left, now)
-    if candidate == state.get("active_direction"):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    if candidate not in ("UP", "DOWN") or candidate == state.get("active_direction"):
         return
 
-    last = state.get("pending_last_at")
-    if isinstance(last, str):
-        try:
-            last = datetime.fromisoformat(last)
-        except ValueError:
-            last = None
-    since = state.get("pending_since")
-    if isinstance(since, str):
-        try:
-            since = datetime.fromisoformat(since)
-        except ValueError:
-            since = None
-
-    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
-                              or (now - last).total_seconds() < 0)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        last = since = None
-    if state.get("pending_direction") != candidate:
-        state["pending_direction"] = candidate
-        state["pending_count"] = 1
-        state["pending_since"] = now.isoformat()
-        state["pending_last_at"] = now.isoformat()
-        return
-
-    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] = int(state.get("pending_count", 0)) + 1
-        state["pending_last_at"] = now.isoformat()
-
-    elapsed = (now - since).total_seconds() if since else 0
-    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
-        state["active_direction"] = candidate
-        state["active_since"] = now
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    state.update(active_direction=candidate, active_since=now)
+    if state.get("first_direction") is None:
+        state["first_direction"] = candidate
+        state["first_signal_time"] = now
+        state["first_signal_seconds"] = seconds_left
+        state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                       else get_no_ask(market))
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -2987,7 +2853,6 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         if score < 0: weakness_points += 1
         if score_change <= -1.25: weakness_points += 1
         if sig.get("mom3",0) < -0.02: weakness_points += 1
-        if sig.get("mom5",0) < 0: weakness_points += 1
         if price_change < -8: weakness_points += 1
         if weakness_points >= 2:
             reversal = True
@@ -2999,7 +2864,6 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         if score > 0: weakness_points += 1
         if score_change >= 1.25: weakness_points += 1
         if sig.get("mom3",0) > 0.02: weakness_points += 1
-        if sig.get("mom5",0) > 0: weakness_points += 1
         if price_change > 8: weakness_points += 1
         if weakness_points >= 2:
             reversal = True
@@ -3018,8 +2882,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
         decision, signal, icon, color = "DOWN","SEÑAL DOWN","⬇","#e64b4b"
         current_entry_price = get_no_ask(market)
     else:
-        decision, signal, icon, color = "ESPERANDO",(state.get("opening_conflict") or
-            ("CONFIRMANDO " + state["pending_direction"] if state.get("pending_direction") in ("UP","DOWN") else "SIN CONFIRMACIÓN")),"•","#38bdf8"
+        decision, signal, icon, color = "ESPERANDO",(state.get("opening_conflict") or "SIN CONFIRMACIÓN"),"•","#38bdf8"
         current_entry_price = None
 
     quality, quality_color = entry_quality(current_entry_price, seconds_left)
@@ -3043,7 +2906,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_multi_indicator49_v1_official_3m"
+BACKGROUND_DATA_REVISION = "continuous_history_v8_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_multi_indicator49_v1_official_3m"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -3061,63 +2924,6 @@ def _background_get_live_price(market):
     _BACKGROUND_PRICE_SOURCE.value = "COINBASE"
     return price
 
-# =========================================================
-# ALPHA AI SHADOW — observational only; NEVER alters UP/DOWN
-# Stores one immutable decision-time snapshot per ticker.
-# Training labels must come from official Kalshi settlement.
-# =========================================================
-SHADOW_AI_DB = "alpha_ai_shadow.db"
-SHADOW_FEATURES = ("rsi", "rsi3", "rsi5", "mom3", "mom5", "mom15", "vol_ratio",
-                   "technical_score", "target_score", "adx", "macd3", "macd5",
-                   "atr", "vwap_atr", "target_atr", "distance_pct")
-
-def _shadow_capture(ticker, sig, state, seconds_left):
-    """Read-only capture of existing engine output; no signal writes or model inference."""
-    if not ticker or not isinstance(sig, dict) or seconds_left is None:
-        return
-    try:
-        remaining = float(seconds_left)
-        if not 0 < remaining <= 900:
-            return
-        price = float(sig.get("price"))
-        target = float(state.get("last_target"))
-        if not np.isfinite(price) or not np.isfinite(target) or target <= 0:
-            return
-        def safe_float(value):
-            try:
-                number = float(value)
-                return number if np.isfinite(number) else None
-            except (TypeError, ValueError, OverflowError):
-                return None
-        features = {name: safe_float(sig.get(name)) for name in SHADOW_FEATURES}
-        # Store the engine's original proposal so the training label evaluates
-        # the proposal, not the AI-filtered display result.
-        signal = sig.get("candidate_raw", sig.get("candidate"))
-        if signal not in ("UP", "DOWN"):
-            # Wait for the first actual proposal; otherwise a neutral first poll
-            # would permanently occupy this ticker's one-snapshot slot.
-            return
-        with sqlite3.connect(SHADOW_AI_DB, timeout=3) as conn:
-            conn.execute("""CREATE TABLE IF NOT EXISTS snapshots (
-                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
-                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
-                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
-            conn.execute("""INSERT INTO snapshots
-                (ticker, observed_at, seconds_left, btc_price, target, candidate, features_json)
-                VALUES (?,?,?,?,?,?,?)
-                ON CONFLICT(ticker) DO UPDATE SET
-                    observed_at=excluded.observed_at,
-                    seconds_left=excluded.seconds_left,
-                    btc_price=excluded.btc_price,
-                    target=excluded.target,
-                    candidate=excluded.candidate,
-                    features_json=excluded.features_json
-                WHERE snapshots.candidate IS NULL AND excluded.candidate IS NOT NULL""",
-                (str(ticker), datetime.now(timezone.utc).isoformat(), remaining,
-                 price, target, signal, json.dumps(features, allow_nan=False)))
-    except (sqlite3.Error, TypeError, ValueError, OverflowError):
-        return
-
 def _background_update_state_without_coordinator(state, sig, market, seconds_left):
     now = datetime.now(timezone.utc)
     price = float(sig.get("price", 0.0))
@@ -3131,7 +2937,6 @@ def _background_update_state_without_coordinator(state, sig, market, seconds_lef
     state["last_score"] = float(sig.get("final_score", 0.0))
     confirm_round_candidate(state, sig.get("candidate"), market, seconds_left, now, sig)
     save_round_state(state)
-    _shadow_capture(state.get("ticker"), sig, state, seconds_left)
     return state
 
 def _background_history_loop(stop_event=None):
@@ -3170,7 +2975,6 @@ def _background_history_loop(stop_event=None):
             if stop_event and stop_event.is_set():
                 break
             active_state = _background_update_state(active_state, sig, market, seconds_left)
-            _shadow_capture(ticker, sig, active_state, seconds_left)
             if seconds_left is not None and seconds_left <= 0:
                 save_round_history(active_state)
         except Exception as exc:
@@ -3253,7 +3057,7 @@ def update_micro_tape(ticker, live_price, price_source=None):
     tape = st.session_state.micro_prices
 
     # Una pausa rompe la ventana micro; volver a reunir datos continuos.
-    if tape and observed_ts - tape[-1]["t"] > SIGNAL_CONFIRM_MAX_GAP:
+    if tape and observed_ts - tape[-1]["t"] > MICRO_MAX_GAP:
         tape.clear()
     # Evita duplicar muestras dentro del mismo refresco.
     if not tape or observed_ts - tape[-1]["t"] >= 1.0:
@@ -3269,7 +3073,7 @@ def update_micro_tape(ticker, live_price, price_source=None):
 def micro_reading():
     tape = st.session_state.micro_prices
     if (tape and (datetime.now(timezone.utc).timestamp() - tape[-1]["t"] > 6
-                  or any(b["t"] - a["t"] > SIGNAL_CONFIRM_MAX_GAP
+                  or any(b["t"] - a["t"] > MICRO_MAX_GAP
                          for a, b in zip(tape, tape[1:])))):
         tape = []
 
@@ -3290,7 +3094,7 @@ def micro_reading():
     def price_ago(seconds):
         target_t = now_t - seconds
         candidates = [x for x in tape if x["t"] <= target_t]
-        if candidates and target_t - candidates[-1]["t"] <= SIGNAL_CONFIRM_INTERVAL:
+        if candidates and target_t - candidates[-1]["t"] <= MICRO_LOOKBACK_TOLERANCE:
             return candidates[-1]["p"]
         return None
 
@@ -3736,7 +3540,7 @@ def detect_early_reversal(ticker, micro, whale, price):
         cutoff = last_t - age
         earlier = [x for x in tape if float(x["t"]) <= cutoff]
         return (float(earlier[-1]["p"])
-                if earlier and cutoff - float(earlier[-1]["t"]) <= SIGNAL_CONFIRM_INTERVAL else None)
+                if earlier and cutoff - float(earlier[-1]["t"]) <= MICRO_LOOKBACK_TOLERANCE else None)
 
     p10 = at_or_before(10)
     p30 = at_or_before(30)
@@ -3914,7 +3718,7 @@ def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=
                      "buys": buys, "sells": sells, "direction": direction,
                      "strength": "ALTA" if imbalance >= .6 else "MEDIA" if imbalance >= .3 else "BAJA",
                      "activity": activity, "threshold": threshold},
-            "mom3": sig.get("mom3"), "mom5": sig.get("mom5"), "mom15": sig.get("mom15"),
+            "mom3": sig.get("mom3"), "mom15": sig.get("mom15"),
             "updated": now.strftime("%H:%M:%S UTC"),
             "age": max(0, stamp-rows[-1]["t"]) if rows else None}
 
@@ -4004,7 +3808,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 <!-- Panel BTC/USD y tarjetas visuales retirados. Se conservan los nodos que usa el JavaScript para actualizar datos. -->
 <div style="display:none!important" aria-hidden="true"><span id="subtitle"></span><span id="price"></span><span id="live"></span><span id="signal"></span><span id="model"></span><span id="status"></span><span id="updated"></span></div>
 <details id="whale"><summary>🐋 WHALE FLOW <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>🐋 WHALE FLOW — LIVE</h3><div class="note">Operaciones observadas de Coinbase · últimos 30 s</div><div class="watch" id="watch"></div><div class="metrics"><div class="metric"><small>BUY FLOW</small><b class="green" id="buy"></b></div><div class="metric"><small>SELL FLOW</small><b class="red" id="sell"></b></div><div class="metric"><small>DIFERENCIA</small><b id="diff"></b></div><div class="metric"><small>ACTIVIDAD</small><b id="activity"></b></div><div class="metric"><small>FUERZA DEL DESEQUILIBRIO</small><b id="strength"></b></div></div><div class="bars"><div class="bar">BUY<div class="track"><i id="buybar" style="background:#00dfb5"></i></div><b id="buytotal"></b></div><div class="bar">SELL<div class="track"><i id="sellbar" style="background:#e64b4b"></i></div><b id="selltotal"></b></div></div><div class="count"><div class="metric"><small>🐋 BUY WHALES</small><b class="green" id="buys"></b></div><div class="metric"><small>🐋 SELL WHALES</small><b class="red" id="sells"></b></div></div><div class="metric difference"><small>DIFERENCIA DE OPERACIONES</small><b id="countdiff"></b></div><p class="note">«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. En el laboratorio, el flujo puede apoyar una candidatura solo con confirmación técnica; no decide por sí solo.</p></div></details>
-<details id="momentum"><summary>⚡ SHORT-TERM MOMENTUM <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>MOVIMIENTO RECIENTE DE BTC</h3><div class="metrics" id="momrows"></div><p class="note">Cambio porcentual calculado por el motor en 3, 5 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.</p></div></details>
+<details id="momentum"><summary>⚡ SHORT-TERM MOMENTUM <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>MOVIMIENTO RECIENTE DE BTC</h3><div class="metrics" id="momrows"></div><p class="note">Cambio porcentual calculado por el motor en 3 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.</p></div></details>
 <div class="tools"><h3>INDICADORES</h3><div class="toggles" id="toggles"></div><div class="legend" id="legend"></div></div>
 <div class="floatcounts"><div>🐋 BUY WHALES <b id="floatbuy"></b></div><div>🐋 SELL WHALES <b id="floatsell"></b></div></div>
 <div class="tooltip" id="tooltip">Arrastra velas y escala de precios · pellizca para zoom · AHORA regresa al presente.</div><div class="canvas" id="canvas"></div><div id="rsi-pane" style="height:110px;display:none;background:#06121a;border-top:1px solid #294c69"></div>
@@ -4026,7 +3830,7 @@ $('diff').textContent=known?compact(Math.abs(F.buy-F.sell))+' '+(F.buy>F.sell?'B
 for(const [id,v] of [['buys',F.buys],['sells',F.sells],['floatbuy',F.buys],['floatsell',F.sells]])$(id).textContent=known?v:'—';
 $('countdiff').textContent=known?Math.abs(F.buys-F.sells)+' '+(F.buys>F.sells?'BUY':F.sells>F.buys?'SELL':'NEUTRAL'):'—';$('buybar').style.width=(total?100*F.buy/total:0)+'%';$('sellbar').style.width=(total?100*F.sell/total:0)+'%';
 $('momrows').replaceChildren();
-for(const key of ['mom3','mom5','mom15']){const v=D[key],box=document.createElement('div');box.className='metric';box.innerHTML='<small>'+key.slice(3)+' MINUTOS</small><b class="'+(v>=0?'green':'red')+'">'+(v==null?'—':(v>0?'+':'')+fmt(v,2)+'%')+'</b>';$('momrows').append(box)}
+for(const key of ['mom3','mom15']){const v=D[key],box=document.createElement('div');box.className='metric';box.innerHTML='<small>'+key.slice(3)+' MINUTOS</small><b class="'+(v>=0?'green':'red')+'">'+(v==null?'—':(v>0?'+':'')+fmt(v,2)+'%')+'</b>';$('momrows').append(box)}
 }
 refreshLabels();
 const colors={ema9:'#f000ff',ema21:'#00eaff',vwap:'#6261ff',volume:'#00d7b0',rsi:'#f000ff'};
@@ -4212,7 +4016,7 @@ def live_dashboard():
     kalshi_live_error = ""
 
     try:
-        btc_df = add_indicators(get_btc_data())
+        btc_df = get_btc_data()
         btc_ok = True
     except Exception as error:
         btc_ok = False
@@ -4294,7 +4098,6 @@ def live_dashboard():
             "candle_price": 0,
             "rsi": 50,
             "mom3": 0,
-            "mom5": 0,
             "mom15": 0,
             "vol_ratio": 0,
             "ema": "N/A",
@@ -4824,170 +4627,6 @@ def _trace_event(kind, payload, ticker=None):
 
 
 
-# =========================================================
-# ALPHA AI GATE — supervised, conservative signal filter
-# Learns only from official Kalshi settlements. It can BLOCK a
-# weak UP/DOWN proposal, but it never invents or reverses a signal.
-# =========================================================
-AI_GATE_MIN_ROWS = 80
-AI_GATE_MIN_HOLDOUT = 15
-AI_GATE_MIN_BRIER_GAIN = 0.02
-AI_GATE_BLOCK_BELOW = 0.45
-_AI_GATE_CACHE = {"at": 0.0, "model": None, "status": "sin datos oficiales"}
-
-def _ai_sigmoid(z):
-    z = np.clip(np.asarray(z, dtype=float), -30.0, 30.0)
-    return 1.0 / (1.0 + np.exp(-z))
-
-def _ai_feature_vector(features, candidate=None):
-    values = []
-    for name in SHADOW_FEATURES:
-        try:
-            value = float(features.get(name))
-            if not np.isfinite(value):
-                value = np.nan
-        except (TypeError, ValueError, OverflowError):
-            value = np.nan
-        values.append(value)
-    # Direction matters: the same indicator values can mean different odds
-    # for a proposed UP versus DOWN signal.
-    values.append(1.0 if candidate == "UP" else 0.0 if candidate == "DOWN" else np.nan)
-    return np.asarray(values, dtype=float)
-
-def _ai_fit_logistic(X, y, epochs=900, lr=0.035):
-    means = np.nanmean(X, axis=0)
-    means = np.where(np.isfinite(means), means, 0.0)
-    X = np.where(np.isfinite(X), X, means)
-    scales = np.std(X, axis=0)
-    scales = np.where(scales < 1e-8, 1.0, scales)
-    Z = np.clip((X - means) / scales, -8, 8)
-    Z = np.column_stack([np.ones(len(Z)), Z])
-    weights = np.zeros(Z.shape[1], dtype=float)
-    # Full-batch gradient descent with mild L2 regularization.
-    for _ in range(epochs):
-        p = _ai_sigmoid(Z @ weights)
-        grad = (Z.T @ (p - y)) / len(y)
-        grad[1:] += 0.01 * weights[1:]
-        weights -= lr * grad
-    return {"means": means, "scales": scales, "weights": weights}
-
-def _ai_predict_model(model, X):
-    X = np.asarray(X, dtype=float)
-    means, scales = model["means"], model["scales"]
-    X = np.where(np.isfinite(X), X, means)
-    Z = np.clip((X - means) / scales, -8, 8)
-    Z = np.column_stack([np.ones(len(Z)), Z])
-    return _ai_sigmoid(Z @ model["weights"])
-
-def _ai_official_training_rows():
-    """Return only snapshots whose round has an official yes/no settlement."""
-    try:
-        with sqlite3.connect(SHADOW_AI_DB, timeout=2) as shadow:
-            shadow.row_factory = sqlite3.Row
-            shadow.execute("""CREATE TABLE IF NOT EXISTS snapshots (
-                ticker TEXT PRIMARY KEY, observed_at TEXT NOT NULL,
-                seconds_left REAL NOT NULL, btc_price REAL NOT NULL,
-                target REAL NOT NULL, candidate TEXT, features_json TEXT NOT NULL)""")
-            snapshots = shadow.execute(
-                "SELECT ticker, observed_at, candidate, features_json "
-                "FROM snapshots WHERE candidate IN ('UP','DOWN') ORDER BY observed_at"
-            ).fetchall()
-        if not snapshots:
-            return []
-        with _history_db() as history:
-            history.row_factory = sqlite3.Row
-            try:
-                settled = {r["ticker"]: r["official_result"] for r in history.execute(
-                    "SELECT ticker, official_result FROM round_history "
-                    "WHERE verification_status='official' AND lower(official_result) IN ('yes','no')"
-                ).fetchall()}
-            except sqlite3.Error:
-                return []
-        rows = []
-        for row in snapshots:
-            outcome = settled.get(row["ticker"])
-            if outcome not in ("yes", "no"):
-                continue
-            candidate = row["candidate"]
-            won = (candidate == "UP" and outcome == "yes") or (candidate == "DOWN" and outcome == "no")
-            try:
-                features = json.loads(row["features_json"])
-            except (TypeError, ValueError):
-                continue
-            rows.append((_ai_feature_vector(features, candidate), 1.0 if won else 0.0, row["observed_at"]))
-        return rows
-    except (sqlite3.Error, OSError, TypeError, ValueError):
-        return []
-
-def _ai_gate_model(force=False):
-    now = time.monotonic()
-    if not force and now - _AI_GATE_CACHE["at"] < 60:
-        return _AI_GATE_CACHE["model"], _AI_GATE_CACHE["status"]
-    _AI_GATE_CACHE["at"] = now
-    _AI_GATE_CACHE["model"] = None
-    rows = _ai_official_training_rows()
-    if len(rows) < AI_GATE_MIN_ROWS:
-        status = f"IA en aprendizaje: {len(rows)}/{AI_GATE_MIN_ROWS} rondas con resultado oficial"
-        _AI_GATE_CACHE.update(model=None, status=status)
-        return None, status
-    X = np.vstack([r[0] for r in rows])
-    y = np.asarray([r[1] for r in rows], dtype=float)
-    split = max(int(len(rows) * 0.8), len(rows) - AI_GATE_MIN_HOLDOUT)
-    split = min(split, len(rows) - AI_GATE_MIN_HOLDOUT)
-    if split < 30 or len(np.unique(y[:split])) < 2 or len(np.unique(y[split:])) < 2:
-        status = "IA sin filtro: faltan resultados variados para validar"
-        _AI_GATE_CACHE.update(model=None, status=status)
-        return None, status
-    try:
-        validation_model = _ai_fit_logistic(X[:split], y[:split])
-        predictions = _ai_predict_model(validation_model, X[split:])
-        baseline = float(np.mean(y[:split]))
-        model_brier = float(np.mean((predictions - y[split:]) ** 2))
-        baseline_brier = float(np.mean((baseline - y[split:]) ** 2))
-        gain = baseline_brier - model_brier
-        if gain < AI_GATE_MIN_BRIER_GAIN:
-            status = f"IA en evaluación: no mejora el modelo base (ganancia Brier {gain:.3f}); no bloquea señales"
-            _AI_GATE_CACHE.update(model=None, status=status)
-            return None, status
-        model = _ai_fit_logistic(X, y)
-        status = f"Filtro IA validado en historial: {len(rows)} rondas oficiales; mejora Brier {gain:.3f}"
-        _AI_GATE_CACHE.update(model=model, status=status)
-        return model, status
-    except (ValueError, FloatingPointError, np.linalg.LinAlgError) as exc:
-        status = f"IA sin filtro por validación: {type(exc).__name__}"
-        _AI_GATE_CACHE.update(model=None, status=status)
-        return None, status
-
-def _apply_ai_signal_gate(sig):
-    """Only block a proposed signal when a validated model estimates weak odds."""
-    if not isinstance(sig, dict):
-        return sig
-    candidate = sig.get("candidate")
-    sig["candidate_raw"] = candidate
-    sig["ai_gate_active"] = False
-    sig["ai_win_probability"] = None
-    model, status = _ai_gate_model()
-    sig["ai_gate_status"] = status
-    if candidate not in ("UP", "DOWN") or model is None:
-        return sig
-    features = {name: sig.get(name) for name in SHADOW_FEATURES}
-    vector = _ai_feature_vector(features, candidate).reshape(1, -1)
-    try:
-        p_win = float(_ai_predict_model(model, vector)[0])
-    except (ValueError, TypeError, FloatingPointError):
-        return sig
-    sig["ai_win_probability"] = round(p_win * 100, 1)
-    if p_win < AI_GATE_BLOCK_BELOW:
-        sig["candidate"] = None
-        sig["quality"] = "NO TRADE · FILTRO IA"
-        sig["ai_gate_active"] = True
-        sig["ai_gate_reason"] = f"Probabilidad estimada de acierto {p_win:.1%}, bajo el umbral {AI_GATE_BLOCK_BELOW:.0%}"
-    else:
-        sig["ai_gate_active"] = True
-        sig["ai_gate_reason"] = f"Señal permitida; probabilidad estimada de acierto {p_win:.1%}"
-    return sig
-
-
 def build_signal(df, target, seconds_left, live_price=None, price_source=None, whale=None):
     _TRACE_CONTEXT.build_id = None
     _TRACE_CONTEXT.build_payload = None
@@ -5005,12 +4644,12 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "unified_evidence_v7_3m":
+    if state.get("signal_engine_revision") != "single_read_v8_3m":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "unified_evidence_v7_3m"
-        state.update(pending_direction=None, pending_count=0,
-                     pending_since=None, pending_last_at=None,
-                     pending_price_source=None)
+        state["signal_engine_revision"] = "single_read_v8_3m"
+        for key in ("pending_direction", "pending_count", "pending_since",
+                    "pending_last_at", "pending_price_source"):
+            state.pop(key, None)
         _reset_withdrawal(state)
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
