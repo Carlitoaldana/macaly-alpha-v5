@@ -3557,7 +3557,13 @@ def render_history_page():
     st.markdown("""
     <style>
     .settings-back{color:#d7e1ee!important;text-decoration:none!important;font-size:14px;font-weight:900}
-    .settings-title{font-size:30px;font-weight:1000;color:#fff;margin:22px 0 4px}
+    .settings-layout{
+      display:grid;align-items:center;justify-items:center;box-sizing:border-box;
+      min-block-size:72vh;min-block-size:72svh;
+      padding-block:clamp(116px,30vw,200px) 24px;
+    }
+    .settings-performance{width:100%;max-width:680px;min-width:0;text-align:center}
+    .settings-title{font-size:30px;font-weight:1000;color:#fff;margin:0 0 4px}
     .settings-sub{font-size:14px;color:#c7d0dc;margin-bottom:20px}
     .history-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:7px}
     .history-stat{background:#0d141d;border:1px solid #1d2b3a;border-radius:10px;padding:10px 5px;text-align:center}
@@ -3611,15 +3617,19 @@ def render_history_page():
     df=load_history(2000); stats=history_stats(df)
     st.markdown(f"""
     <a class="settings-back" href="?page=signal" target="_self">← Señal</a>
-    <div class="settings-title">⚙ Ajustes</div>
-    <div class="settings-sub">Historial y rendimiento · registro automático por ronda</div>
-    <div class="history-stats">
-      <div class="history-stat"><div class="history-label">Rondas</div><div class="history-value" style="color:#54c6f5">{stats["total"]}</div></div>
-      <div class="history-stat"><div class="history-label">Ganadas</div><div class="history-value" style="color:#00dfb5">{stats["wins"]}</div></div>
-      <div class="history-stat"><div class="history-label">Perdidas</div><div class="history-value" style="color:#e64b4b">{stats["losses"]}</div></div>
-      <div class="history-stat"><div class="history-label">Acierto</div><div class="history-value" style="color:#f7bd4d">{f"{stats['win_rate']:.1f}%" if stats['decided'] else "—"}</div></div>
+    <div class="settings-layout">
+      <section class="settings-performance" aria-label="Ajustes y rendimiento">
+        <div class="settings-title">⚙ Ajustes</div>
+        <div class="settings-sub">Historial y rendimiento · registro automático por ronda</div>
+        <div class="history-stats">
+          <div class="history-stat"><div class="history-label">Rondas</div><div class="history-value" style="color:#54c6f5">{stats["total"]}</div></div>
+          <div class="history-stat"><div class="history-label">Ganadas</div><div class="history-value" style="color:#00dfb5">{stats["wins"]}</div></div>
+          <div class="history-stat"><div class="history-label">Perdidas</div><div class="history-value" style="color:#e64b4b">{stats["losses"]}</div></div>
+          <div class="history-stat"><div class="history-label">Acierto</div><div class="history-value" style="color:#f7bd4d">{f"{stats['win_rate']:.1f}%" if stats['decided'] else "—"}</div></div>
+        </div>
+        <div class="history-note">Pendientes: {stats["pending"]} · NO TRADE: {stats["no_trade"]} · Acierto basado solo en resultados oficiales verificados.</div>
+      </section>
     </div>
-    <div class="history-note">Pendientes: {stats["pending"]} · NO TRADE: {stats["no_trade"]} · Acierto basado solo en resultados oficiales verificados.</div>
     """, unsafe_allow_html=True)
 
 
