@@ -4,22 +4,38 @@ import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
+from urllib.error import HTTPError, URLError
+
+class RequestException(Exception):
+    """Error de red compatible con el manejo de excepciones existente."""
+
 class Response:
-    def __init__(self, data):
+    def __init__(self, data, status_code=200, headers=None):
         self.data = data
+        self.status_code = status_code
+        self.headers = headers or {}
     def raise_for_status(self):
-        pass  # urlopen has already rejected non-2xx responses.
+        if self.status_code >= 400:
+            raise RequestException(f"HTTP {self.status_code}")
     def json(self):
         return self.data
 
 class requests:
+    RequestException = RequestException
+
     @staticmethod
     def get(url, params=None, headers=None, timeout=8):
         if params:
             url += ('&' if '?' in url else '?') + urlencode(params)
         req = Request(url, headers=headers or {'User-Agent': 'AlphaEdge/1.0'}, method='GET')
-        with urlopen(req, timeout=timeout) as response:
-            return Response(json.load(response))
+        try:
+            with urlopen(req, timeout=timeout) as response:
+                return Response(json.load(response), response.status, dict(response.headers))
+        except HTTPError as exc:
+            # Conservar 429 y Retry-After para que el motor aplique backoff.
+            return Response({}, exc.code, dict(exc.headers or {}))
+        except (URLError, TimeoutError, OSError) as exc:
+            raise RequestException(str(exc)) from exc
 
 import math
 import numpy as np
@@ -1198,16 +1214,27 @@ class MarketData:
         self.retry_at = 0
 
     def get(self, path, params=None):
-        if time.monotonic() < self.retry_at:
-            raise ValueError('Kalshi en espera tras límite de consultas.')
+        # Backoff real ante HTTP 429; nunca convertir el bloqueo en un ValueError genérico.
+        remaining = self.retry_at - time.monotonic()
+        if remaining > 0:
+            raise RuntimeError(f'Kalshi HTTP 429: pausa de {math.ceil(remaining)} s')
         try:
-            result = requests.get(API+path, params=params, timeout=7).json()
-        except Exception as e:
-            if getattr(e, 'code', None) == 429:
-                self.retry_at = time.monotonic()+15
-            raise
+            response = requests.get(API + path, params=params, timeout=9)
+            if response.status_code == 429:
+                try:
+                    wait = float(response.headers.get('Retry-After', '60'))
+                except (TypeError, ValueError):
+                    wait = 60
+                self.retry_at = time.monotonic() + max(60, min(300, wait))
+                raise RuntimeError(f'Kalshi HTTP 429: pausa de {math.ceil(self.retry_at-time.monotonic())} s')
+            response.raise_for_status()
+            result = response.json()
+        except RequestException as exc:
+            raise RuntimeError(f'Kalshi conexión HTTP: {str(exc)[:150]}') from exc
         if not isinstance(result, dict):
             raise ValueError('Respuesta Kalshi incompleta.')
+        if result.get('error'):
+            raise ValueError('Kalshi: '+str(result.get('message') or result['error'])[:180])
         return result
 
     def current(self):
@@ -1903,6 +1930,194 @@ class PaperBot(Bot):
         result.update(mode='SIMULACIÓN',execution_mode='paper',pending_orders=0,account_balance=None)
         return result
 
+
+
+# ===== CEREBRO MULTICRIPTO · CONTRARIAS BARATAS · SOLO SIMULACIÓN =====
+# Estrategia experimental: no presupone que la minoría vaya a revertirse.
+RADAR_ASSETS = ('BTC','ETH','SOL','XRP','BNB','NEAR')
+RADAR_MAJORITY_COUNT = len(RADAR_ASSETS) // 2 + 1
+RADAR_LIMIT_CENTS = 15
+RADAR_MAJOR_MIN_CENTS = 70
+RADAR_MAX_POSITIONS_PER_ROUND = 2
+RADAR_BUDGET_DOLLARS = 1.0
+
+
+def _radar_asset(m):
+    import re
+    ticker = str(m.get('ticker','')).upper()
+    series = str(m.get('series_ticker','')).upper()
+    name = (series or ticker).replace('-','')
+    for asset in sorted(RADAR_ASSETS, key=len, reverse=True):
+        if re.search(r'KX'+asset+r'15M', name):
+            return asset
+    return None
+
+
+def _radar_open_markets(feed):
+    """Una consulta por serie, espaciada para evitar páginas globales irrelevantes."""
+    now = utcnow()
+    tick = time.monotonic()
+    state = getattr(feed, '_multi_radar_state', None)
+    if state is None:
+        state = {'observations': {}, 'errors': {}, 'next_asset': 0,
+                 'last_request': -1e9, 'last_error': ''}
+        feed._multi_radar_state = state
+
+    # Solo una solicitud cada 4 segundos para recorrer las series en turnos.
+    if tick - state['last_request'] >= 4 and tick >= getattr(feed, 'retry_at', 0):
+        asset = RADAR_ASSETS[state['next_asset'] % len(RADAR_ASSETS)]
+        state['next_asset'] += 1
+        state['last_request'] = tick
+        try:
+            # Los filtros por serie evitan que una respuesta global paginada
+            # deje fuera todas las criptomonedas.
+            data = feed.get('/markets', {
+                'series_ticker': 'KX' + asset + '15M',
+                'status': 'open',
+                'limit': 100,
+            })
+            found = None
+            for m in data.get('markets', []):
+                if _radar_asset(m) != asset:
+                    continue
+                try:
+                    end = datetime.fromisoformat(str(m['close_time']).replace('Z', '+00:00'))
+                    left = (end - now).total_seconds()
+                    if not (0 < left <= 900):
+                        continue
+                    ya, na = get_yes_ask(m), get_no_ask(m)
+                    if ya is None or na is None or not (0 < ya <= 1 and 0 < na <= 1):
+                        continue
+                    row = {
+                        'asset': asset, 'ticker': m['ticker'], 'market': m,
+                        'yes_cents': round(100 * ya, 2),
+                        'no_cents': round(100 * na, 2),
+                        'seconds_left': round(left),
+                        'favorite': 'UP' if ya >= na else 'DOWN',
+                        '_seen': tick,
+                    }
+                    if found is None or row['seconds_left'] < found['seconds_left']:
+                        found = row
+                except (KeyError, ValueError, TypeError, OverflowError):
+                    continue
+            if found:
+                state['observations'][asset] = found
+                state['errors'].pop(asset, None)
+            else:
+                state['observations'].pop(asset, None)
+                state['errors'][asset] = 'Sin ronda activa cotizada en KX' + asset + '15M'
+            state['last_error'] = ''
+        except Exception as exc:
+            state['errors'][asset] = str(exc)[:180]
+            state['last_error'] = str(exc)[:180]
+
+    rows, missing = [], {}
+    for asset in RADAR_ASSETS:
+        item = state['observations'].get(asset)
+        age = tick - item['_seen'] if item else float('inf')
+        # Vigencia estricta: si no se ha renovado en 45 s, no puede operar.
+        if item and age <= 45 and item['seconds_left'] - age > 0:
+            row = dict(item)
+            row['seconds_left'] = max(0, round(item['seconds_left'] - age))
+            rows.append(row)
+        else:
+            missing[asset] = state['errors'].get(asset, 'Pendiente de consulta escalonada')
+    return rows, missing
+
+
+def _radar_decision(rows):
+    # Dirección mayoritaria = resultado con ask alto en la mayoría de monedas.
+    # Ask alto es proxy imperfecto, no una probabilidad calibrada.
+    up = sum(r['yes_cents'] >= RADAR_MAJOR_MIN_CENTS for r in rows)
+    down = sum(r['no_cents'] >= RADAR_MAJOR_MIN_CENTS for r in rows)
+    majority = None
+    if len(rows) == len(RADAR_ASSETS):
+        if up > down and up >= RADAR_MAJORITY_COUNT:
+            majority = 'UP'
+        elif down > up and down >= RADAR_MAJORITY_COUNT:
+            majority = 'DOWN'
+    candidates = []
+    if majority:
+        for r in rows:
+            # El contrato del lado mayoritario debe estar barato en esta moneda.
+            cheap = r['yes_cents'] if majority == 'UP' else r['no_cents']
+            other = r['no_cents'] if majority == 'UP' else r['yes_cents']
+            if cheap <= RADAR_LIMIT_CENTS and other >= RADAR_MAJOR_MIN_CENTS:
+                candidates.append({**r,'buy_side':majority,'entry_ask_cents':cheap})
+    candidates.sort(key=lambda x:(x['entry_ask_cents'],x['seconds_left']))
+    return majority, up, down, candidates
+
+
+def _paper_multicrypto_step(self):
+    if time.monotonic() >= getattr(self.feed,'retry_at',0):
+        self.settle()
+    with self.lock:
+        positions = self.positions()
+    # Salidas: la prueba de reversión mantiene la apuesta hasta liquidación.
+    # No liquidar virtualmente con cotizaciones intermedias ni señales BTC.
+    try:
+        rows, missing = _radar_open_markets(self.feed)
+    except Exception as exc:
+        with self.lock:
+            self.snapshot.update(status='SIN DATOS',message='Radar Kalshi: '+str(exc),
+                                 radar=[],radar_candidates=[],radar_majority=None,radar_missing={})
+        return
+    majority, up, down, candidates = _radar_decision(rows)
+    notes = []
+    if self.running and not self.close_requested and majority:
+        # Máximo 2 entradas por ronda temporal, no por moneda.
+        active_round = tuple(sorted((r['market'].get('close_time','') for r in rows)))
+        key = str(max(active_round)) if active_round else ''
+        with self.lock:
+            existing = self.db.execute('SELECT COUNT(*) FROM trades WHERE opened IS NOT NULL AND ticker IN ('+
+                ','.join('?' for _ in rows)+')',tuple(r['ticker'] for r in rows)).fetchone()[0] if rows else 0
+        for item in candidates:
+            if time.monotonic()-item.get('_seen',0) > 12: continue
+            if existing >= RADAR_MAX_POSITIONS_PER_ROUND: break
+            with self.lock:
+                if any(p['ticker']==item['ticker'] for p in self.positions()):continue
+                if self.db.execute('SELECT 1 FROM trades WHERE ticker=?',(item['ticker'],)).fetchone():continue
+                if self.totals()['cash'] < RADAR_BUDGET_DOLLARS:break
+            try:
+                # Confirmar mercado y ask justo antes de entrar; nunca precio cacheado.
+                market = self.feed.get('/markets/'+quote(item['ticker'],safe=''))['market']
+                rem = get_seconds_remaining(market)
+                if rem is None or rem <= 0 or market.get('status') not in ('open','active'):continue
+                fresh = get_yes_ask(market) if majority=='UP' else get_no_ask(market)
+                if fresh is None or fresh*100 > RADAR_LIMIT_CENTS:continue
+                book = self.feed.book(item['ticker'])
+                if time.monotonic()-book['at'] > 5:continue
+                qty_price = size_for_budget(book[majority]['asks'],RADAR_BUDGET_DOLLARS,
+                                             self.settings['fee_cents_per_contract'],RADAR_LIMIT_CENTS)
+                if not qty_price:continue
+                qty,price = qty_price
+                fee = qty*self.settings['fee_cents_per_contract']/100
+                with self.lock:
+                    if self.db.execute('SELECT 1 FROM trades WHERE ticker=?',(item['ticker'],)).fetchone():continue
+                    if self.totals()['cash'] + 1e-8 < qty*price/100+fee:continue
+                    self.db.execute("INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened, tp_pct,sl_pct,reverse,entry_evidence) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (item['ticker'],majority,qty,price,fee,stamp(),0,0,0,
+                          dumps({'strategy':'MULTICRYPTO_MINORIAS','asset':item['asset'],
+                                 'majority':majority,'up_count':up,'down_count':down,
+                                 'budget_usd':RADAR_BUDGET_DOLLARS,'mode':'paper'})))
+                    self.db.commit()
+                    self.event('ENTRADA RADAR VIRTUAL',f"{item['asset']} {majority} · {qty} contratos a {price:.2f}¢ · sin dinero real")
+                    existing += 1
+                    notes.append(f"{item['asset']} {majority} {price:.1f}¢")
+            except Exception as exc:
+                notes.append(f"{item['asset']}: sin entrada ({type(exc).__name__})")
+    with self.lock:
+        self.snapshot.update(status='ACTIVO' if rows else 'SIN DATOS',
+            message=(f"RADAR {len(rows)}/{len(RADAR_ASSETS)} · mayoría {majority or ('DATOS INSUFICIENTES' if len(rows)<len(RADAR_ASSETS) else 'SIN CONSENSO')} · "
+                     f"UP fuertes {up}, DOWN fuertes {down} · "
+                     + ('Entradas: '+', '.join(notes) if notes else 'Observando contratos baratos')),
+            market=rows[0]['market'] if rows else None,
+            signal=None,radar=[{k:v for k,v in r.items() if k not in ('market','_seen')} for r in rows],
+            radar_candidates=[{k:v for k,v in r.items() if k not in ('market','_seen')} for r in candidates],
+            radar_majority=majority,radar_up=up,radar_down=down,radar_missing=missing,updated=stamp())
+
+# El modo virtual usa exclusivamente el cerebro multimoneda.
+PaperBot.step = _paper_multicrypto_step
 
 def _connect_kalshi(controller,payload):
     raise ValueError("Versión de simulación: conexión para operar con dinero real desactivada.")
@@ -2600,7 +2815,7 @@ def _runtime_registry():
 def _shared_runtime_bot(paper_mode):
     db=Path(os.environ.get('ALPHA_DB',ROOT/'data'/'alpha.sqlite3'))
     if paper_mode:
-        db=db.with_name(db.stem+'_paper_app84'+db.suffix)
+        db=db.with_name(db.stem+'_paper_multicrypto_v1'+db.suffix)
     db=db.resolve()
     key=str(db)
     registry=_runtime_registry()
@@ -2718,7 +2933,7 @@ def streamlit_main():
     if not index.exists():index.write_text(_TERMINAL_HTML,encoding='utf-8')
     terminal=components.declare_component('alpha_edge_terminal',path=str(directory))
 
-    @st.fragment(run_every=2)
+    @st.fragment(run_every=5)
     def live_terminal():
         _auto_connect_saved(controller,saved_credentials)
         event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
@@ -2730,6 +2945,41 @@ def streamlit_main():
                 st.session_state.alpha_reply=reply
                 st.rerun()
     live_terminal()
+
+    @st.fragment(run_every=20)
+    def multicrypto_radar_view():
+        snap=controller.snapshot()
+        st.markdown('### 🧠 CEREBRO MULTICRIPTO · SIMULACIÓN')
+        st.caption('ESPERANDO significa que no hay señal o cotizaciones verificadas; no es una compra.')
+        st.caption(
+            f"Panel cada 20 segundos · {len(RADAR_ASSETS)} monedas ({', '.join(RADAR_ASSETS)}) · "
+            f"consenso ≥{RADAR_MAJORITY_COUNT} con ask ≥{RADAR_MAJOR_MIN_CENTS}¢ · "
+            f"minorías ≤{RADAR_LIMIT_CENTS}¢ · máximo {RADAR_MAX_POSITIONS_PER_ROUND} entradas "
+            f"virtuales de ${RADAR_BUDGET_DOLLARS:g} por ronda. Se mantienen hasta liquidación."
+        )
+        st.write(snap.get('message','Esperando primera lectura'))
+        missing=snap.get('radar_missing') or {}
+        if missing:
+            st.warning('Mercados sin datos (no se harán entradas): '+', '.join(f'{a}: {reason}' for a,reason in missing.items()))
+        data=snap.get('radar') or []
+        if data:
+            st.dataframe([{'Moneda':r['asset'],'SÍ ask (¢)':r['yes_cents'],
+                          'NO ask (¢)':r['no_cents'],
+                          'Favorito':'SÍ' if r['yes_cents'] > r['no_cents'] else 'NO',
+                          'Segundos':r['seconds_left']} for r in data],
+                         use_container_width=True,hide_index=True)
+        else:
+            st.info('Esperando mercados de 15 minutos verificables en la API pública de Kalshi. No se simulan entradas sin datos reales.')
+        choices=snap.get('radar_candidates') or []
+        if choices:
+            st.write('**Candidatas baratas:** '+', '.join(f"{r['asset']} {r['buy_side']} {r['entry_ask_cents']:.1f}¢" for r in choices))
+        history=[r for r in (snap.get('trades') or []) if 'MULTICRYPTO_MINORIAS' in str(r.get('entry_evidence',''))]
+        if history:
+            won=sum(1 for r in history if r.get('closed') and (r.get('pnl') or 0)>0)
+            lost=sum(1 for r in history if r.get('closed') and (r.get('pnl') or 0)<=0)
+            pnl=sum(r.get('pnl') or 0 for r in history if r.get('closed'))
+            st.caption(f'Prueba: {won} ganadas · {lost} perdidas · {sum(not bool(r.get("closed")) for r in history)} abiertas · resultado neto ${pnl:.2f}')
+    multicrypto_radar_view()
 
 if __name__=='__main__':
     from streamlit.runtime.scriptrunner import get_script_run_ctx
