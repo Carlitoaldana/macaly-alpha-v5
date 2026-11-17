@@ -4,38 +4,22 @@ import json
 from urllib.request import Request, urlopen
 from urllib.parse import urlencode
 
-from urllib.error import HTTPError, URLError
-
-class RequestException(Exception):
-    """Error de red compatible con el manejo de excepciones existente."""
-
 class Response:
-    def __init__(self, data, status_code=200, headers=None):
+    def __init__(self, data):
         self.data = data
-        self.status_code = status_code
-        self.headers = headers or {}
     def raise_for_status(self):
-        if self.status_code >= 400:
-            raise RequestException(f"HTTP {self.status_code}")
+        pass  # urlopen has already rejected non-2xx responses.
     def json(self):
         return self.data
 
 class requests:
-    RequestException = RequestException
-
     @staticmethod
     def get(url, params=None, headers=None, timeout=8):
         if params:
             url += ('&' if '?' in url else '?') + urlencode(params)
         req = Request(url, headers=headers or {'User-Agent': 'AlphaEdge/1.0'}, method='GET')
-        try:
-            with urlopen(req, timeout=timeout) as response:
-                return Response(json.load(response), response.status, dict(response.headers))
-        except HTTPError as exc:
-            # Conservar 429 y Retry-After para que el motor aplique backoff.
-            return Response({}, exc.code, dict(exc.headers or {}))
-        except (URLError, TimeoutError, OSError) as exc:
-            raise RequestException(str(exc)) from exc
+        with urlopen(req, timeout=timeout) as response:
+            return Response(json.load(response))
 
 import math
 import numpy as np
@@ -1145,24 +1129,28 @@ import json
 import math
 import os
 from pathlib import Path
-import secrets
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit, quote
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from concurrent.futures import ThreadPoolExecutor
+from statistics import median
+from email.utils import parsedate_to_datetime
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
 API = 'https://external-api.kalshi.com/trade-api/v2'
+DEFAULT_RADAR_ENTRY_CENTS = 15
 DEFAULTS = dict(contracts=1, max_entry_cents=60,
                 take_profit_pct=90, stop_loss_pct=10,
                 max_entries_round=1, daily_goal_dollars=50,
                 max_trade_dollars=10, starting_balance=50,
-                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10)
+                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10,
+                radar_budget_dollars=1, radar_stop_profit_cents=90,
+                radar_entry_limit_cents=DEFAULT_RADAR_ENTRY_CENTS)
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -1194,17 +1182,24 @@ def valid_settings(raw):
               'max_entries_round':(1,100),
               'daily_goal_dollars':(0,100000),
               'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
-              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100)}
+              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
+              'radar_budget_dollars':(0.01,100000), 'radar_stop_profit_cents':(0,100),
+              'radar_entry_limit_cents':(1,99)}
+    dollar_fields = {'max_trade_dollars', 'radar_budget_dollars'}
     out = {}
     for key, (low, high) in bounds.items():
         v = raw[key]
-        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (key != 'max_trade_dollars' and int(v) != v) or not low <= v <= high:
+        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (key not in dollar_fields and int(v) != v) or not low <= v <= high:
             raise ValueError(f'Valor inválido para {key}: {low}–{high}.')
-        out[key] = round(float(v), 2) if key == 'max_trade_dollars' else int(v)
+        out[key] = round(float(v), 2) if key in dollar_fields else int(v)
     if not isinstance(raw['close_on_reverse'], bool):
         raise ValueError('El cierre por cambio de señal debe ser sí o no.')
     out['close_on_reverse'] = raw['close_on_reverse']
     return out
+
+class KalshiReadError(ValueError):
+    """Error legible de la API pública de Kalshi."""
+
 
 class MarketData:
     def __init__(self):
@@ -1212,30 +1207,56 @@ class MarketData:
         self.candle_at = 0
         self.market = None
         self.retry_at = 0
+        self.rate_failures = 0
+        self.retry_lock = threading.Lock()
 
     def get(self, path, params=None):
-        # Backoff real ante HTTP 429; nunca convertir el bloqueo en un ValueError genérico.
-        remaining = self.retry_at - time.monotonic()
-        if remaining > 0:
-            raise RuntimeError(f'Kalshi HTTP 429: pausa de {math.ceil(remaining)} s')
+        with self.retry_lock:
+            delay = self.retry_at - time.monotonic()
+            if delay > 0:
+                raise KalshiReadError(f'Kalshi HTTP 429 · reintento en {math.ceil(delay)} s.')
         try:
-            response = requests.get(API + path, params=params, timeout=9)
-            if response.status_code == 429:
+            result = requests.get(API + path, params=params, timeout=9,
+                                  headers={'User-Agent': 'AlphaEdge/1.0', 'Cache-Control': 'no-cache'}).json()
+        except HTTPError as exc:
+            if exc.code != 429:
+                raise KalshiReadError(f'Kalshi HTTP {exc.code} en {path}.') from exc
+            header = (exc.headers or {}).get('Retry-After')
+            try:
+                requested = float(header)
+            except (TypeError, ValueError):
                 try:
-                    wait = float(response.headers.get('Retry-After', '60'))
-                except (TypeError, ValueError):
-                    wait = 60
-                self.retry_at = time.monotonic() + max(60, min(300, wait))
-                raise RuntimeError(f'Kalshi HTTP 429: pausa de {math.ceil(self.retry_at-time.monotonic())} s')
-            response.raise_for_status()
-            result = response.json()
-        except RequestException as exc:
-            raise RuntimeError(f'Kalshi conexión HTTP: {str(exc)[:150]}') from exc
+                    requested = (parsedate_to_datetime(header) - utcnow()).total_seconds() if header else 0
+                except (TypeError, ValueError, OverflowError):
+                    requested = 0
+            if not math.isfinite(requested):
+                requested = 0
+            with self.retry_lock:
+                now = time.monotonic()
+                if now >= self.retry_at:
+                    self.rate_failures += 1
+                delay = max(requested, min(120, 8 * 2 ** min(4, self.rate_failures - 1)))
+                self.retry_at = max(self.retry_at, now + delay)
+            raise KalshiReadError(f'Kalshi HTTP 429 · reintento en {math.ceil(delay)} s.') from exc
+        except (URLError, OSError) as exc:
+            reason = getattr(exc, 'reason', exc)
+            raise KalshiReadError(f'Error de conexión con Kalshi ({type(reason).__name__}): {reason}') from exc
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise KalshiReadError('Kalshi devolvió una respuesta que no es JSON válido.') from exc
         if not isinstance(result, dict):
-            raise ValueError('Respuesta Kalshi incompleta.')
-        if result.get('error'):
-            raise ValueError('Kalshi: '+str(result.get('message') or result['error'])[:180])
+            raise KalshiReadError('Kalshi devolvió un formato inesperado.')
         return result
+
+    def acknowledge_poll(self):
+        with self.retry_lock:
+            if time.monotonic() >= self.retry_at:
+                self.rate_failures = 0
+
+    def market_by_ticker(self, ticker):
+        market = self.get('/markets/' + quote(ticker, safe='')).get('market')
+        if not isinstance(market, dict) or market.get('ticker') != ticker:
+            raise KalshiReadError(f'Respuesta sin el mercado solicitado: {ticker}.')
+        return market
 
     def current(self):
         now = utcnow()
@@ -1287,30 +1308,43 @@ class MarketData:
         return sig
 
     def book(self, ticker):
+        requested_at = time.monotonic()
         data = self.get('/markets/'+quote(ticker,safe='')+'/orderbook',{'depth':0})
         if 'orderbook_fp' in data:
             b = data['orderbook_fp']
+            if not isinstance(b, dict):
+                raise ValueError('Libro de órdenes incompleto.')
             yes = self._levels(b.get('yes_dollars'), dollar=True)
             no = self._levels(b.get('no_dollars'), dollar=True)
         elif 'orderbook' in data:
             b = data['orderbook']
+            if not isinstance(b, dict):
+                raise ValueError('Libro de órdenes incompleto.')
             yes = self._levels(b.get('yes'), dollar=False)
             no = self._levels(b.get('no'), dollar=False)
         else:
             raise ValueError('Libro de órdenes no reconocido.')
-        return {'UP':{'bids':yes,'asks':sorted([(100-p,q) for p,q in no])},
-                'DOWN':{'bids':no,'asks':sorted([(100-p,q) for p,q in yes])},
-                'at':time.monotonic(), 'ticker':ticker}
+        return {'UP':{'bids':yes,'asks':sorted([(float(100 - Decimal(str(p))), q) for p, q in no])},
+                'DOWN':{'bids':no,'asks':sorted([(float(100 - Decimal(str(p))), q) for p, q in yes])},
+                'at':requested_at, 'ticker':ticker}
 
     @staticmethod
     def _levels(levels, dollar):
         if levels is None:
             return []
         out = []
-        for price, qty in levels:
-            p = float(Decimal(str(price))*(100 if dollar else 1))
-            q = float(qty)
-            if not math.isfinite(p) or not math.isfinite(q) or not 0 <= p <= 100 or q < 0:
+        if not isinstance(levels, list):
+            raise ValueError('Formato de profundidad inválido.')
+        for level in levels:
+            if not isinstance(level, (tuple, list)) or len(level) != 2:
+                raise ValueError('Nivel de profundidad inválido.')
+            price, qty = level
+            try:
+                p = float(Decimal(str(price)) * (100 if dollar else 1))
+                q = float(qty)
+            except (InvalidOperation, TypeError, ValueError):
+                raise ValueError('Precio o tamaño inválido en el libro.') from None
+            if not math.isfinite(p) or not math.isfinite(q) or not 0 < p < 100 or q < 0:
                 raise ValueError('Profundidad inválida.')
             if q:
                 out.append((p,q))
@@ -1329,7 +1363,7 @@ def fill_book(levels, quantity, limit=None):
             return total/quantity
     return None
 
-def size_for_budget(levels, dollars, fee_cents, limit):
+def size_for_budget(levels, dollars, fee_cents, limit, *, allow_partial=False):
     remaining = Decimal(str(dollars)) * 100
     fee = Decimal(str(fee_cents))
     quantity = 0
@@ -1356,7 +1390,7 @@ def size_for_budget(levels, dollars, fee_cents, limit):
         if take < available:
             break
     else:
-        if last_unit is not None and remaining >= last_unit:
+        if not allow_partial and last_unit is not None and remaining >= last_unit:
             return None
     if quantity == 0:
         return None
@@ -1392,7 +1426,7 @@ class Bot:
         self.db.commit()
         self.running = False
         self.close_requested = False
-        self.snapshot = {'status':'INICIANDO','message':'Esperando la primera lectura verificada.', 'mode':'REAL', 'signal':None}
+        self.snapshot = {'status':'INICIANDO','message':'Esperando la primera lectura verificada.', 'mode':'SIMULACIÓN', 'signal':None}
         self.thread = None
         self.event('SISTEMA','Servidor iniciado. Nuevas entradas pausadas; salidas siguen vigiladas.')
 
@@ -1413,19 +1447,21 @@ class Bot:
             merged = dict(self.settings)
             merged.update(raw)
             settings = valid_settings(merged)
-            account_message=''
-            if settings['starting_balance'] != self.settings['starting_balance']:
-                if self.running or self.positions():
-                    raise ValueError('Para empezar con otro capital, pausa las entradas y espera a que no haya posición abierta. No se borrará el historial.')
-                previous=self.totals()
-                baseline=self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
-                self.put('account_start_id',baseline)
-                account_message=f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
-            self.settings=settings
-            self.put('settings',settings)
-            self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
-                            (settings['take_profit_pct'],))
-            self.event('AJUSTES',account_message+'Ajustes guardados. Meta de ganancia acumulada; Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
+            account_message = ''
+            with self.db:
+                if settings['starting_balance'] != self.settings['starting_balance']:
+                    if self.running or self.positions():
+                        raise ValueError('Para empezar con otro capital, pausa las entradas y espera a que no haya posición abierta. No se borrará el historial.')
+                    previous = self.totals()
+                    baseline = self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
+                    self.put('account_start_id', baseline)
+                    account_message = f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
+                self.put('settings', settings)
+                self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
+                                (settings['take_profit_pct'],))
+                self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
+                                (stamp(), 'AJUSTES', account_message + 'Ajustes guardados y aplicados.'))
+            self.settings = settings
 
     def command(self,name):
         with self.lock:
@@ -1444,7 +1480,7 @@ class Bot:
                                  'close':'Cierre solicitado; esperando liquidez actual. Entradas pausadas.'}[name])
 
     def positions(self):
-        if not isinstance(self,(ConnectedBot,PaperBot)):return []
+        if not isinstance(self, PaperBot):return []
         return [dict(r) for r in self.db.execute('SELECT * FROM trades WHERE closed IS NULL')]
 
     def totals(self):
@@ -1460,23 +1496,8 @@ class Bot:
                     accumulated=round(realized-sum(r['entry_fee'] for r in rows if not r['closed']),4),
                     account_start_id=baseline, target_balance=round(self.settings['starting_balance']+self.settings['daily_goal_dollars'],4),
                     completed=sum(bool(r['closed']) for r in rows), wins=sum((r['pnl'] or 0)>0 for r in rows),
+                    losses=sum((r['pnl'] or 0)<0 for r in rows),
                     open_cost=round(sum(r['entry']*r['quantity']/100 for r in rows if not r['closed']),4))
-
-    def _close(self, *args, **kwargs):
-        raise ValueError("Conecta la cuenta REAL de Kalshi antes de operar.")
-
-    def settle(self):
-        with self.lock:
-            positions=self.positions()
-        for p in positions:
-            try:
-                m=self.feed.get('/markets/'+quote(p['ticker'],safe=''))['market']
-                if m.get('status')=='finalized' and m.get('result') in ('yes','no') and not m.get('is_provisional',False):
-                    won=(p['side']=='UP')==(m['result']=='yes')
-                    with self.lock:
-                        self._close(p,100 if won else 0,'LIQUIDACIÓN OFICIAL',True)
-            except Exception:
-                continue
 
     def _arm_take_profit(self, p, market, book=None):
         """Dispara automáticamente el Take Profit en cuanto el porcentaje en Kalshi alcanza el objetivo."""
@@ -1526,100 +1547,15 @@ class Bot:
         if reason:
             self._close(p,price,reason)
 
-    def enter(self,market,book,side,remaining,signal=None):
-        if not isinstance(self,(ConnectedBot,PaperBot)):
-            return 'Lectura activa · conecta una cuenta solo para operar en real.'
-        s=self.settings
-        if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
-            return 'Entradas pausadas o posición en gestión.'
-        if not signal or signal.get('data_valid') is not True or signal.get('candidate') != side:
-            return 'Esperando respaldo actual para una compra nueva.'
-        routes=engine._entry_route_checks(signal,engine.get_seconds_remaining(market))
-        if not routes.get('valid') or not any(r['complete'] for r in routes.get('sides',{}).get(side,[])):
-            return 'La señal ya no cumple los requisitos actuales de entrada.'
-        if book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
-            return 'Libro atrasado; esperando datos actuales.'
-        actual=engine.get_seconds_remaining(market)
-        if actual is None or actual<=0:return 'Fuera de ventana de entrada.'
-        total=self.totals()
-        if s['daily_goal_dollars'] and total['accumulated']>=s['daily_goal_dollars']:
-            return 'Meta de ganancia acumulada alcanzada.'
-        count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
-        if count>=s['max_entries_round']:return 'Máximo de entradas de esta ronda alcanzado.'
-        budget=float((Decimal(str(max(0.0,total['cash'])))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
-        if budget<=0:return 'Saldo disponible agotado.'
-        sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
-        if sized is None:return 'Sin liquidez suficiente para el importe configurado dentro del precio máximo.'
-        quantity,price=sized
-        fee=quantity*s['fee_cents_per_contract']/100
-        cost=price*quantity/100+fee
-        if cost>budget+1e-8 or cost>total['cash']+1e-8:return 'La compra supera el importe o el saldo disponible.'
-        return self._execute_entry(market,book,side,quantity,price,fee,cost,signal,routes)
-
-    def _execute_entry(self, *args, **kwargs):
-        raise ValueError("Conecta la cuenta REAL de Kalshi antes de operar.")
-
-    def step(self):
-        self.settle()
-        with self.lock:
-            old_positions=self.positions()
-        for p in old_positions:
-            try:
-                m=self.feed.get('/markets/'+quote(p['ticker'],safe=''))['market']
-                rem=engine.get_seconds_remaining(m)
-                if m.get('status') in ('active','open') and rem is not None and rem>0:
-                    with self.lock:
-                        b=self.feed.book(p['ticker'])
-                    with self.lock:
-                        self._arm_take_profit(p,m,b)
-                        self.manage(p,b,None,engine.get_seconds_remaining(m))
-            except Exception as exc:
-                with self.lock:
-                    self.event('ERROR DE SALIDA', f"#{p['id']} {p['side']} · {type(exc).__name__}: {exc}")
-        market=self.feed.current()
-        sig=self.feed.signal(market)
-        signal_at=time.monotonic()
-        book=self.feed.book(market['ticker'])
-        remaining=engine.get_seconds_remaining(market)
-        if remaining is None or remaining<=0 or time.monotonic()-signal_at>5:
-            raise ValueError('Lectura vencida durante la consulta; esperando ronda actual.')
-        with self.lock:
-            row=self.db.execute('SELECT state FROM rounds WHERE ticker=?',(market['ticker'],)).fetchone()
-            state=json.loads(row[0]) if row else engine.new_round_state(market['ticker'],remaining)
-            if state.get('engine_revision') != SIGNAL_ENGINE_REVISION:
-                # Old strategy confirmations cannot authorize a new-strategy
-                # purchase. Trade counts, open positions and their exits stay intact.
-                state = engine.new_round_state(market['ticker'], remaining)
-                state['engine_revision'] = SIGNAL_ENGINE_REVISION
-            engine._confirmation_without_trace(state,sig.get('candidate'),market,remaining,utcnow(),sig)
-            self.db.execute('INSERT OR REPLACE INTO rounds VALUES (?,?)',(market['ticker'],dumps(state)))
-            self.db.commit()
-            active=state.get('active_direction')
-            had_position=bool(self.positions())
-            for p in self.positions():
-                if p['ticker']==market['ticker']:
-                    self._arm_take_profit(p,market,book)
-                    self.manage(p,book,active,remaining)
-            message=self.enter(market,book,active,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
-            if not self.positions() and self.close_requested:
-                self.close_requested=False
-            if active is None:
-                message=state.get('opening_conflict') or 'El cerebro todavía no confirma una dirección.'
-            self.snapshot={'status':'ACTIVO' if self.running else 'PAUSADO','message':message,
-                           'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
-                           'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
-                           'price':sig['price'],'source':sig['price_source'],'quality':sig['quality'],
-                           'rsi':sig['rsi'],'ema':sig['ema'],'metrics':clean_json(sig),'updated':stamp(),
-                           'book':book,'target':engine.get_target_from_market(market),
-                           'retention':state.get('retention_warning')}
-
     def loop(self):
         while not self.stop_event.is_set():
             try:
                 self.step()
             except Exception as e:
                 with self.lock:
-                    self.snapshot.update(status='SIN DATOS',message=f'{type(e).__name__}: {e}',signal=None)
+                    self.snapshot.update(status='SIN DATOS', message=f'{type(e).__name__}: {e}',
+                                         radar_summary=f'Error del motor: {type(e).__name__}: {e}',
+                                         radar_count=0, signal=None)
             self.stop_event.wait(2)
 
     def start_worker(self):
@@ -1629,7 +1565,7 @@ class Bot:
                 return
             if self.stop_event.is_set():
                 return
-            self.thread=threading.Thread(target=self.loop,name='alpha-real-worker',daemon=True)
+            self.thread=threading.Thread(target=self.loop,name='alpha-radar-worker',daemon=True)
             self.thread.start()
 
     def view(self):
@@ -1644,546 +1580,424 @@ class Bot:
             return clean_json(result)
 
 
-class KalshiAPIError(ValueError):
-    def __init__(self, code):
-        self.code=code
-        super().__init__('Kalshi limita las consultas (HTTP 429). Se esperará antes de reintentar; no necesitas generar otra clave por este error.' if code==429 else f'Kalshi respondió HTTP {code}. Revisa permisos, entorno y disponibilidad de la API.')
+CORE_SERIES_15M = {
+    'BTC': 'KXBTC15M', 'ETH': 'KXETH15M', 'XRP': 'KXXRP15M',
+    'SOL': 'KXSOL15M',
+}
+EXTRA_SERIES_15M = {
+    'DOGE': 'KXDOGE15M',
+}
+SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
+RADAR_REVISION = 'radar-5x15-v8'
+DIRECTION_MIN = 3
+ROUND_LIMIT = 2
+QUOTE_MAX_AGE = 25
 
 
-class KalshiAccount:
-    BASES={'live':'https://external-api.kalshi.com/trade-api/v2'}
-    def __init__(self,environment,key_id,pem,transport=None):
-        try:
-            from cryptography.hazmat.primitives import serialization
-            from cryptography.hazmat.primitives.asymmetric import rsa,ed25519
-        except ImportError:
-            raise ValueError('Falta la dependencia cryptography en el servidor. Añade cryptography>=43,<47 a requirements.txt y vuelve a desplegar la app.') from None
-        if environment not in self.BASES:raise ValueError('Selecciona REAL para conectar tu cuenta de Kalshi.')
-        if not isinstance(key_id,str) or not key_id.strip() or len(key_id)>200:raise ValueError('API Key ID inválido.')
-        if not isinstance(pem,str) or not pem.strip() or len(pem)>16000:raise ValueError('Clave PEM inválida.')
-        try:self._key=serialization.load_pem_private_key(pem.strip().encode(),password=None)
-        except Exception:raise ValueError('La clave privada no es un PEM válido sin contraseña.') from None
-        if not isinstance(self._key,(rsa.RSAPrivateKey,ed25519.Ed25519PrivateKey)):raise ValueError('La API requiere RSA o Ed25519.')
-        self.environment=environment;self._key_id=key_id.strip();self._transport=transport
-        self._balance_lock=threading.RLock();self._request_lock=threading.RLock()
-        self._balance_value=None;self._balance_time=0;self.retry_at=0
-        self.identity=hashlib.sha256((environment+':'+self._key_id).encode()).hexdigest()[:24]
-    def request(self,method,path,params=None,body=None):
-        with self._request_lock:
-            if time.monotonic()<self.retry_at:
-                raise ValueError(f'Kalshi limita las consultas (HTTP 429). Espera {math.ceil(self.retry_at-time.monotonic())} segundos antes de reintentar.')
+def market_time(value):
+    if not isinstance(value, str):
+        raise ValueError('Fecha de mercado ausente.')
+    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if parsed.tzinfo is None:
+        raise ValueError('Fecha de mercado sin zona horaria.')
+    return parsed.astimezone(timezone.utc)
+
+
+def quote_cents(market, key):
+    dollars = market.get(key + '_dollars')
+    try:
+        value = Decimal(str(dollars if dollars is not None else market.get(key)))
+    except InvalidOperation:
+        raise ValueError(f'Falta cotización {key}.') from None
+    if dollars is not None:
+        value *= 100
+    if not value.is_finite() or not 0 < value < 100:
+        raise ValueError(f'Cotización {key} fuera del rango negociable.')
+    return value
+
+
+def read_radar_series(feed, asset):
+    series = SERIES_15M[asset]
+    params = {'series_ticker': series, 'status': 'open', 'limit': 10}
+    checked = set()
+    observed_at = time.monotonic()
+    while True:
+        data = feed.get('/markets', params)
+        markets = data.get('markets')
+        if not isinstance(markets, list):
+            raise ValueError('La respuesta de Kalshi no contiene una lista de mercados.')
+        now = utcnow()
+        options = []
+        invalid_schedule = False
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            ticker = market.get('ticker')
+            if (not isinstance(ticker, str) or not ticker.startswith(series + '-') or
+                    market.get('status') not in ('active', 'open')):
+                continue
             try:
-                return self._request_once(method,path,params,body)
-            except KalshiAPIError as exc:
-                if exc.code==429:self.retry_at=time.monotonic()+max(30,getattr(exc,'retry_after',30))
-                raise
-    def _request_once(self,method,path,params=None,body=None):
-        import base64
-        from urllib.error import HTTPError
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import padding,ed25519
-        if not path.startswith('/') or '..' in path or '?' in path:raise ValueError('Ruta de API inválida.')
-        timestamp=str(int(time.time()*1000));signed='/trade-api/v2'+path
-        message=(timestamp+method+signed).encode()
-        signature=(self._key.sign(message) if isinstance(self._key,ed25519.Ed25519PrivateKey) else
-                   self._key.sign(message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=hashes.SHA256().digest_size),hashes.SHA256()))
-        headers={'KALSHI-ACCESS-KEY':self._key_id,'KALSHI-ACCESS-TIMESTAMP':timestamp,
-                 'KALSHI-ACCESS-SIGNATURE':base64.b64encode(signature).decode(),
-                 'Content-Type':'application/json','User-Agent':'JCAlphaEdge/connected'}
-        if self._transport:return self._transport(method,path,params,body,headers)
-        url=self.BASES[self.environment]+path
-        if params:url+='?'+urlencode(params)
-        data=None if body is None else dumps(body).encode()
-        try:
-            with urlopen(Request(url,headers=headers,data=data,method=method),timeout=8) as response:
-                result=json.load(response)
-        except HTTPError as exc:
-            error=KalshiAPIError(exc.code)
-            try:error.retry_after=float(exc.headers.get('Retry-After',30))
-            except (ValueError,TypeError,AttributeError):error.retry_after=30
-            raise error from None
-        except Exception:raise ValueError('Sin respuesta verificable de Kalshi; se comprobará la orden antes de continuar.') from None
-        if not isinstance(result,dict):raise ValueError('Respuesta de API inválida.')
-        return result
-    def pages(self,path,key,params=None):
-        params=dict(params or {});params['limit']=200;items=[]
-        for _ in range(50):
-            data=self.request('GET',path,params)
-            if not isinstance(data.get(key),list):raise ValueError('Respuesta incompleta de Kalshi.')
-            items.extend(data[key]);cursor=data.get('cursor')
-            if not cursor:return items
-            params['cursor']=cursor
-        raise ValueError('Consulta demasiado extensa; no se supone un resultado incompleto.')
-    def balance(self):
-        with self._balance_lock:
-            if self._balance_value is not None and time.monotonic()-self._balance_time<5:
-                return self._balance_value
-            value=_plan_number(self.request('GET','/portfolio/balance').get('balance'))
-            if value is None or value<0:raise ValueError('Saldo de Kalshi no verificable.')
-            self._balance_value=value/100;self._balance_time=time.monotonic()
-            return self._balance_value
-    def order(self,intent):
-        if intent['order_id']:
-            return self.request('GET','/portfolio/orders/'+quote(intent['order_id'],safe=''))['order']
-        for order in self.pages('/portfolio/orders','orders',{'ticker':intent['ticker']}):
-            if order.get('client_order_id')==intent['client_id']:return order
-        return None
+                opened = market_time(market.get('open_time'))
+                close = market_time(market.get('close_time'))
+            except ValueError:
+                invalid_schedule = True
+                continue
+            if opened <= now < close and 0 < (close-now).total_seconds() <= 900:
+                options.append((close, ticker, market))
+        if options:
+            close, ticker, market = min(options, key=lambda x: x[:2])
+            bid = quote_cents(market, 'yes_bid')
+            ask = quote_cents(market, 'yes_ask')
+            no_ask = quote_cents(market, 'no_ask')
+            if bid > ask or no_ask != 100 - bid:
+                raise ValueError('Precios SÍ/NO cruzados o inconsistentes.')
+            return {'asset': asset, 'market': market, 'ticker': ticker, 'close': close,
+                    'at': observed_at, 'yes': (bid + ask) / 2,
+                    'yes_ask': ask, 'no_ask': no_ask}
+        cursor = data.get('cursor')
+        if not cursor:
+            detail = 'Horario inválido en Kalshi.' if invalid_schedule else 'Kalshi no devolvió una ronda activa.'
+            raise ValueError(detail)
+        if not isinstance(cursor, str) or cursor in checked or len(checked) >= 4:
+            raise ValueError('Paginación inesperada en la consulta de rondas.')
+        checked.add(cursor)
+        params['cursor'] = cursor
 
 
-class AccountMarketData(MarketData):
-    def __init__(self,account):
-        super().__init__();self.account=account
-    def get(self,path,params=None):
-        return self.account.request('GET',path,params)
+def round_close(now):
+    return datetime.fromtimestamp((int(now.timestamp()) // 900 + 1) * 900, timezone.utc)
 
 
-class ConnectedBot(Bot):
-    def __init__(self, *args, **kwargs):
-        raise ValueError("Versión de simulación: dinero real desactivado.")
-    """Separate account ledger. Only confirmed exchange fills create/close trades."""
-    def __init__(self,db_path,account):
-        self.account=account;self.account_cash=account.balance();self.balance_at=time.monotonic()
-        super().__init__(db_path,AccountMarketData(account))
-        self.db.execute('''CREATE TABLE IF NOT EXISTS account_orders(
-            client_id TEXT PRIMARY KEY, ticker TEXT NOT NULL, action TEXT NOT NULL,
-            side TEXT NOT NULL, order_id TEXT, status TEXT NOT NULL, plan TEXT NOT NULL,
-            created TEXT NOT NULL)''')
-        self.db.commit()
-    def pending_orders(self):
-        return [dict(r) for r in self.db.execute("SELECT * FROM account_orders WHERE status='pending' ORDER BY rowid")]
-    def totals(self):
-        result=super().totals()
-        result['allocated_cash']=result['cash'];result['account_cash']=self.account_cash
-        result['cash']=max(0,min(result['cash'],self.account_cash))
-        return result
-    def save_settings(self,raw):
-        if self.pending_orders():raise ValueError('Primero se debe confirmar la orden pendiente de Kalshi.')
-        super().save_settings(raw)
-    def command(self,name):
-        if name=='start':
-            self.reconcile_orders()
-            if self.pending_orders():raise ValueError('Hay una orden sin confirmar. El bot la comprobará automáticamente antes de iniciar.')
-            self.account_cash=self.account.balance();self.balance_at=time.monotonic()
-            if self.account_cash<=0:raise ValueError('La cuenta seleccionada no tiene saldo disponible.')
-        super().command(name)
-    def _position_check(self,ticker,expected):
-        rows=self.account.pages('/portfolio/positions','market_positions',{'ticker':ticker})
-        actual=sum(float(r.get('position_fp',r.get('position',0))) for r in rows if r.get('ticker')==ticker)
-        if abs(actual-expected)>1e-6:
-            self.running=False
-            raise ValueError('La posición de Kalshi difiere de la del bot. Entradas pausadas; revisa operaciones manuales en este mercado.')
-        resting=self.account.pages('/portfolio/orders','orders',{'ticker':ticker,'status':'resting'})
-        if resting:raise ValueError('Hay órdenes abiertas en ese mercado; no se mezclan con las órdenes de JC.')
-    def _intent(self,action,side,ticker,count,limit,plan):
-        import uuid
-        if self.pending_orders():raise ValueError('Esperando confirmación de la orden anterior.')
-        client_id=str(uuid.uuid4());yes_price=limit if side=='UP' else 100-limit
-        book_side=('bid' if side=='UP' else 'ask') if action=='buy' else ('ask' if side=='UP' else 'bid')
-        body={'ticker':ticker,'client_order_id':client_id,'side':book_side,
-              'count':format(Decimal(str(count)),'.2f'),'price':format(Decimal(str(yes_price))/100,'.4f'),
-              'time_in_force':'fill_or_kill' if action=='buy' else 'immediate_or_cancel',
-              'self_trade_prevention_type':'taker_at_cross','reduce_only':action=='sell',
-              'cancel_order_on_pause':True}
-        plan={**plan,'body':body}
-        self.db.execute('INSERT INTO account_orders VALUES (?,?,?,?,?,?,?,?)',
-                        (client_id,ticker,action,side,None,'pending',dumps(plan),stamp()))
-        self.db.commit() # Journal BEFORE the only POST: an ambiguous response is never resubmitted.
-        try:
-            reply=self.account.request('POST','/portfolio/events/orders',body=body)
-            oid=reply.get('order_id') or (reply.get('order') or {}).get('order_id')
-            if oid:
-                self.db.execute('UPDATE account_orders SET order_id=? WHERE client_id=?',(oid,client_id));self.db.commit()
-        except KalshiAPIError as exc:
-            if exc.code in (400,401,403,404,422,429):
-                self.db.execute("UPDATE account_orders SET status='rejected' WHERE client_id=?",(client_id,));self.db.commit()
-            raise
-        self.reconcile_orders()
-    def reconcile_orders(self):
-        with self.lock:
-            return self._reconcile_orders_locked()
-    def _reconcile_orders_locked(self):
-        for intent in self.pending_orders():
-            order=self.account.order(intent)
-            if order is None:continue # Unknown is not zero fills. Never issue another order.
-            oid=order.get('order_id')
-            if oid:
-                self.db.execute('UPDATE account_orders SET order_id=? WHERE client_id=?',(oid,intent['client_id']));self.db.commit()
-            if order.get('status') not in ('executed','canceled','cancelled'):continue
-            count=_plan_number(order.get('fill_count_fp',order.get('fill_count')))
-            if count is None or count<0:raise ValueError('Cantidad ejecutada no verificable.')
-            fills=self.account.pages('/portfolio/fills','fills',{'order_id':oid}) if count else []
-            units=Decimal('0');value=Decimal('0');fees=Decimal('0');seen=set()
-            for fill in fills:
-                if fill.get('order_id')!=oid:continue
-                fid=fill.get('fill_id') or fill.get('trade_id')
-                if not fid or fid in seen:continue
-                seen.add(fid)
-                q=Decimal(str(fill.get('count_fp',fill.get('count'))))
-                yes=Decimal(str(fill['yes_price_dollars']))
-                fee=Decimal(str(fill['fee_cost']))
-                if not q.is_finite() or q<=0 or not yes.is_finite() or not 0<=yes<=1 or not fee.is_finite() or fee<0:
-                    raise ValueError('Detalle de ejecución inválido.')
-                units+=q;value+=q*(yes if intent['side']=='UP' else 1-yes);fees+=fee
-            if abs(float(units)-count)>1e-6:continue # Wait for all fills, including partial IOC fills.
-            plan=json.loads(intent['plan'])
-            with self.lock:
-                try:
-                    if count:
-                        price=float(value/units*100)
-                        if intent['action']=='buy':
-                            cur=self.db.execute('''INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse,tp_pct,sl_pct,entry_evidence)
-                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                                (intent['ticker'],intent['side'],count,price,float(fees),intent['created'],0,0,0,
-                                 plan['reverse'],plan['tp_pct'],plan['sl_pct'],dumps({'order_id':oid,'client_order_id':intent['client_id'],'mode':self.account.environment})))
-                        else:
-                            p=self.db.execute('SELECT * FROM trades WHERE id=? AND closed IS NULL',(plan['trade_id'],)).fetchone()
-                            if p is None or count>p['quantity']+1e-6:raise ValueError('Salida no coincide con la posición registrada.')
-                            portion=count/p['quantity'];entry_fee=p['entry_fee']*portion
-                            pnl=float(value)-(p['entry']*count/100)-entry_fee-float(fees)
-                            if count<p['quantity']-1e-6:
-                                cols=[r[1] for r in self.db.execute('PRAGMA table_info(trades)') if r[1]!='id']
-                                rest=dict(p);rest.update(quantity=p['quantity']-count,entry_fee=p['entry_fee']-entry_fee)
-                                self.db.execute('INSERT INTO trades('+','.join(cols)+') VALUES ('+','.join('?' for _ in cols)+')',[rest[k] for k in cols])
-                            self.db.execute('UPDATE trades SET quantity=?,entry_fee=?,exit=?,exit_fee=?,closed=?,reason=?,pnl=? WHERE id=?',
-                                            (count,entry_fee,price,float(fees),stamp(),plan['reason'],pnl,p['id']))
-                        self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
-                                        (stamp(),'KALSHI',f"{intent['action'].upper()} {intent['side']} · {count:g} contrato(s) · {price:.2f}¢ · ejecución confirmada"))
-                    self.db.execute("UPDATE account_orders SET status='confirmed' WHERE client_id=?",(intent['client_id'],))
-                    self.db.commit()
-                except Exception:
-                    self.db.rollback();raise
-    def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
-        if self.pending_orders():return 'Esperando confirmación de Kalshi; no se repite la compra.'
-        self.account_cash=self.account.balance();self.balance_at=time.monotonic()
-        budget=min(self.totals()['cash'],self.account_cash)*self.settings['risk_pct']/100
-        series=self.feed.get('/series/KXBTC15M')['series']
-        event=self.feed.get('/events/'+quote(market['event_ticker'],safe=''))['event']
-        fee_type=event.get('fee_type_override') or series.get('fee_type')
-        mult=event.get('fee_multiplier_override')
-        mult=_plan_number(series.get('fee_multiplier') if mult is None else mult)
-        if fee_type not in ('quadratic','quadratic_with_maker_fees') or mult is None or mult<0:
-            return 'Comisión de este mercado no verificable; no se envía la compra.'
-        limit=int(self.settings['max_entry_cents'])
-        # Conservative fee reserve in addition to the maximum contract price.
-        reserve=.07*mult+.01
-        qty=min(quantity,int(max(0,budget-.01)/(limit/100+reserve)))
-        if qty<1:return 'El porcentaje asignado no alcanza para un contrato y sus comisiones.'
-        self._position_check(market['ticker'],0)
-        fresh=self.feed.book(market['ticker'])
-        if engine.get_seconds_remaining(market)<=0 or time.monotonic()-fresh['at']>5:return 'Ronda o libro vencido.'
-        if fill_book([x for x in fresh[side]['asks'] if x[0]<=limit],qty) is None:return 'Sin liquidez actual dentro del precio máximo.'
-        plan={'reverse':self.settings['close_on_reverse'],'tp_pct':self.settings['take_profit_pct'],
-              'sl_pct':self.settings['stop_loss_pct'],'budget':budget}
-        self._intent('buy',side,market['ticker'],qty,limit,plan)
-        return 'Compra enviada a Kalshi; se registra únicamente lo ejecutado.'
-    def _close(self,p,price,reason,settlement=False):
-        if self.pending_orders():return
-        if settlement:
-            records=self.account.pages('/portfolio/settlements','settlements',{'ticker':p['ticker']})
-            if not any(r.get('ticker')==p['ticker'] for r in records):return
-            # Parent called this only after nonprovisional official yes/no result.
-            pnl=(price-p['entry'])*p['quantity']/100-p['entry_fee']
-            self.db.execute('UPDATE trades SET exit=?,exit_fee=0,closed=?,reason=?,pnl=? WHERE id=? AND closed IS NULL',
-                            (price,stamp(),reason,pnl,p['id']));self.db.commit();return
-        expected=p['quantity']*(1 if p['side']=='UP' else -1)
-        self._position_check(p['ticker'],expected)
-        limit=max(.01,min(99.99,math.floor(price*100)/100))
-        self._intent('sell',p['side'],p['ticker'],p['quantity'],limit,{'trade_id':p['id'],'reason':reason})
-    def step(self):
-        with self.lock:
-            self.reconcile_orders()
-            self.account_cash=self.account.balance();self.balance_at=time.monotonic()
-        super().step()
-    def view(self):
-        result=super().view()
-        if self.pending_orders():result['message']='Orden de Kalshi pendiente de confirmar; no se enviará otra hasta resolverla.'
-        result.update(mode='REAL',
-                      execution_mode=self.account.environment,pending_orders=len(self.pending_orders()),
-                      account_balance=self.account_cash,account_balance_age=max(0,time.monotonic()-self.balance_at))
-        return result
+def valid_radar_rows(rows, now):
+    close = round_close(now)
+    return {asset: row for asset, row in rows.items()
+            if row['close'] == close and time.monotonic() - row['at'] <= QUOTE_MAX_AGE}
 
 
-
-class PaperBot(Bot):
-    """Virtual ledger and public GET-only feed; never owns an account client."""
-    def __init__(self, db_path=None, feed=None):
-        super().__init__(db_path, feed or MarketData())
-        self.snapshot['mode'] = 'SIMULACIÓN'
-
-    def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
-        # Book depth, budget, round limit and fresh UT signal checked by enter().
-        self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp_pct,sl_pct,reverse,entry_evidence) VALUES (?,?,?,?,?,?,?,?,?,?)',
-            (market['ticker'],side,quantity,price,fee,stamp(),self.settings['take_profit_pct'],self.settings['stop_loss_pct'],int(self.settings['close_on_reverse']),dumps({'mode':'paper','brain':SIGNAL_ENGINE_REVISION})))
-        self.event('ENTRADA VIRTUAL',f'{side} · {quantity} contrato(s) · {price:.2f}¢ · saldo virtual')
-        return 'Compra virtual registrada; no se envió ninguna orden.'
-
-    def _close(self,p,price,reason,settlement=False):
-        fee=0 if settlement else self.settings['fee_cents_per_contract']*p['quantity']/100
-        pnl=(price-p['entry'])*p['quantity']/100-p['entry_fee']-fee
-        cur=self.db.execute('UPDATE trades SET exit=?,exit_fee=?,closed=?,reason=?,pnl=? WHERE id=? AND closed IS NULL',
-            (price,fee,stamp(),reason,pnl,p['id']))
-        if cur.rowcount:self.event('SALIDA VIRTUAL',f"#{p['id']} · {reason} · neto virtual ${pnl:.2f}")
-        self.db.commit()
-
-    def view(self):
-        result=super().view()
-        result.update(mode='SIMULACIÓN',execution_mode='paper',pending_orders=0,account_balance=None)
-        return result
+def radar_decision(rows, entry_limit):
+    up = sorted((asset for asset, row in rows.items() if row['yes'] > 50),
+                key=lambda asset: (-rows[asset]['yes'], asset))
+    down = sorted((asset for asset, row in rows.items() if row['yes'] < 50),
+                  key=lambda asset: (rows[asset]['yes'], asset))
+    if len(up) >= DIRECTION_MIN:
+        side, leaders, opposite, ask = 'UP', up[:DIRECTION_MIN], down, 'yes_ask'
+    elif len(down) >= DIRECTION_MIN:
+        side, leaders, opposite, ask = 'DOWN', down[:DIRECTION_MIN], up, 'no_ask'
+    else:
+        return None, [], [], len(up), len(down)
+    candidates = sorted((asset for asset in opposite if rows[asset][ask] <= entry_limit),
+                        key=lambda asset: (rows[asset][ask], asset))
+    return side, leaders, candidates, len(up), len(down)
 
 
-
-# ===== CEREBRO MULTICRIPTO · CONTRARIAS BARATAS · SOLO SIMULACIÓN =====
-# Estrategia experimental: no presupone que la minoría vaya a revertirse.
-RADAR_ASSETS = ('BTC','ETH','SOL','XRP','BNB','NEAR')
-RADAR_MAJORITY_COUNT = len(RADAR_ASSETS) // 2 + 1
-RADAR_LIMIT_CENTS = 15
-RADAR_MAJOR_MIN_CENTS = 70
-RADAR_MAX_POSITIONS_PER_ROUND = 2
-RADAR_BUDGET_DOLLARS = 1.0
-
-
-def _radar_asset(m):
-    import re
-    ticker = str(m.get('ticker','')).upper()
-    series = str(m.get('series_ticker','')).upper()
-    name = (series or ticker).replace('-','')
-    for asset in sorted(RADAR_ASSETS, key=len, reverse=True):
-        if re.search(r'KX'+asset+r'15M', name):
-            return asset
+def read_spot_movement(asset):
+    pair = 'XBTUSD' if asset == 'BTC' else f'{asset}USD'
+    try:
+        data = requests.get('https://api.kraken.com/0/public/OHLC',
+                            params={'pair': pair, 'interval': 1, 'since': int(time.time()) - 1260},
+                            timeout=4).json()
+        if data['error']:
+            return None
+        candles = next(rows for key, rows in data['result'].items() if key != 'last')
+        if len(candles) < 12:
+            return None
+        latest = candles[-1]
+        observed = datetime.fromtimestamp(int(latest[0]), timezone.utc)
+        if not -5 <= (utcnow() - observed).total_seconds() <= 80:
+            return None
+        price = float(latest[4])
+        ranges = []
+        for previous, current in zip(candles[-12:-2], candles[-11:-1]):
+            if int(current[0]) - int(previous[0]) != 60:
+                return None
+            high, low, last_close = float(current[2]), float(current[3]), float(previous[4])
+            ranges.append(max(high - low, abs(high - last_close), abs(low - last_close)))
+        movement = median(ranges)
+        if all(math.isfinite(value) and value > 0 for value in (price, movement)):
+            return price, movement, observed
+    except (OSError, ValueError, TypeError, KeyError, IndexError, StopIteration):
+        pass
     return None
 
 
-def _radar_open_markets(feed):
-    """Una consulta por serie, espaciada para evitar páginas globales irrelevantes."""
-    now = utcnow()
-    tick = time.monotonic()
-    state = getattr(feed, '_multi_radar_state', None)
-    if state is None:
-        state = {'observations': {}, 'errors': {}, 'next_asset': 0,
-                 'last_request': -1e9, 'last_error': ''}
-        feed._multi_radar_state = state
-
-    # Solo una solicitud cada 4 segundos para recorrer las series en turnos.
-    if tick - state['last_request'] >= 4 and tick >= getattr(feed, 'retry_at', 0):
-        asset = RADAR_ASSETS[state['next_asset'] % len(RADAR_ASSETS)]
-        state['next_asset'] += 1
-        state['last_request'] = tick
+def entry_priority(rows, candidates, side, spot, now):
+    """Keep the original order unless every candidate has a comparable estimate."""
+    estimates = {}
+    for asset in candidates:
+        row = rows[asset]
+        market = row['market']
+        reading = spot.get(asset)
         try:
-            # Los filtros por serie evitan que una respuesta global paginada
-            # deje fuera todas las criptomonedas.
-            data = feed.get('/markets', {
-                'series_ticker': 'KX' + asset + '15M',
-                'status': 'open',
-                'limit': 100,
-            })
-            found = None
-            for m in data.get('markets', []):
-                if _radar_asset(m) != asset:
-                    continue
-                try:
-                    end = datetime.fromisoformat(str(m['close_time']).replace('Z', '+00:00'))
-                    left = (end - now).total_seconds()
-                    if not (0 < left <= 900):
-                        continue
-                    ya, na = get_yes_ask(m), get_no_ask(m)
-                    if ya is None or na is None or not (0 < ya <= 1 and 0 < na <= 1):
-                        continue
-                    row = {
-                        'asset': asset, 'ticker': m['ticker'], 'market': m,
-                        'yes_cents': round(100 * ya, 2),
-                        'no_cents': round(100 * na, 2),
-                        'seconds_left': round(left),
-                        'favorite': 'UP' if ya >= na else 'DOWN',
-                        '_seen': tick,
-                    }
-                    if found is None or row['seconds_left'] < found['seconds_left']:
-                        found = row
-                except (KeyError, ValueError, TypeError, OverflowError):
-                    continue
-            if found:
-                state['observations'][asset] = found
-                state['errors'].pop(asset, None)
-            else:
-                state['observations'].pop(asset, None)
-                state['errors'][asset] = 'Sin ronda activa cotizada en KX' + asset + '15M'
-            state['last_error'] = ''
-        except Exception as exc:
-            state['errors'][asset] = str(exc)[:180]
-            state['last_error'] = str(exc)[:180]
-
-    rows, missing = [], {}
-    for asset in RADAR_ASSETS:
-        item = state['observations'].get(asset)
-        age = tick - item['_seen'] if item else float('inf')
-        # Vigencia estricta: si no se ha renovado en 45 s, no puede operar.
-        if item and age <= 45 and item['seconds_left'] - age > 0:
-            row = dict(item)
-            row['seconds_left'] = max(0, round(item['seconds_left'] - age))
-            rows.append(row)
-        else:
-            missing[asset] = state['errors'].get(asset, 'Pendiente de consulta escalonada')
-    return rows, missing
+            target = float(market['floor_strike'])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if (not reading or not math.isfinite(target) or target <= 0 or
+                market.get('strike_type') not in ('greater_or_equal', 'greater')):
+            continue
+        price, movement, observed = reading
+        seconds = (row['close'] - now).total_seconds()
+        if seconds <= 0 or not -5 <= (now - observed).total_seconds() <= 80:
+            continue
+        gap = max(0, target - price if side == 'UP' else price - target)
+        expected_move = movement * math.sqrt(seconds / 60)
+        estimates[asset] = {'target': target, 'spot': price, 'seconds_left': seconds,
+                            'distance': gap, 'score': gap / expected_move}
+    if len(estimates) != len(candidates):
+        return candidates, {}
+    return sorted(candidates, key=lambda asset: estimates[asset]['score']), estimates
 
 
-def _radar_decision(rows):
-    # Dirección mayoritaria = resultado con ask alto en la mayoría de monedas.
-    # Ask alto es proxy imperfecto, no una probabilidad calibrada.
-    up = sum(r['yes_cents'] >= RADAR_MAJOR_MIN_CENTS for r in rows)
-    down = sum(r['no_cents'] >= RADAR_MAJOR_MIN_CENTS for r in rows)
-    majority = None
-    if len(rows) == len(RADAR_ASSETS):
-        if up > down and up >= RADAR_MAJORITY_COUNT:
-            majority = 'UP'
-        elif down > up and down >= RADAR_MAJORITY_COUNT:
-            majority = 'DOWN'
-    candidates = []
-    if majority:
-        for r in rows:
-            # El contrato del lado mayoritario debe estar barato en esta moneda.
-            cheap = r['yes_cents'] if majority == 'UP' else r['no_cents']
-            other = r['no_cents'] if majority == 'UP' else r['yes_cents']
-            if cheap <= RADAR_LIMIT_CENTS and other >= RADAR_MAJOR_MIN_CENTS:
-                candidates.append({**r,'buy_side':majority,'entry_ask_cents':cheap})
-    candidates.sort(key=lambda x:(x['entry_ask_cents'],x['seconds_left']))
-    return majority, up, down, candidates
+class PaperBot(Bot):
+    """Simulación con cotizaciones públicas y un registro local de operaciones."""
 
+    def __init__(self, db_path=None, feed=None, extra_feed=None):
+        super().__init__(db_path, feed)
+        self.radar_worker_revision = RADAR_REVISION
+        self.extra_feed = extra_feed if extra_feed is not None else MarketData()
+        self.pool = ThreadPoolExecutor(max_workers=len(SERIES_15M), thread_name_prefix='kalshi-read')
+        self.spot_pool = ThreadPoolExecutor(max_workers=len(SERIES_15M), thread_name_prefix='kraken-read')
+        self.spot_jobs = {}
+        self.spot_readings = {}
+        self.next_spot_refresh = 0
+        self.last_quotes = {}
+        self.next_position_check = {}
+        self.position_books = {}
+        self.snapshot['mode'] = 'SIMULACIÓN'
+        self.snapshot['radar'] = [{'asset': asset, 'detail': 'Consultando'} for asset in SERIES_15M]
+        self.snapshot['updated'] = stamp()
+        self.snapshot['radar_summary'] = 'Consultando las cinco monedas del radar.'
+        if 'round_close' not in {r[1] for r in self.db.execute('PRAGMA table_info(trades)')}:
+            self.db.execute('ALTER TABLE trades ADD COLUMN round_close TEXT')
+        self.db.execute('CREATE INDEX IF NOT EXISTS trades_round_close ON trades(round_close)')
+        self.db.commit()
 
-def _paper_multicrypto_step(self):
-    if time.monotonic() >= getattr(self.feed,'retry_at',0):
-        self.settle()
-    with self.lock:
-        positions = self.positions()
-    # Salidas: la prueba de reversión mantiene la apuesta hasta liquidación.
-    # No liquidar virtualmente con cotizaciones intermedias ni señales BTC.
-    try:
-        rows, missing = _radar_open_markets(self.feed)
-    except Exception as exc:
+    def _close(self, p, price, reason, settlement=False):
+        fee = 0 if settlement else self.settings['fee_cents_per_contract'] * p['quantity'] / 100
+        pnl = round((price - p['entry']) * p['quantity'] / 100 - p['entry_fee'] - fee, 8)
+        with self.db:
+            cur = self.db.execute(
+                'UPDATE trades SET exit=?,exit_fee=?,closed=?,reason=?,pnl=? WHERE id=? AND closed IS NULL',
+                (price, fee, stamp(), reason, pnl, p['id']))
+            if cur.rowcount:
+                self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
+                                (stamp(), 'SALIDA VIRTUAL', f"#{p['id']} · {reason} · neto ${pnl:.2f}"))
+
+    def _check_positions(self, rows):
+        now = utcnow()
         with self.lock:
-            self.snapshot.update(status='SIN DATOS',message='Radar Kalshi: '+str(exc),
-                                 radar=[],radar_candidates=[],radar_majority=None,radar_missing={})
-        return
-    majority, up, down, candidates = _radar_decision(rows)
-    notes = []
-    if self.running and not self.close_requested and majority:
-        # Máximo 2 entradas por ronda temporal, no por moneda.
-        active_round = tuple(sorted((r['market'].get('close_time','') for r in rows)))
-        key = str(max(active_round)) if active_round else ''
+            positions = self.positions()
+            manual = self.close_requested
+            stop_profit = self.settings['radar_stop_profit_cents']
+        active = {row['ticker']: row['market'] for row in rows.values()}
+        errors = []
+        live_positions = {p['ticker'] for p in positions}
+        for p in positions:
+            ticker = p['ticker']
+            legacy = p['round_close'] is None
+            before_close = not legacy and now < market_time(p['round_close'])
+            if before_close and ticker not in active and not (manual or 0 < stop_profit < 100):
+                continue
+            if time.monotonic() < self.next_position_check.get(ticker, 0):
+                continue
+            self.next_position_check[ticker] = time.monotonic() + (4 if before_close or manual else 12)
+            self.position_books.pop(ticker, None)
+            try:
+                market = active.get(ticker)
+                if market is None:
+                    market = self.feed.market_by_ticker(ticker)
+                result = market.get('result')
+                if (market.get('status') in ('finalized', 'settled') and
+                        result in ('yes', 'no') and not market.get('is_provisional', False)):
+                    won = (p['side'] == 'UP') == (result == 'yes')
+                    with self.lock:
+                        self._close(p, 100 if won else 0, f"LIQUIDACIÓN OFICIAL · {'SÍ' if result == 'yes' else 'NO'}", True)
+                elif market.get('status') in ('open', 'active') and (legacy or manual or before_close):
+                    book = self.feed.book(ticker)
+                    if utcnow() >= market_time(market.get('close_time')) or time.monotonic() - book['at'] > 10:
+                        continue
+                    self.position_books[ticker] = book
+                    with self.lock:
+                        if legacy:
+                            self._arm_take_profit(p, market, book)
+                            self.manage(p, book, None, get_seconds_remaining(market))
+                        elif self.close_requested:
+                            self.manage(p, book, None, get_seconds_remaining(market))
+                        elif 0 < (target := self.settings['radar_stop_profit_cents']) < 100 and time.monotonic() - book['at'] <= 5:
+                            bids = [(price, size) for price, size in book[p['side']]['bids'] if price >= target]
+                            price = fill_book(bids, p['quantity'])
+                            if price is not None and utcnow() < market_time(market['close_time']):
+                                self._close(p, price, 'STOP PROFIT AUTOMÁTICO')
+            except (ValueError, TypeError, KeyError, InvalidOperation) as exc:
+                errors.append(f'{ticker}: {exc}')
+        self.next_position_check = {ticker: at for ticker, at in self.next_position_check.items() if ticker in live_positions}
+        marks = {ticker: book for ticker, book in self.position_books.items()
+                 if ticker in active and ticker in live_positions and time.monotonic() - book['at'] <= 10}
+        self.position_books = marks
         with self.lock:
-            existing = self.db.execute('SELECT COUNT(*) FROM trades WHERE opened IS NOT NULL AND ticker IN ('+
-                ','.join('?' for _ in rows)+')',tuple(r['ticker'] for r in rows)).fetchone()[0] if rows else 0
-        for item in candidates:
-            if time.monotonic()-item.get('_seen',0) > 12: continue
-            if existing >= RADAR_MAX_POSITIONS_PER_ROUND: break
+            if self.close_requested and not self.positions():
+                self.close_requested = False
+        return {ticker: {**book, 'expires': (utcnow() + timedelta(seconds=max(0, 10 - (time.monotonic() - book['at'])))).isoformat()}
+                for ticker, book in marks.items()}, errors
+
+    def _enter_radar(self, rows, candidates, side, priority=None):
+        notes = {}
+        for asset in candidates:
+            row = rows[asset]
             with self.lock:
-                if any(p['ticker']==item['ticker'] for p in self.positions()):continue
-                if self.db.execute('SELECT 1 FROM trades WHERE ticker=?',(item['ticker'],)).fetchone():continue
-                if self.totals()['cash'] < RADAR_BUDGET_DOLLARS:break
+                if not self.running or self.close_requested:
+                    break
+                close_key = row['close'].isoformat()
+                count = self.db.execute(
+                    'SELECT COUNT(*) FROM trades WHERE round_close=? OR '
+                    '(round_close IS NULL AND julianday(opened)>=julianday(?) AND julianday(opened)<julianday(?))',
+                    (close_key, (row['close'] - timedelta(minutes=15)).isoformat(), close_key)).fetchone()[0]
+                if count >= ROUND_LIMIT:
+                    notes[asset] = 'Límite de dos entradas alcanzado'
+                    break
+                if self.db.execute('SELECT 1 FROM trades WHERE ticker=?', (row['ticker'],)).fetchone():
+                    notes[asset] = 'Ya registrada en esta ronda'
+                    continue
+                totals = self.totals()
+                if self.settings['daily_goal_dollars'] and totals['accumulated'] >= self.settings['daily_goal_dollars']:
+                    notes[asset] = 'Meta acumulada alcanzada'
+                    break
+                if totals['cash'] <= 0:
+                    notes[asset] = 'Saldo virtual agotado'
+                    break
             try:
-                # Confirmar mercado y ask justo antes de entrar; nunca precio cacheado.
-                market = self.feed.get('/markets/'+quote(item['ticker'],safe=''))['market']
-                rem = get_seconds_remaining(market)
-                if rem is None or rem <= 0 or market.get('status') not in ('open','active'):continue
-                fresh = get_yes_ask(market) if majority=='UP' else get_no_ask(market)
-                if fresh is None or fresh*100 > RADAR_LIMIT_CENTS:continue
-                book = self.feed.book(item['ticker'])
-                if time.monotonic()-book['at'] > 5:continue
-                qty_price = size_for_budget(book[majority]['asks'],RADAR_BUDGET_DOLLARS,
-                                             self.settings['fee_cents_per_contract'],RADAR_LIMIT_CENTS)
-                if not qty_price:continue
-                qty,price = qty_price
-                fee = qty*self.settings['fee_cents_per_contract']/100
-                with self.lock:
-                    if self.db.execute('SELECT 1 FROM trades WHERE ticker=?',(item['ticker'],)).fetchone():continue
-                    if self.totals()['cash'] + 1e-8 < qty*price/100+fee:continue
-                    self.db.execute("INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened, tp_pct,sl_pct,reverse,entry_evidence) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                         (item['ticker'],majority,qty,price,fee,stamp(),0,0,0,
-                          dumps({'strategy':'MULTICRYPTO_MINORIAS','asset':item['asset'],
-                                 'majority':majority,'up_count':up,'down_count':down,
-                                 'budget_usd':RADAR_BUDGET_DOLLARS,'mode':'paper'})))
-                    self.db.commit()
-                    self.event('ENTRADA RADAR VIRTUAL',f"{item['asset']} {majority} · {qty} contratos a {price:.2f}¢ · sin dinero real")
-                    existing += 1
-                    notes.append(f"{item['asset']} {majority} {price:.1f}¢")
-            except Exception as exc:
-                notes.append(f"{item['asset']}: sin entrada ({type(exc).__name__})")
-    with self.lock:
-        self.snapshot.update(status='ACTIVO' if rows else 'SIN DATOS',
-            message=(f"RADAR {len(rows)}/{len(RADAR_ASSETS)} · mayoría {majority or ('DATOS INSUFICIENTES' if len(rows)<len(RADAR_ASSETS) else 'SIN CONSENSO')} · "
-                     f"UP fuertes {up}, DOWN fuertes {down} · "
-                     + ('Entradas: '+', '.join(notes) if notes else 'Observando contratos baratos')),
-            market=rows[0]['market'] if rows else None,
-            signal=None,radar=[{k:v for k,v in r.items() if k not in ('market','_seen')} for r in rows],
-            radar_candidates=[{k:v for k,v in r.items() if k not in ('market','_seen')} for r in candidates],
-            radar_majority=majority,radar_up=up,radar_down=down,radar_missing=missing,updated=stamp())
+                feed = self.extra_feed if asset in EXTRA_SERIES_15M else self.feed
+                book = feed.book(row['ticker'])
+            except (ValueError, InvalidOperation) as exc:
+                notes[asset] = str(exc)
+                continue
+            with self.lock:
+                if not self.running or self.close_requested:
+                    break
+                fresh_rows = valid_radar_rows(rows, utcnow())
+                entry_limit = self.settings['radar_entry_limit_cents']
+                fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit)
+                if fresh_side != side:
+                    notes[asset] = 'Se perdió la confirmación de tres monedas durante la verificación'
+                    break
+                if asset not in eligible or time.monotonic() - book['at'] > 10:
+                    notes[asset] = 'Cotización vencida durante la verificación'
+                    continue
+                budget = min(self.settings['radar_budget_dollars'], self.totals()['cash'])
+                fee_cents = self.settings['fee_cents_per_contract']
+                sized = size_for_budget(book[side]['asks'], budget, fee_cents, entry_limit, allow_partial=True)
+                if sized is None:
+                    notes[asset] = f'Sin liquidez confirmada dentro de {entry_limit}¢ y ${budget:.2f}'
+                    continue
+                quantity, price = sized
+                fee = quantity * fee_cents / 100
+                cost = round(quantity * price / 100 + fee, 8)
+                evidence = {'mode': 'paper', 'brain': RADAR_REVISION, 'majority': side,
+                            'yes_mid_pct': {a: str(fresh_rows[a]['yes']) for a in leaders},
+                            'entry_asset': asset, 'entry_asset_yes_mid_pct': str(row['yes']),
+                            'candidate_ask_cents': str(row['yes_ask' if side == 'UP' else 'no_ask']),
+                            'cost': cost}
+                if priority and asset in priority:
+                    evidence['entry_priority'] = priority[asset]
+                opened = stamp()
+                with self.db:
+                    self.db.execute(
+                        '''INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,
+                           tp_pct,sl_pct,reverse,entry_evidence,round_close) VALUES (?,?,?,?,?,?,?,?,?,?,?)''',
+                        (row['ticker'], side, quantity, price, fee, opened, 0, 0, 0, dumps(evidence), close_key))
+                    self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
+                                    (opened, 'ENTRADA VIRTUAL', f"{asset} · {'SÍ' if side == 'UP' else 'NO'} · {quantity} contratos · ${cost:.4f}"))
+                notes[asset] = f'Entrada virtual · ${cost:.4f}'
+        return notes
 
-# El modo virtual usa exclusivamente el cerebro multimoneda.
-PaperBot.step = _paper_multicrypto_step
+    def _refresh_spot(self):
+        for asset, job in list(self.spot_jobs.items()):
+            if job.done():
+                self.spot_readings[asset] = job.result()
+                del self.spot_jobs[asset]
+        now = time.monotonic()
+        if not self.spot_jobs and now >= self.next_spot_refresh:
+            self.next_spot_refresh = now + 12
+            self.spot_jobs = {asset: self.spot_pool.submit(read_spot_movement, asset)
+                              for asset in SERIES_15M}
 
-def _connect_kalshi(controller,payload):
-    raise ValueError("Versión de simulación: conexión para operar con dinero real desactivada.")
-
-def _connect_kalshi_disabled_original(controller,payload):
-    if time.monotonic()<getattr(controller,'connect_retry_at',0):
-        raise ValueError(f'Espera {math.ceil(controller.connect_retry_at-time.monotonic())} segundos antes de volver a conectar (HTTP 429).')
-    controller.connection_stage='validar el modo y el estado del bot'
-    if isinstance(controller.bot,ConnectedBot) and (controller.bot.running or controller.bot.positions()):
-        raise ValueError('Pausa las entradas y espera a no tener posiciones antes de cambiar de modo.')
-    if isinstance(controller.bot,ConnectedBot) and controller.bot.pending_orders():raise ValueError('Hay órdenes pendientes; espera a la comprobación automática.')
-    env=payload.get('environment')
-    if env=='live' and payload.get('accept_real') is not True:raise ValueError('Marca la casilla de cuenta real para conectar ese entorno.')
-    controller.connection_stage='cargar las dependencias y la clave privada'
-    client=KalshiAccount(env,payload.get('key_id'),payload.get('pem'))
-    controller.connection_stage='firmar la solicitud y consultar el saldo en Kalshi'
-    try:
-        cash=client.balance() # Read only: connecting never submits an order.
-    except KalshiAPIError as exc:
-        if exc.code==429:controller.connect_retry_at=client.retry_at
-        raise
-    if isinstance(controller.bot,ConnectedBot) and controller.bot.account.identity!=client.identity:
-        raise ValueError('Esta sesión ya administra otra cuenta REAL.')
-    root=getattr(controller,'connection_root',controller.bot)
-    controller.connection_root=root
-    controller.connection_stage='preparar el historial de la cuenta'
-    with root.lock:
-        registry=getattr(root,'connected_accounts',None)
-        if registry is None:registry={};root.connected_accounts=registry
-        linked=registry.get(client.identity)
-        if linked is None:
-            base=Path(root.db.execute('PRAGMA database_list').fetchone()[2] or ROOT/'data'/'alpha.sqlite3')
-            path=base.with_name(base.stem+'.kalshi-'+client.identity+'.sqlite3');path.parent.mkdir(parents=True,exist_ok=True)
-            process_lock=open(str(path)+'.lock','a+')
+    def step(self):
+        self._refresh_spot()
+        jobs = {asset: self.pool.submit(read_radar_series, feed, asset)
+                for series, feed in ((CORE_SERIES_15M, self.feed), (EXTRA_SERIES_15M, self.extra_feed))
+                for asset in series}
+        rows, errors = {}, {}
+        for asset, job in jobs.items():
             try:
-                if os.name=='nt':
-                    import msvcrt
-                    process_lock.write('0');process_lock.flush();process_lock.seek(0);msvcrt.locking(process_lock.fileno(),msvcrt.LK_NBLCK,1)
-                else:
-                    import fcntl
-                    fcntl.flock(process_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            except OSError:
-                process_lock.close();raise ValueError('Otra instancia ya administra esta cuenta.') from None
-            linked=None
-            try:
-                linked=ConnectedBot(path,client);linked._process_lock=process_lock
-                # New account ledger inherits allocation/settings but never paper trades.
-                if not linked.kv('account_configured'):
-                    linked.settings=dict(root.settings);linked.put('settings',linked.settings);linked.put('account_configured',True);linked.db.commit()
-                controller.connection_stage='iniciar la vigilancia de la cuenta'
-                linked.start_worker()
-                registry[client.identity]=linked
-            except Exception:
-                if linked is not None:
-                    linked.stop_event.set()
-                    if linked.thread is not None:linked.thread.join(timeout=10)
-                    if linked.thread is None or not linked.thread.is_alive():linked.db.close()
-                process_lock.close()
-                raise
-        elif linked.running:raise ValueError('Esta cuenta ya está operando. Paúsala antes de reconectar.')
-        else:linked.account=client;linked.feed.account=client
-        controller.bot=linked
-    return {'message':'Cuenta REAL'+f' conectada · saldo ${cash:.2f}. Entradas pausadas; pulsa INICIAR cuando quieras operar.',
-            'verified_at':stamp(),'environment':env,'balance':cash}
+                rows[asset] = job.result()
+                self.last_quotes[asset] = rows[asset]
+            except ValueError as exc:
+                errors[asset] = str(exc)
+        rows = valid_radar_rows(rows, utcnow())
+        with self.lock:
+            entry_limit = self.settings['radar_entry_limit_cents']
+        majority, _, candidates, _, _ = radar_decision(rows, entry_limit)
+        self._refresh_spot()
+        candidates, priority = entry_priority(rows, candidates, majority, self.spot_readings, utcnow())
+        notes = self._enter_radar(rows, candidates, majority, priority)
+        now = utcnow()
+        display_rows = valid_radar_rows(rows, now)
+        with self.lock:
+            entry_limit = self.settings['radar_entry_limit_cents']
+        majority, leaders, candidates, yes, no = radar_decision(display_rows, entry_limit)
+        candidates, _ = entry_priority(display_rows, candidates, majority, self.spot_readings, now)
+        radar_count = len(display_rows)
+        if radar_count < DIRECTION_MIN:
+            summary = f'Datos insuficientes · {radar_count}/{len(SERIES_15M)} vigentes'
+        elif majority is None:
+            summary = f'Sin mayoría de tres · {yes} SÍ / {no} NO'
+        else:
+            direction = 'SÍ' if majority == 'UP' else 'NO'
+            opportunity = (' · Candidatas: ' + ', '.join(candidates)
+                           if candidates else f' · Sin contrarias a {entry_limit}¢ o menos')
+            summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
+        display = []
+        for asset in SERIES_15M:
+            row = display_rows.get(asset)
+            latest = self.last_quotes.get(asset)
+            if row is None:
+                detail = errors.get(asset, 'Cotización vencida o fuera de la ronda actual.')
+                display.append({'asset': asset, 'detail': detail,
+                                'last_ticker': latest['ticker'] if latest else None})
+                continue
+            display.append({'asset': asset, 'ticker': row['ticker'],
+                            'yes': float(row['yes']), 'no': float(100 - row['yes']),
+                            'yes_ask': float(row['yes_ask']), 'no_ask': float(row['no_ask']),
+                            'detail': notes.get(asset) or ('Marca dirección' if asset in leaders else 'Candidata' if asset in candidates else 'Vigente')})
+        btc = display_rows.get('BTC', {}).get('market')
+        with self.lock:
+            self.snapshot.update(status='ACTIVO' if self.running else 'PAUSADO',
+                                 signal='SÍ' if majority == 'UP' else 'NO' if majority == 'DOWN' else None,
+                                 market=btc, target=get_target_from_market(btc) if btc else None,
+                                 radar=display, radar_count=radar_count, radar_summary=summary,
+                                 radar_close=round_close(now).isoformat(),
+                                 message=summary, retention=summary, updated=now.isoformat())
+        marks, settlement_errors = self._check_positions(display_rows)
+        if not (CORE_SERIES_15M.keys() & errors.keys()) and not settlement_errors and not any(
+                'HTTP 429' in notes.get(asset, '') for asset in CORE_SERIES_15M):
+            self.feed.acknowledge_poll()
+        if not (EXTRA_SERIES_15M.keys() & errors.keys()) and not any(
+                'HTTP 429' in notes.get(asset, '') for asset in EXTRA_SERIES_15M):
+            self.extra_feed.acknowledge_poll()
+        with self.lock:
+            self.snapshot.update(books=marks, settlement_errors=settlement_errors)
 
+    def loop(self):
+        try:
+            super().loop()
+        finally:
+            self.pool.shutdown(wait=True, cancel_futures=True)
+            self.spot_pool.shutdown(wait=True, cancel_futures=True)
 
+    def view(self):
+        result = super().view()
+        result.update(mode='SIMULACIÓN', execution_mode='paper', pending_orders=0,
+                      account_balance=None)
+        return result
 
 
 _TERMINAL_HTML = r"""
@@ -2271,12 +2085,30 @@ input[type=range]{accent-color:var(--gold);width:100%}
 .wide{width:100%!important}
 .save{width:100%;margin-top:15px}
 .table-wrap{overflow-x:auto}
+.coin-name{display:inline-flex;align-items:center;gap:7px}
+.coin-emblem{width:20px;height:20px;flex:none;object-fit:contain;border-radius:4px}
+@media(max-width:600px){
+  .radar-quotes table,.radar-quotes tbody{display:block;width:100%;min-width:0}
+  .radar-quotes thead{display:none}
+  .radar-quotes tr{display:grid;grid-template-columns:1fr 1fr;padding:8px 10px;border-bottom:1px solid #33456a}
+  .radar-quotes td{padding:3px;border:0;white-space:normal;overflow-wrap:anywhere}
+  .radar-quotes td:nth-child(2),.radar-quotes td:last-child{grid-column:1/-1}
+  .radar-quotes td:nth-child(1){grid-column:1/-1;font-weight:bold;color:var(--gold)}
+  .radar-quotes td:nth-child(3)::before{content:"SÍ implícito "}
+  .radar-quotes td:nth-child(4)::before{content:"NO implícito "}
+  .radar-quotes td:nth-child(5)::before{content:"Comprar SÍ "}
+  .radar-quotes td:nth-child(6)::before{content:"Comprar NO "}
+}
 table{border-collapse:collapse;width:100%;font-size:11px;white-space:nowrap}
 th,td{text-align:left;padding:14px 12px;border-bottom:1px solid #2c4068}
 th{color:var(--muted);font-size:9px;text-transform:uppercase}
 .empty{text-align:center;color:var(--muted);padding:50px 20px}
 .hidden{display:none!important}
 .notice{padding:16px;border:1px solid #4a638d;margin-top:12px;line-height:1.6;color:var(--muted);font-size:11px;border-radius:5px}
+#settingsFeedback.success{background:#163f3b;color:#b9ffe6;border-color:#4ce4b6}
+#settingsFeedback.error{color:#fecaca;border-color:#f87171}
+.trade-position + .trade-position{border-top:1px solid var(--line);margin-top:12px;padding-top:12px}
+.trade-position h3{margin:0 0 8px;overflow-wrap:anywhere}
 .toast{position:fixed;right:20px;bottom:20px;background:#163f3b;color:#b9ffe6;border:1px solid #4ce4b6;padding:15px 25px;border-radius:6px;z-index:10;box-shadow:0 6px 30px #0008}
 .strength{height:8px;border-radius:5px;background:#0b1630;margin:15px 0;overflow:hidden}
 .strength i{display:block;height:100%;width:0;background:var(--gold)}
@@ -2326,8 +2158,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <span>↗</span>Entradas</button>
 <button data-page="registro">
 <span>▤</span>Registro</button>
-<button data-page="senal">
-<span>◎</span>Señal</button>
 <button data-page="conexion">
 <span>⌁</span>Conexión</button>
 </nav>
@@ -2336,8 +2166,8 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <small>OBJETIVO ACUMULADO</small>
 </div>
 <footer>
-<span class="gold" id="executionFooter">ENTORNO REAL</span>
-<br>BTC · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
+<span class="gold" id="executionFooter">SIMULACIÓN</span>
+<br>5 monedas · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
 <span class="green"><span id="feedStatus">● Esperando datos</span></span>
 </footer>
 </aside>
@@ -2349,7 +2179,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <div>
 <small>MERCADO</small>
-<strong>BTC · 15 MINUTOS</strong>
+<strong>5 MONEDAS · 15 MINUTOS</strong>
 </div>
 <div>
 <small>SESIÓN</small>
@@ -2357,10 +2187,9 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 <div>
 <small>MODO</small>
-<strong class="green" id="executionModeLabel">● REAL</strong>
+<strong class="green" id="executionModeLabel">● SIMULACIÓN</strong>
 </div>
 </header>
-<div class="demo"><span id="liveMessage">Conectando el motor con Kalshi y Coinbase…</span></div>
 <div class="section-title">
 <b id="pageNum">01</b>
 <span id="pageTitle">Resumen</span>
@@ -2373,7 +2202,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <div class="top-controls body" style="padding-top:0;padding-bottom:0">
 <span class="chip">MERCADO<span class="gold" id="marketLabel"> · ESPERANDO</span>
 </span>
-<span class="chip">LÍMITE DE ENTRADA <b id="entryLimit">60 ¢</b>
+<span class="chip">LÍMITE DE ENTRADA <b id="entryLimit">15 ¢</b>
 </span>
 </div>
 <div class="radar paused" id="radar">
@@ -2384,32 +2213,19 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <span class="rnum s">30</span>
 <span class="rnum w">45</span>
 <div class="radar-core">
-<b id="radarSignal">ALPHA</b>
-<small id="radarMode">EDGE</small>
+<b id="radarSignal">—</b>
 </div>
 </div>
 <div class="radar-meta">
 <span class="chip">DIRECCIÓN<b id="activeSignal">ESPERANDO</b>
-</span>
-<span class="chip">PRIMERA SEÑAL<b id="firstSignal">—</b>
 </span>
 <span class="chip">RONDA<b id="roundClock">— / 15:00</b>
 </span>
 </div>
 </article>
 <article class="panel">
-<h2>Posición</h2>
-<div class="position">
-<div class="position-money">
-<div><span class="label">PAGÓ</span><div class="amount" id="positionPaid">$0.00</div></div>
-<div><span class="label">GANANCIA / PÉRDIDA ACTUAL</span><div class="amount" id="unrealized">—</div></div>
-</div>
-<span class="muted" id="positionNote">Sin operaciones</span>
-<hr>
-<strong id="openContracts" hidden>0 CONTRATOS</strong>
-<hr>
-<strong class="gold" id="positionSide">SIN POSICIÓN</strong>
-</div>
+<h2>Posiciones abiertas</h2>
+<div class="body" id="positionList"><p class="muted">Sin posiciones abiertas</p></div>
 </article>
 </div>
 <article class="panel performance">
@@ -2438,18 +2254,27 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 <div class="controls">
-<button class="primary" id="start">▶ INICIAR REAL</button>
+<button class="primary" id="start">▶ INICIAR PRUEBA</button>
 <button id="pause">Ⅱ PAUSAR</button>
 <button class="danger" id="close">□ CERRAR TODO</button>
 </div>
 <div class="notice"><span id="radarNotice">El radar sigue las señales confirmadas. Pausar entradas conserva la gestión de salidas.</span></div>
+<article class="panel">
+<h2>Radar Kalshi · 15 minutos</h2>
+<div class="notice"><strong id="signalTitle">CONSULTANDO</strong> · <span id="signalDetail"></span></div>
+<div class="table-wrap radar-quotes"><table>
+<thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
+<tbody id="radarRows"></tbody>
+</table></div>
+<div class="notice">Tres monedas vigentes del mismo lado confirman la dirección · 50% exacto es neutral · Hasta dos monedas distintas por ronda.</div>
+</article>
 </section>
 <section id="operacion" class="page hidden">
 <article class="panel" style="margin-bottom:12px">
 <h2>Plan de operación</h2>
 <div class="body">
 <div class="top-controls">
-<span>BTC · 15 minutos</span>
+<span>5 monedas · 15 minutos</span>
 <span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
 </div>
 <div class="strength">
@@ -2478,44 +2303,34 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Meta de ganancia acumulada ($)</label>
 <input type="number" name="goal" value="50" min="0" required><small>No se reinicia cada día. Ejemplo: capital $20 + meta $10 = saldo objetivo $30. Al alcanzarla se detienen las entradas.</small>
 </div>
-<input type="hidden" name="contracts" value="1">
-<input type="hidden" name="maxTrade" value="10">
-
 <div class="field">
-<label>Porcentaje del saldo por apuesta (%)<small>Se recalcula con el saldo disponible asignado al bot antes de cada compra.</small></label>
-<select name="riskPct"><option value="5">5%</option><option value="10" selected>10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
+<label for="radarBudget">Presupuesto virtual por moneda ($)</label>
+<input id="radarBudget" type="number" name="budget" value="1" min="0.01" max="100000" step="0.01" required>
+<small>Tope por entrada, incluida la comisión simulada.</small>
 </div>
 <div class="field">
-<label>Máximo de entradas por ronda</label>
-<input type="number" name="entries" value="1" min="1" max="100" required>
-</div>
-</div>
-</article>
-<article class="panel">
-<h2>Precios y protección</h2>
-<div class="body">
-<div class="field">
-<label>Precio máximo de compra (¢)</label>
-<input type="number" name="maxEntry" value="60" min="1" max="99" required>
+<label for="radarEntryLimit">Límite de entrada (¢)</label>
+<input id="radarEntryLimit" type="number" name="entryLimit" value="15" min="1" max="99" step="1" required>
+<small>Precio máximo por contrato para una entrada virtual.</small>
 </div>
 <div class="field">
-<label>Tomar profit (%)<small>Porcentaje del contrato en Kalshi: 90% = vender a 90¢ o más. Se aplica al guardar, también a posiciones abiertas.</small></label>
-<select name="tp"><option value="0">Desactivado</option><option value="5">5%</option><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
+<label for="radarStopProfit">Stop Profit (%)</label>
+<select id="radarStopProfit" name="stopProfit">
+<option value="80">80%</option>
+<option value="85">85%</option>
+<option value="90" selected>90%</option>
+<option value="95">95%</option>
+<option value="100">100% (liquidación)</option>
+<option value="0">Desactivado</option>
+</select>
+<small>Cierra toda la posición si hay compradores suficientes al porcentaje elegido o superior. El 100% espera la liquidación oficial.</small>
 </div>
-<div class="field">
-<label>Stop loss (%)<small>Porcentaje de pérdida sobre lo pagado; 0 desactiva.</small></label>
-<select name="sl"><option value="0">Desactivado</option><option value="5">−5%</option><option value="10">−10%</option><option value="15">−15%</option><option value="20">−20%</option><option value="25">−25%</option><option value="30">−30%</option><option value="40">−40%</option><option value="50">−50%</option><option value="60">−60%</option><option value="70">−70%</option><option value="80">−80%</option><option value="85">−85%</option><option value="90">−90%</option><option value="95">−95%</option><option value="100">−100%</option></select>
-</div>
-<div class="field">
-<label>Cerrar por señal contraria<small>Ajuste de salida; no fija la dirección del cerebro</small>
-</label>
-<input type="checkbox" name="reverse" checked>
-</div>
-<input type="hidden" name="fee" value="2">
+<div class="notice">Hasta dos monedas distintas por ronda.</div>
 </div>
 </article>
 </div>
-<button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
+<button type="submit" class="primary save" disabled>GUARDAR Y APLICAR AJUSTES</button>
+<p id="settingsFeedback" class="notice hidden" role="status"></p>
 </form>
 <div class="notice">La meta usa la ganancia acumulada. El historial se conserva al cambiar el capital.</div>
 </section>
@@ -2557,65 +2372,31 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </div>
 </article>
 </section>
-<section id="senal" class="page hidden">
-<div class="settings-grid">
-<article class="panel">
-<h2>Lectura del cerebro</h2>
-<div class="body">
-<div class="empty">
-<div class="gold" style="font-size:28px;margin-bottom:15px"><span id="signalTitle">ESPERANDO DATOS</span></div><span id="signalDetail">El motor está arrancando.</span></div>
-<div class="field">
-<label>Dirección actual</label>
-<strong id="signalDirection">—</strong>
-</div>
-<div class="field">
-<label>Primera señal de la ronda</label>
-<strong id="signalFirst">—</strong>
-</div>
-<div class="field">
-<label>Precio de BTC</label>
-<strong id="btcPrice">—</strong>
-</div>
-<div class="field">
-<label>Objetivo de la ronda</label>
-<strong id="targetPrice">—</strong>
-</div>
-</div>
-</article>
-<article class="panel">
-<h2>Indicadores</h2>
-<div class="body">
-<div class="field">EMA 9 / EMA 21<strong id="emaValue">—</strong>
-</div>
-<div class="field">RSI 14<strong id="rsiValue">—</strong>
-</div>
-<div class="field">Momentum<strong id="momentumValue">—</strong>
-</div>
-<div class="field">Volumen relativo<strong id="volumeValue">—</strong>
-</div>
-<div class="notice"><span id="indicatorNote">Indicadores del cerebro original. No son probabilidades calibradas.</span></div>
-</div>
-</article>
-</div>
-</section>
 <section id="conexion" class="page hidden">
 <article class="panel">
 <h2>Conexión Kalshi</h2>
 <div class="body">
-<p class="muted">Con Dinero virtual encendido se prueba sin una cuenta real. Apaga el switch para usar la conexión REAL. Conectar verifica la cuenta y deja las entradas pausadas; INICIAR activa las operaciones.</p>
+<button id="connectionMode" class="primary" type="button" aria-controls="kalshiAccount" aria-expanded="false">Modo simulación</button>
+<div id="kalshiPublic">
+<p class="muted">Datos públicos de Kalshi. Compras y ventas exclusivamente virtuales.</p>
+<div class="notice"><span id="connectionNotice">Consultando la API pública.</span></div>
+</div>
+<form id="kalshiAccount" class="hidden" autocomplete="off">
 <div class="field">
 <label>Cuenta REAL de Kalshi</label>
 </div>
 <div class="field">
-<label>API Key ID</label>
-<input id="apiKey" class="wide" style="max-width:360px" type="text" placeholder="API Key ID del entorno elegido" autocomplete="off">
+<label for="apiKey">API Key ID</label>
+<input id="apiKey" class="wide" style="max-width:360px" type="text" placeholder="API Key ID" autocomplete="off">
 </div>
 <div class="field">
-<label>Clave privada</label>
-<textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM del entorno elegido" spellcheck="false" autocomplete="off"></textarea>
+<label for="privateKey">Clave privada</label>
+<textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM" spellcheck="false" autocomplete="off"></textarea>
 </div>
-<p class="muted">Para reconectar tras reinicios, guarda una vez KALSHI_API_KEY_ID y KALSHI_PRIVATE_KEY en los secretos del servidor. Las claves pegadas solo aquí duran hasta el reinicio. Al volver a la página se recupera la cuenta conectada en este servidor.</p>
-<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testApi" class="primary">CONECTAR</button></div><div class="notice"><span id="connectionNotice">Cuenta sin conectar.</span></div>
+<p class="muted">Conectar verifica tu cuenta. Las operaciones siguen en simulación.</p>
+<button id="testApi" class="primary" type="submit">CONECTAR</button>
+<div class="notice" id="kalshiAccountStatus" role="status">Cuenta sin conectar.</div>
+</form>
 </div>
 </article>
 </section>
@@ -2626,251 +2407,301 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <script>
 const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
+const pct=v=>v==null?'—':Number(v).toFixed(2)+'%';
 const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
-const names={balance:'starting_balance',goal:'daily_goal_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
-const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
-let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
+const names={balance:'starting_balance',goal:'daily_goal_dollars',budget:'radar_budget_dollars',entryLimit:'radar_entry_limit_cents',stopProfit:'radar_stop_profit_cents'};
+const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Radar',conexion:'Conexión'};
+let lastRadarMarkup=null;
+let dirty=false,loaded=false,current=null,pending=null,sequence=0,lastReply=null,endAt=null;
 function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
 let lastHeight=0;function height(){let h=Math.max(650,document.documentElement.scrollHeight);if(h!==lastHeight){lastHeight=h;post('streamlit:setFrameHeight',{height:h})}}
 function toast(msg){$('#toast').textContent=msg;$('#toast').classList.remove('hidden');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),4500)}
-function busy(on){for(const s of ['#start','#pause','#close','#testApi','#exportCSV','#settings button[type=submit]'])$(s).disabled=on}
-function action(action,payload={}){if(pending){toast('Esperando confirmación del servidor.');return}let id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);pending=id;busy(true);post('streamlit:setComponentValue',{value:{id,action,payload},dataType:'json'});setTimeout(()=>{if(pending===id){pending=null;busy(false);toast('Sin confirmación del servidor. Revisa Registro antes de repetir.')}},25000)}
+function settingsFeedback(message, style=''){
+  const notice=$('#settingsFeedback');
+  notice.textContent=message;
+  notice.className='notice '+style;
+}
+function busy(on){
+  for(const s of ['#start','#pause','#close','#exportCSV'])$(s).disabled=on;
+  $('#settings button[type=submit]').disabled=on||!loaded;
+  for(const name of ['goal','budget','entryLimit','stopProfit'])form.elements[name].disabled=on;
+  form.elements.balance.disabled=on||!!current?.running||!!current?.positions.length;
+}
+function action(kind,payload={}){
+  if(pending){toast('Esperando confirmación del servidor.');return}
+  const id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);
+  pending=id;
+  busy(true);
+  if(kind==='settings')settingsFeedback('Guardando ajustes…');
+  post('streamlit:setComponentValue',{value:{id,action:kind,payload},dataType:'json'});
+  setTimeout(()=>{
+    if(pending!==id)return;
+    pending=null;
+    busy(false);
+    const message='El servidor no confirmó el cambio. Revisa Registro antes de repetir.';
+    if(kind==='settings')settingsFeedback(message,'error');else toast(message);
+  },25000);
+}
 document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
-$('#start').onclick=()=>{if(current?.execution_mode==='live'&&!confirm('¿Iniciar el bot en tu cuenta REAL de Kalshi con los ajustes actuales?'))return;action('command',{command:'start'})};$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y cerrar las posiciones del bot en el modo actual?'))action('command',{command:'close'})};
-const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR'};
-form.onsubmit=e=>{e.preventDefault();let cfg={};for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse']){let el=form.elements[name];cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value)}if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);action('settings',cfg)};
-$('#testApi').onclick=()=>{const key_id=$('#apiKey').value.trim(),pem=$('#privateKey').value;if(!key_id||!pem.trim()){toast('Para REAL completa el API Key ID y la clave privada PEM.');return}action('verify_demo',{environment:'live',accept_real:true,key_id,pem})};
+$('#start').onclick=()=>{action('command',{command:'start'})};$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y cerrar las posiciones del bot en el modo actual?'))action('command',{command:'close'})};
+const form=$('#settings');form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';$('#settingsFeedback').classList.add('hidden')};
+form.onsubmit=e=>{
+  e.preventDefault();
+  if(!loaded||pending)return;
+  const cfg={};
+  for(const [name,key] of Object.entries(names)){
+    const field=form.elements[name],value=Number(field.value);
+    if(!field.disabled&&value!==current.settings[key])cfg[key]=value;
+  }
+  action('settings',cfg);
+};
 $('#exportCSV').onclick=()=>action('export');
-function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=active||'ALPHA';$('#radarMode').textContent=active?'CONFIRMADA':'ESPERANDO';$('#activeSignal').textContent=active||'ESPERANDO';$('#firstSignal').textContent=s.first_signal||'—';$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh?'● Mercado conectado':'● Esperando datos';$('#liveMessage').textContent=(s.mode||'REAL')+' · '+s.message;const linked=!!s.execution_mode;$('#start').textContent=s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL';$('#start').disabled=!linked;$('#executionModeLabel').textContent='● '+(s.mode||'REAL');$('#executionFooter').textContent=s.mode||'ENTORNO REAL';$('#accountTypeLabel').textContent=s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar');for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
-$('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.max_entry_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
-let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-let count=s.positions.reduce((n,p)=>n+p.quantity,0);$('#openContracts').textContent=count+' CONTRATOS';$('#positionSide').textContent=s.positions[0]?.side||'SIN POSICIÓN';let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
-$('#positionPaid').textContent=money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0));$('#unrealized').textContent=marked?((net>0?'+':'')+money(net)):'—';$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';$('#positionNote').textContent=s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones';$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+(s.execution_mode==='live'?' · Cuenta: '+money(s.account_balance):' · virtual');
-if(!loaded||!dirty){for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}el.value=String(value)}}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}form.elements.balance.disabled=s.running||s.positions.length>0;
+function isFresh(s){return s.updated&&Date.now()-Date.parse(s.updated)<20000&&(!s.radar_close||Date.now()<Date.parse(s.radar_close))&&s.status!=='SIN DATOS'}
+const coinIcons = Object.freeze({
+  "BTC": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAACv0lEQVR4AaxWA6xdQRB9URs7qW0rThvXiGvbdqPa/EZt27bNb9u83tOd4u733W16knc1u3Nmd2bOPp8scKpDLd2vUV/dr0GA7t/gPv9F6P71i+hHz/SNbDSGxvr+FxDQtC53Hqj71S/Q/OpD5kdjaQ7N/Xfiay1ra34N1nBnxcK52o/mkg/ypbxqPvG5BInUj3xJ74YR2LAzn5CkQCD1I5+GX8NOEitXIVcPgjiqz7nitluvdsBJfQ39cC9oIW2gBbWQSkeVNUHForoiJ+0NGHM4eVuYzzaCORaMi6NkglhTudUkqt2OvQkn+RnMF9s40QgihJP56bct4SEI2r4eUt1RLhXUszIrZsXpqAhWkgXr4z4wswROfpz07hGnUDhpkWkA4+ZsVAdm67C+neA10VNKrIjbR9KplPvwzigL885CWJ8Pg5XmiEDMUhhXxnv6Im4f6bdKAMb1aS6RkxcjbLwQ7fh7ro0C8uoK4qb831dqvU8HXBLry5HyDk8PBgQ8U0HcFECEUuvlRLgEpANaQFMR3NsAsQOODS20nVcAET46TuXz3wkCgsgpSAQzilEW1vswT3/ErRSAcX2qIC5K5cV3iJMnoCLM+8skW7F+oVIKrE/7IfJ/VDg6NZAL1HPXRruhH+8jowURoggV82/cnFXeHtAErCDJtZNqSgRw37MN9RN9eLvFwk56DAGS3O4Vx5IsixbN+OgZAHF7CpH9/VSVhUfiY95ZwFtvCIwLw0QHiBRJCZG3FId1hHFtCum9KDgPMNsgDZCSYqXDyHq1CwTrQzhXvbsoD6GAxs2ZUoeR8nHspL4CY4wLTHuYT9eBYD5cBf1kPxiXx4K6QQtupX4cS/0h8W8IJz8eTtZXend1X/u5+SbkNM2ayG+SzdSA1wl/n55Alye/SUb/RunAN8vp3zEZCl0z+ndOB7x7DgARoloEset8/QAAAABJRU5ErkJggg==",
+  "ETH": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAACzklEQVR4AaxWA9ZcXRCco//fQjaRbCPriG1zFNu2bdu2bc6zvvFUXgVj9PuSPqeH93bVbdR9IalFIvivR1Tr3C2cWNwtrJz1/bn/2aHzM3/jf1zDtaF/ZX0jboduEWVJ17BidZ2YgMS5lnu4t93AAxbg/64RJeYHdBm0ne4yBmMFP3U4cVUEInDGEmeje0Tv1C2sfBQGxsZDNt8Fa5WPPWN6R8HJZeD0TT74tftJzFhjiNYzNjEa1jxI2gfPUOAl8ySAk1c99J2siMtRtyd+NxykTmAa38/dbMPafbZ4L7FqUh+k22euNUArJ0Afu0ATT0dFKTizUvCe0QS+Ktm6BA6cc9E9IotDzKLCBRGZPadd0OoRoM/baIrFitghSqcUfNRcFZlMoSmBM9fbMHCarCGJHaJ+Swk8eJFGtV2+W0mAvvmwI4pH7BAvEcnixdtMlNvbTxmcvdGGVbstzN9kYs8pp4JEdKku0YWzJPC81cK+kxToVg65XAGPXqZw+noJaNUei2B0zFpnYMsRm8Rw5KKHnrGWBJ6zBE4rAuzum4+SOFMErkug6FNW6dQFLNjcvCGJLSHgBzKK4BIC9Ijvw2YpzQlMVGxRCQZMVdjZ2HDAFhHgtFAvescFJZA04eKtJg6cdRkQY+dr2HfGrUtg3EKN/UJwLNxitmxEYovH8Mq9JDQzh2U7Lfh7MH2NgRNXPBJAeIlWnP34cp0NiDV7bdkYSoWIJ0toOdBevM/wdMyIf2qV8osRs1XsPPFrFA+edzkBIiEKJMU8HUeRls8XcOFWG0bOVZmFkhL6IzhyjiqW4qCXEU/ZVIrnbDCCXEbBr2PW/8nrdF0C2445/D/4dRz0gWToTBWOl68gcPyyh35TFPkDyV8+klHlKgj8WN3UtyQ2yShvlILqBJADQFmTjEYp5c1ycFZbCYz31AZKm+X075jQv2s2VDqn9O+eAwBc0aAXtcxwIQAAAABJRU5ErkJggg==",
+  "SOL": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAIKADAAQAAAABAAAAIAAAAACshmLzAAADUklEQVRYCcVXT0gVYRCf2fe9P6lEGYaZdVILD3VSIqK0qINR0EWEOhdJRXgNQpKgkwVCQccgCy+JUEEheuiQdfAQWKERpKkkKVTW873dnWbWt49d37fre/LUvey3M79vfrPzzczOIuR5dVJfbNZMNhPhWQCqJ4IqRKiS7bye5vU0AI4h0kClSgx1YmsqH9O4Gqid+irNdPImA88T0dbV8KJHxF8E8FhFE7fuY+ts2J5AB67Si/hS6ucNQOrgVywNMxKoQ1wEwu54bMftHmxZ0uG0DshbW+l/zzi0h3SbCpXx8byNRLec00Ujx4HLS70HLDCf88lWF0oUjscpAKPlYfzCBy/O54Bz3qnk++KTu5Q4pWKJBm8kDFclZy5hXz9yYaJq4RAulzfrgCRcsc7cNa67C4eT3BmlcwSZUptYc7brmMJkXB1cojVyFEpwUudh5MeMOmiNNIDCSJhZre6rPQd3zJd+HZe1wwnQjtLhZtLJuaAm02Tsg7ZIozQXv5E8nr7bC9BtvoI/kNsCpFntiiYq1HJ71Xe4ZmM/tKnGPKhyIZP2PNwzX2vJBS0vLNwq09tzLbDEAIR+c1SrCxNaYMMbexz+QvjnQLg5B6g+yNig/TFIVSQ51XMElr9oOosX1VHYBiU6VahMItBvjcIXmgvFCTdeSj36zedRpkPuxXK4rk5CKWb7hg6mlSUpDT3mIEzQD61ehJyIf7KNSIf6RvNwlxNpkXKzWIf3yhIYhWvqBNTiTq/YtyZORTkCHiSgzqfxPEyyE1JKZyIHIcJpWeh12KiBcSsgCoQzSiYZdiLQASGcogV4YA4Xyr0qXri5CnCMK6EpDF0CMThi1K4pAikwIbiacIwjQAMcgfYgB8og7iTiHqM8CBIqf2q+C9QLtyEDpLRFHUrIO9QpWAs5VxY8MUdgyP6kM+3MjcJtyPQqA6QOdUUdh93Gdp0qVGaSBb3WCAzbnwNxwincm/45durKGZF4eg10t9gK5nLHsmxhy+gs02uxuVbaEw7hcuW+j/ymDqXikYQlAuo09wYeoYt9LY/lbuhd674IuMKN/DHJ5oBLLnfxMhataOKRpIsLdtGrK2jt7DW6xNbKN3ftaCPgKuWemZg3/ufU64Ss1+v3/D9/T4MrRetTGgAAAABJRU5ErkJggg==",
+  "XRP": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAA21BMVEUAAAArK1UkKzIkKTAkKTAjKS8kKi8rKzUkKzAkKTAjKS8kSUkjKS8kKi8kKS8nLDIkKi8oLTOHi47///+ChomDhoqGiYyFiIuHio2BhYiJjJCKjZCBhId/goaUl5omLDKVmJt9gYT+/v7Z2tubnqFbX2Th4uMrMTdhZmqMj5IkKS91eX3Ky83y8/MyOD3Bw8UzOD7V1tft7u50d3vs7e00OT/W19jj5OQ+Q0k9Q0g1OkDY2dri4+Q8Qkc1O0Dg4eI8QUY2PEHa29zf4OE7QEV7f4OfoaSdoKI6P0U8bs3jAAAAK3RSTlMABkeVv9nzGJbx/weC9Mcu4y3////////////////////////////////yG7j5mgAAATVJREFUeAGF0wO6w0AUBeCJk1P3PtuqbXP/GyryMijzf2qjuWSSphumZduWaegaO+S4HgTPddiuSDSGHbFoZOf1OA7ElY8kkjgimRLvJ3FU0gnOj+OE+H8cUZwU9Q+IAUgTXUBxSZQGENse4mLriugawjX/5zKmeeKdGwTSRJfweRrTEbgluoPvnugBAZ0Z4B6Jnp6B5xeiR3AGMyG8vtH7x8c7vb1CMJkF6fOLNr4+IVnMhuL75/f35xsKmz9wyt/OEchkc7lsBgpLDTJfIF8hrwZpgCuWqFzJ5ytVKhXBGbJQtTo1mthoNahek4XipW53qNuDr/dFnTYvNW9W/50GQwSGA3rvY8vl7R6NaTKFMJ3QeOS3mw/MbL5YQrFczGcAouEjFz604WMfvjjhqxe2vCHrvwbZMTAkWxjM4AAAAABJRU5ErkJggg==",
+  "BNB": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAWlBMVEUAAAD/1VX0uzLzuzD0uzDzuy/zuy/0vzXzuzDzujD/20nzui/0ui/zuy/0vDL0ui/0uzPzuy/zui/zvDf87cv43Jb77cr////53Jf0wkj0w0r99+fzuzPzvjyEp4rmAAAAEnRSTlMABkeVv9nzGJbxB4L0xy7jLfK6UobZAAAA6ElEQVR42oVT2RKDIAxExVtrGw7P/v9vFkqqRDqTfdLZJUvCRlzI8kKWVVXKIs9Eirpp4UTb1De66wcgGPqOHB8hwRgVeUzwB9PzPI98oqjRP66/LLFLuEcf8/McK/qvwUB4ohi8SUN4DwMnGje/lvD7ThRtJnLKbxtV5KIAxGE9D+AV9gBEISR+vUFZxyvlFFa53wApSqzvyRWU1gpWL0KXUlSBD+WVnmetgk1QVCgwiQDH8fpZmLvFghbsJaM29dWmvtpkB8WOmn+s9LkNee40MIYEJo2cIZHjQsvGnl8cfvX45WXX/wODgTtdutF+1wAAAABJRU5ErkJggg==",
+  "DOGE": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAMAAABEpIrGAAAAolBMVEUAAADVqlXbtknKqjXGqjnIpjfGqTbEpzXDpjXEpzXEpzTEpzXDpzXDpjXEpjXEpjXDpzTDpjTDpjT////ayIL49erUv27byYXczIvez5Hf0JXh0pni1J3i1J7j1qHk16Xm2qzr4bzt5MPu5sfEqDj59uv6+O/7+fL8+vXJr0j28uH49OfNtljWwnbQuWDRu2bz7df8+/b8+/f+/fz+/v3z7tgLl5/YAAAAEnRSTlMABgcYLS5HgpWWv8fZ4/Hy8/TT2gOVAAAA6ElEQVR4XoWT53LEIAyEZV8CLhzBK7hL773X93+1TBzN2Qxzo+/nsqAFJJqoTNO5EFzXmIpKFq3HBt8uKKe2AzIGW2fbexT0s0N2lyjBcmezX9YLhwSpe2yh/89hsRU7FpD8OOaRj8fzZwjDX5EWk0H4OoTQElV+ZjhYrV72r5g5iuYrMpgZ3kY1fvLTtYiGmtKAE+a1iA11pQEP33whYkcOQrxkPo0xvgK44XdRHQUILJwB+OE7UcNkSPfMtymlo8ywR67IkJdQQ6rXVB9KfWrts9Tv1hpGbTmtadW21wdHHz19eNXx/wXfGj2DvsSdawAAAABJRU5ErkJggg==",
+  "HYPE": "data:image/png;base64,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",
+  "NEAR": "data:image/png;base64,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"
+});
+function coinLabel(row){
+  const emblem = Object.hasOwn(coinIcons,row.asset) ? '<img class="coin-emblem" src="'+coinIcons[row.asset]+'" alt="" width="20" height="20">' : '';
+  return '<span class="coin-name">'+emblem+esc(row.asset)+'</span>';
+}
+function positionResult(trade,s,fresh){
+  const book=s.books?.[trade.ticker];
+  if(!fresh||!book||Date.now()>=Date.parse(book.expires))return null;
+  let remaining=trade.quantity,proceeds=0;
+  for(const [price,quantity] of book[trade.side]?.bids||[]){
+    const filled=Math.min(remaining,quantity);
+    remaining-=filled;
+    proceeds+=filled*price;
+    if(remaining===0)break;
+  }
+  if(remaining>0)return null;
+  return (proceeds-trade.quantity*(trade.entry+s.settings.fee_cents_per_contract))/100-trade.entry_fee;
+}
+function renderPositions(s,fresh){
+  $('#positionList').innerHTML=s.positions.map(trade=>{
+    const result=positionResult(trade,s,fresh);
+    const paid=trade.quantity*trade.entry/100+trade.entry_fee;
+    const side=trade.side==='UP'?'UP (SÍ)':trade.side==='DOWN'?'DOWN (NO)':trade.side;
+    const color=result>0?'#34d399':result<0?'#f87171':'inherit';
+    return '<section class="trade-position"><h3 class="gold">'+esc(trade.ticker)+' · '+esc(side)+'</h3>'+
+      '<p>'+esc(trade.quantity)+' contratos a '+cents(trade.entry)+' · Costó '+money(paid)+'</p>'+
+      '<p>Abierta · <strong style="color:'+color+'">'+
+      (result==null?'Resultado pendiente':(result>0?'+':'')+money(result))+'</strong></p></section>';
+  }).join('')||'<p class="muted">Sin posiciones abiertas</p>';
+}
+const connectionMode=$('#connectionMode'),kalshiAccount=$('#kalshiAccount');
+connectionMode.onclick=()=>{
+  const showAccount=kalshiAccount.classList.contains('hidden');
+  kalshiAccount.classList.toggle('hidden',!showAccount);
+  $('#kalshiPublic').classList.toggle('hidden',showAccount);
+  connectionMode.textContent=showAccount?'Modo real · conexión':'Modo simulación';
+  connectionMode.setAttribute('aria-expanded',String(showAccount));
+  if(!showAccount)$('#privateKey').value='';
+  height();
+};
+kalshiAccount.onsubmit=e=>{
+  e.preventDefault();
+  if(pending){toast('Esperando confirmación del servidor.');return}
+  const keyId=$('#apiKey').value.trim(),pem=$('#privateKey').value.trim();
+  if(!keyId||!pem){
+    $('#kalshiAccountStatus').textContent='Completa el API Key ID y la clave privada PEM.';
+    return;
+  }
+  $('#privateKey').value='';
+  $('#kalshiAccountStatus').textContent='Verificando cuenta de Kalshi…';
+  action('verify_kalshi',{key_id:keyId,pem});
+};
+function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
+const direction=active==='SÍ'?'UP':active==='NO'?'DOWN':null;
+const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
+if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.radar_entry_limit_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
+let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
+renderPositions(s,fresh);$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
+if(!loaded||!dirty){for(const [name,key] of Object.entries(names)){
+const field=form.elements[name],value=String(s.settings[key]);
+if(name==='stopProfit'&&!Array.from(field.options).some(option=>option.value===value))field.add(new Option(value+'%',value));
+field.value=value;
+}loaded=true;$('#savedState').textContent='AJUSTES DEL SERVIDOR'}busy(!!pending);
 $('#entriesRows').innerHTML=s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join('');$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 $('#logs').innerHTML=s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join('');
-$('#signalTitle').textContent=active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO');$('#signalDetail').textContent=s.quality||s.message;$('#signalDirection').textContent=active||'—';$('#signalFirst').textContent=s.first_signal||'—';$('#btcPrice').textContent=money(s.price);$('#targetPrice').textContent=money(s.target);$('#emaValue').textContent=s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—';$('#rsiValue').textContent=s.rsi?.toFixed(1)||'—';$('#momentumValue').textContent=s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min';$('#volumeValue').textContent=s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×';$('#indicatorNote').textContent=(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando');
-endAt=s.market?.close_time?Date.parse(s.market.close_time):null;$('#connectionNotice').textContent=(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:'');height();tick()}
-function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.updated&&Date.now()-Date.parse(current.updated)>15000){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused')}}
-window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+$('#signalTitle').textContent=active?'MAYORÍA '+active:'LECTURA DEL MERCADO';$('#signalDetail').textContent=s.radar_summary||s.message;
+endAt=s.radar_close?Date.parse(s.radar_close):null;$('#connectionNotice').textContent=(s.radar_summary||'Consultando la API pública.')+(s.settlement_errors?.length?' · Liquidación pendiente: '+s.settlement_errors.join(' / '):'');height();tick()}
+function tick(){if(endAt){let sec=Math.max(0,Math.floor((endAt-Date.now())/1000));$('#roundClock').textContent=String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0')+' / 15:00'}if(current?.radar_count&&!isFresh(current)){$('#marketLabel').textContent=' · DATOS ATRASADOS';$('#activeSignal').textContent='ESPERANDO';$('#radar').classList.add('paused');$('#radarSignal').textContent='—';$('#signalTitle').textContent='ACTUALIZANDO RONDA'}}
+window.addEventListener('message',e=>{
+  if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;
+  const {reply,snapshot}=e.data.args||{};
+  const confirmed=reply?.id&&reply.id!==lastReply&&(!pending||pending===reply.id);
+  if(confirmed&&reply.kind==='settings'&&reply.ok){dirty=false;loaded=false}
+  if(snapshot)update(snapshot);
+  if(!confirmed)return;
+  lastReply=reply.id;
+  pending=null;
+  busy(false);
+  if(reply.kind==='verify_kalshi'){
+    $('#kalshiAccountStatus').textContent=reply.message;
+    post('streamlit:setComponentValue',{value:{action:'ack'},dataType:'json'});
+  }else if(reply.kind==='settings'){
+    settingsFeedback(reply.message,reply.ok?'success':'error');
+  }else{
+    if(reply.csv){
+      const a=document.createElement('a');
+      a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));
+      a.download='alpha_historial.csv';
+      a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+    }
+    toast(reply.message);
+  }
+  height();
+});
 window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
 
 </script></body></html>
 """
 
+def _verify_kalshi_account(key_id, pem):
+    import base64
+
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519, padding, rsa
+    except ImportError:
+        raise ValueError('El servidor necesita el paquete cryptography para verificar la cuenta.') from None
+
+    if not isinstance(key_id, str) or not key_id.strip() or len(key_id) > 200 or not key_id.isascii():
+        raise ValueError('API Key ID inválido.')
+    if any(ord(character) < 33 or ord(character) > 126 for character in key_id.strip()):
+        raise ValueError('API Key ID inválido.')
+    if not isinstance(pem, str) or not pem.strip() or len(pem) > 16000:
+        raise ValueError('Clave privada PEM inválida.')
+    try:
+        key = serialization.load_pem_private_key(pem.strip().encode(), password=None)
+    except (TypeError, ValueError):
+        raise ValueError('Introduce una clave privada PEM válida y sin contraseña.') from None
+    path = '/trade-api/v2/portfolio/balance'
+    timestamp = str(int(time.time() * 1000))
+    message = (timestamp + 'GET' + path).encode()
+    if isinstance(key, rsa.RSAPrivateKey):
+        digest = hashes.SHA256()
+        signature = key.sign(message, padding.PSS(mgf=padding.MGF1(digest), salt_length=digest.digest_size), digest)
+    elif isinstance(key, ed25519.Ed25519PrivateKey):
+        signature = key.sign(message)
+    else:
+        raise ValueError('Kalshi requiere una clave RSA o Ed25519.')
+    request = Request('https://external-api.kalshi.com' + path, method='GET', headers={
+        'KALSHI-ACCESS-KEY': key_id.strip(),
+        'KALSHI-ACCESS-TIMESTAMP': timestamp,
+        'KALSHI-ACCESS-SIGNATURE': base64.b64encode(signature).decode('ascii'),
+        'User-Agent': 'JCAlphaEdge/connection',
+    })
+    try:
+        with urlopen(request, timeout=8) as response:
+            result = json.load(response)
+    except HTTPError as error:
+        raise ValueError(f'Kalshi respondió HTTP {error.code}. Revisa las claves y vuelve a intentar.') from None
+    except (OSError, ValueError):
+        raise ValueError('No se pudo verificar la cuenta con Kalshi.') from None
+    balance = _plan_number(result.get('balance')) if isinstance(result, dict) else None
+    if balance is None or balance < 0:
+        raise ValueError('Kalshi no devolvió un saldo verificable.')
+
+
 class Controller:
-    def __init__(self,bot):
-        self.bot=bot
-        self.connection_root=bot
-        self.seen={}
-        self.connection={'message':('Prueba virtual · datos públicos; sin órdenes reales.' if isinstance(bot,PaperBot) else 'REAL · Cuenta pendiente de conectar.')}
-        active=[]  # Explicit mode selection owns which ledger is shown.
-        if len(active)==1:
-            self.bot=active[0]
-            self.connection={'message':'Cuenta REAL recuperada.','environment':'live'}
-    def handle(self,event):
-        if not isinstance(event,dict) or event.get('action')=='ack':
+    def __init__(self, bot):
+        self.bot = bot
+        self.seen = {}
+
+    def handle(self, event):
+        if not isinstance(event, dict) or event.get('action') == 'ack':
             return None
-        action=event.get('action');event_id=event.get('id')
-        if not isinstance(event_id,str) or len(event_id)>160:
+        action, event_id = event.get('action'), event.get('id')
+        if not isinstance(event_id, str) or len(event_id) > 160:
             return None
         if event_id in self.seen:
             return self.seen[event_id]
-        reply={'id':event_id,'ok':True,'kind':action}
+        reply = {'id': event_id, 'ok': True, 'kind': action}
         try:
-            payload=event.get('payload',{})
-            if not isinstance(payload,dict):raise ValueError('Solicitud inválida.')
-            if action=='command':
-                if not isinstance(self.bot,(ConnectedBot,PaperBot)):raise ValueError('Conecta la cuenta REAL de Kalshi antes de operar.')
-                command=payload.get('command')
+            payload = event.get('payload', {})
+            if not isinstance(payload, dict):
+                raise ValueError('Solicitud inválida.')
+            if action == 'command':
+                command = payload.get('command')
                 self.bot.command(command)
-                reply['message']={'start':('Prueba virtual activada.' if isinstance(self.bot,PaperBot) else 'Operaciones en Kalshi activadas.'),'pause':'Entradas pausadas; salidas vigiladas.',
-                                  'close':'Cierre solicitado; esperando liquidez actual.'}[command]
-            elif action=='settings':
-                self.bot.save_settings(payload);reply['saved_settings']=dict(self.bot.settings);reply['message']='Ajustes guardados. Meta acumulada: $'+str(self.bot.settings['daily_goal_dollars'])+' de ganancia; no se reinicia cada día.'
-            elif action=='public':
-                market=self.bot.feed.current();book=self.bot.feed.book(market['ticker'])
-                reply['message']='Kalshi responde: '+market['ticker']
-                self.connection={'message':'Consulta pública verificada: '+market['ticker'],'verified_at':stamp()}
-            elif action=='verify_demo':
-                if isinstance(self.bot,PaperBot):raise ValueError('Apaga Dinero virtual antes de conectar una cuenta real.')
-                self.auto_disabled=False
-                self.connection=_connect_kalshi(self,payload)
-                reply['message']=self.connection['message']
-            elif action=='sync_account':
-                if not isinstance(self.bot,ConnectedBot):raise ValueError('Primero conecta una cuenta de Kalshi.')
+                reply['message'] = {'start': 'Simulación activada.', 'pause': 'Entradas pausadas.',
+                                    'close': 'Cierre virtual solicitado.'}[command]
+            elif action == 'settings':
+                if payload.keys() - {'starting_balance', 'daily_goal_dollars',
+                                     'radar_budget_dollars', 'radar_stop_profit_cents',
+                                     'radar_entry_limit_cents'}:
+                    raise ValueError('El ajuste enviado no está disponible.')
+                self.bot.save_settings(payload)
+                reply['message'] = 'Ajustes guardados y aplicados.'
+            elif action == 'verify_kalshi':
+                _verify_kalshi_account(payload.get('key_id'), payload.get('pem'))
+                reply['message'] = 'Cuenta de Kalshi verificada. Operaciones en simulación.'
+            elif action == 'export':
+                stream = io.StringIO()
+                writer = csv.writer(stream)
                 with self.bot.lock:
-                    self.bot.reconcile_orders()
-                    self.bot.account_cash=self.bot.account.balance();self.bot.balance_at=time.monotonic()
-                    unresolved=len(self.bot.pending_orders())
-                reply['message']=f'Sincronizado. Órdenes por confirmar: {unresolved}.'
-            elif action=='export':
-                stream=io.StringIO();writer=csv.writer(stream)
-                with self.bot.lock:
-                    cursor=self.bot.db.execute('SELECT * FROM trades ORDER BY id')
-                    writer.writerow([x[0] for x in cursor.description]);writer.writerows(cursor.fetchall())
-                reply.update(csv=stream.getvalue(),message='Historial completo exportado.')
+                    cursor = self.bot.db.execute('SELECT * FROM trades ORDER BY id')
+                    writer.writerow([column[0] for column in cursor.description])
+                    writer.writerows(cursor)
+                reply.update(csv=stream.getvalue(), message='Historial completo exportado.')
             else:
                 raise ValueError('Acción desconocida.')
-        except ValueError as e:
-            reply.update(ok=False,message=str(e))
-        except Exception as exc:
-            if action=='verify_demo':
-                stage=getattr(self,'connection_stage','preparar la conexión')
-                if isinstance(exc,ImportError):
-                    message='Falta cryptography en el servidor. Añade cryptography>=43,<47 a requirements.txt y vuelve a desplegar.'
-                elif isinstance(exc,(OSError,sqlite3.Error)):
-                    message=f'No se pudo preparar el historial de Kalshi ({type(exc).__name__}). Comprueba que ALPHA_DB apunte a una carpeta escribible.'
-                else:
-                    # Report type/stage only: raw exceptions may contain credentials.
-                    message=f'No se pudo conectar al {stage} ({type(exc).__name__}). No se activaron compras.'
-                reply.update(ok=False,message=message)
-            else:
-                reply.update(ok=False,message='No se pudo completar la operación. No se confirmó el cambio.')
-        if action=='verify_demo':
-            self.connection={**self.connection,'message':reply['message'],
-                             'state':'connected' if reply['ok'] else 'error','checked_at':stamp()}
-        self.seen[event_id]=reply
-        if len(self.seen)>500:self.seen.pop(next(iter(self.seen)))
+        except (ValueError, sqlite3.Error) as exc:
+            reply.update(ok=False, message=str(exc))
+        self.seen[event_id] = reply
+        if len(self.seen) > 500:
+            self.seen.pop(next(iter(self.seen)))
         return reply
+
     def snapshot(self):
-        result=self.bot.view()
-        with self.bot.lock:
-            result['has_trades']=bool(self.bot.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone())
-        result['connection']=self.connection.copy()
-        result['mode']='SIMULACIÓN' if isinstance(self.bot,PaperBot) else 'REAL'
-        if not isinstance(self.bot,(ConnectedBot,PaperBot)):
-            result.update(running=False,execution_mode=None)
-            if result.get('status') != 'SIN DATOS':
-                result['message']='Lectura activa · conecta una cuenta solo para operar en real.'
-            result['totals']={k:0 for k in result['totals']}
-            result['has_trades']=False
-        return result
+        return self.bot.view()
 
 
-
-def _saved_kalshi_credentials(secrets_source=None):
-    def read(name):
-        value=os.environ.get(name)
-        if value is None and secrets_source is not None:
-            try:value=secrets_source.get(name,'')
-            except Exception:value=''
-        return value.strip() if isinstance(value,str) else ''
-    key_id=read('KALSHI_API_KEY_ID');pem=read('KALSHI_PRIVATE_KEY')
-    # Accept multiline secrets as well as escaped newlines in environment values.
-    return key_id,pem.replace('\\n','\n')
-
-def _auto_connect_saved(controller,credentials):
-    if getattr(controller,'auto_disabled',False) or isinstance(controller.bot,(ConnectedBot,PaperBot)):return
-    key_id,pem=credentials
-    if not key_id and not pem:return
-    root=controller.connection_root
-    with root.lock:
-        if time.monotonic()<getattr(root,'saved_retry_at',0):return
-        if not key_id or not pem:
-            controller.connection={'message':'Completa KALSHI_API_KEY_ID y KALSHI_PRIVATE_KEY en los secretos del servidor.'}
-            return
-        if root.running:return
-        identity=hashlib.sha256(('live:'+key_id).encode()).hexdigest()[:24]
-        linked=getattr(root,'connected_accounts',{}).get(identity)
-        if linked is not None and not linked.stop_event.is_set():
-            controller.bot=linked
-            controller.connection={'message':'Cuenta REAL conectada con las claves guardadas en el servidor.','environment':'live'}
-            return
-        try:
-            controller.connection=_connect_kalshi(controller,dict(environment='live',accept_real=True,key_id=key_id,pem=pem))
-            controller.connection['message']='Cuenta REAL conectada automáticamente. Entradas pausadas; pulsa INICIAR para comprar.'
-        except Exception as exc:
-            root.saved_retry_at=max(time.monotonic()+30,getattr(controller,'connect_retry_at',0))
-            message=str(exc) if isinstance(exc,ValueError) else 'No se pudo completar la conexión automática.'
-            controller.connection={'message':message+' Se reintentará automáticamente en al menos 30 segundos.','state':'error'}
-
-
-
-def _refresh_runtime_bot(root, paper_mode):
-    """Rebind cached resources after Streamlit re-executes class definitions."""
-    with root.lock:
-        root.__class__=PaperBot if paper_mode else Bot
-        root.feed.__class__=MarketData
-        for linked in getattr(root,'connected_accounts',{}).values():
-            with linked.lock:
-                linked.__class__=ConnectedBot
-                linked.account.__class__=KalshiAccount
-                linked.feed.__class__=AccountMarketData
-    root.start_worker()
-    return root
-
-
-
-def _runtime_registry():
-    # This module survives Streamlit script reruns and cache invalidation.
+def _shared_runtime_bot():
     import sys
-    candidate=types.ModuleType('_alpha_edge_runtime_app84_paper_only')
-    candidate.lock=threading.RLock()
-    candidate.bots={}
-    return sys.modules.setdefault(candidate.__name__,candidate)
 
-
-def _shared_runtime_bot(paper_mode):
-    db=Path(os.environ.get('ALPHA_DB',ROOT/'data'/'alpha.sqlite3'))
-    if paper_mode:
-        db=db.with_name(db.stem+'_paper_multicrypto_v1'+db.suffix)
-    db=db.resolve()
-    key=str(db)
-    registry=_runtime_registry()
+    db = Path(os.environ.get('ALPHA_DB', ROOT / 'data' / 'alpha.sqlite3'))
+    db = db.with_name(db.stem + '_paper_app84' + db.suffix).resolve()
+    candidate = types.ModuleType('_alpha_edge_radar_runtime')
+    candidate.lock = threading.RLock()
+    candidate.bots = {}
+    registry = sys.modules.setdefault(candidate.__name__, candidate)
     with registry.lock:
-        bot=registry.bots.get(key)
+        bot = registry.bots.get(db)
         if bot is not None:
-            return _refresh_runtime_bot(bot,paper_mode)
-        # Recover a worker from the preceding script version in this process.
-        # Keep its ledger and file lock; never bypass a lock held elsewhere.
-        matches={}
-        for worker in threading.enumerate():
-            owner=getattr(getattr(worker,'_target',None),'__self__',None)
-            held=getattr(owner,'_process_lock',None)
-            if (owner is None or held is None or held.closed or
-                    type(owner).__name__ not in ('Bot','PaperBot')):
-                continue
-            if Path(held.name).resolve()==Path(key+'.lock'):
-                matches[id(owner)]=owner
-        if len(matches)>1:
-            raise RuntimeError('Hay motores antiguos duplicados. Reinicia la app una vez para cargar esta versión.')
-        if matches:
-            bot=next(iter(matches.values()))
-            workers=[t for t in threading.enumerate()
-                     if getattr(getattr(t,'_target',None),'__self__',None) is bot]
-            if len(workers)>1:
-                raise RuntimeError('Hay motores antiguos duplicados. Reinicia la app una vez para cargar esta versión.')
-            registry.bots[key]=bot
-            return _refresh_runtime_bot(bot,paper_mode)
-        db.parent.mkdir(parents=True,exist_ok=True)
-        held=open(key+'.lock','a+')
-        bot=None
+            return bot
+        db.parent.mkdir(parents=True, exist_ok=True)
+        held = open(str(db) + '.lock', 'a+')
         try:
-            if os.name=='nt':
+            if os.name == 'nt':
                 import msvcrt
-                held.seek(0);held.write('0');held.flush();held.seek(0)
-                msvcrt.locking(held.fileno(),msvcrt.LK_NBLCK,1)
+                held.seek(0)
+                held.write('0')
+                held.flush()
+                held.seek(0)
+                msvcrt.locking(held.fileno(), msvcrt.LK_NBLCK, 1)
             else:
                 import fcntl
-                fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            bot=PaperBot(db) if paper_mode else Bot(db)
-            bot._process_lock=held
+                fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            bot = PaperBot(db)
+            bot._process_lock = held
             bot.start_worker()
         except Exception:
-            if bot is not None:
-                bot.stop_event.set()
-                if bot.thread is not None:
-                    bot.thread.join(timeout=10)
-                if bot.thread is not None and bot.thread.is_alive():
-                    # Retain ownership if a worker has not stopped yet.
-                    registry.bots[key]=bot
-                    raise
-                bot.db.close()
             held.close()
             raise
-        registry.bots[key]=bot
+        registry.bots[db] = bot
         return bot
 
 
@@ -2878,7 +2709,7 @@ def streamlit_main():
     import streamlit as st
     import streamlit.components.v1 as components
     import tempfile
-    st.set_page_config(page_title='ALPHA EDGE · BTC 15 MIN',layout='wide',initial_sidebar_state='collapsed')
+    st.set_page_config(page_title='ALPHA EDGE · RADAR 15 MIN',layout='wide',initial_sidebar_state='collapsed')
     st.markdown('<style>.block-container{padding:0!important;max-width:100%!important}header,footer{display:none!important}.stApp{background:#080e22}</style>',unsafe_allow_html=True)
     try:
         password=os.environ.get('ALPHA_PASSWORD') or st.secrets.get('ALPHA_PASSWORD','')
@@ -2892,40 +2723,16 @@ def streamlit_main():
             else:st.error('Contraseña incorrecta.')
         st.stop()
 
-    if 'alpha_restore_mode' in st.session_state:
-        st.session_state.alpha_paper_switch=st.session_state.pop('alpha_restore_mode')
-    st.toggle('Dinero virtual · prueba temporal', value=True, key='alpha_paper_switch')
-    paper_mode=True  # Safety: simulation-only build
-    previous_mode=st.session_state.get('alpha_previous_mode')
-    previous=st.session_state.get('alpha_controller')
-    if previous is not None and previous_mode is not None:
-        previous.__class__=Controller
-        _refresh_runtime_bot(previous.connection_root, previous_mode)
-    if previous is not None and previous_mode is not None and previous_mode != paper_mode:
-        with previous.bot.lock:
-            busy_mode=previous.bot.running or bool(previous.bot.positions())
-        if busy_mode:
-            st.error('Pausa las entradas y cierra o espera las posiciones del entorno anterior antes de cambiar el switch.')
-            if st.button('Volver al entorno anterior'):
-                st.session_state.alpha_restore_mode=previous_mode
-                st.rerun()
-            st.stop()
     try:
-        bot=_shared_runtime_bot(paper_mode)
-    except (OSError,RuntimeError):
-        st.error('El motor anterior sigue ocupando el historial. Reinicia la app una vez para cargar esta versión; no se iniciaron nuevas operaciones.')
+        bot = _shared_runtime_bot()
+    except (OSError, sqlite3.Error) as exc:
+        st.error(f'No se pudo abrir el historial de simulación: {exc}.')
         st.stop()
-    if previous is None or previous_mode != paper_mode:
-        st.session_state.alpha_controller=Controller(bot)
-        st.session_state.alpha_reply=None
-    controller=st.session_state.alpha_controller
-    controller.__class__=Controller
-    st.session_state.alpha_previous_mode=paper_mode
-    if paper_mode:
-        st.caption('MODO PRUEBA · SALDO VIRTUAL')
-    else:
-        st.caption('MODO REAL · Lectura activa. Conecta e inicia para operar.')
-    saved_credentials=_saved_kalshi_credentials(st.secrets)
+    if 'alpha_radar_controller' not in st.session_state:
+        st.session_state.alpha_radar_controller = Controller(bot)
+        st.session_state.alpha_reply = None
+    controller = st.session_state.alpha_radar_controller
+    st.caption('SIMULACIÓN · 5 MONEDAS · 3 PARA CONFIRMAR · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
@@ -2933,53 +2740,17 @@ def streamlit_main():
     if not index.exists():index.write_text(_TERMINAL_HTML,encoding='utf-8')
     terminal=components.declare_component('alpha_edge_terminal',path=str(directory))
 
-    @st.fragment(run_every=5)
-    def live_terminal():
-        _auto_connect_saved(controller,saved_credentials)
-        event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
-        if isinstance(event,dict) and event.get('action')=='ack':
-            st.session_state.alpha_reply=None
-        elif isinstance(event,dict) and event.get('id') not in controller.seen:
-            reply=controller.handle(event)
-            if reply:
-                st.session_state.alpha_reply=reply
-                st.rerun()
-    live_terminal()
+    def handle_terminal_change():
+        event = st.session_state.get('alpha_terminal')
+        reply = controller.handle(event)
+        if reply:
+            st.session_state.alpha_reply = reply
 
-    @st.fragment(run_every=20)
-    def multicrypto_radar_view():
-        snap=controller.snapshot()
-        st.markdown('### 🧠 CEREBRO MULTICRIPTO · SIMULACIÓN')
-        st.caption('ESPERANDO significa que no hay señal o cotizaciones verificadas; no es una compra.')
-        st.caption(
-            f"Panel cada 20 segundos · {len(RADAR_ASSETS)} monedas ({', '.join(RADAR_ASSETS)}) · "
-            f"consenso ≥{RADAR_MAJORITY_COUNT} con ask ≥{RADAR_MAJOR_MIN_CENTS}¢ · "
-            f"minorías ≤{RADAR_LIMIT_CENTS}¢ · máximo {RADAR_MAX_POSITIONS_PER_ROUND} entradas "
-            f"virtuales de ${RADAR_BUDGET_DOLLARS:g} por ronda. Se mantienen hasta liquidación."
-        )
-        st.write(snap.get('message','Esperando primera lectura'))
-        missing=snap.get('radar_missing') or {}
-        if missing:
-            st.warning('Mercados sin datos (no se harán entradas): '+', '.join(f'{a}: {reason}' for a,reason in missing.items()))
-        data=snap.get('radar') or []
-        if data:
-            st.dataframe([{'Moneda':r['asset'],'SÍ ask (¢)':r['yes_cents'],
-                          'NO ask (¢)':r['no_cents'],
-                          'Favorito':'SÍ' if r['yes_cents'] > r['no_cents'] else 'NO',
-                          'Segundos':r['seconds_left']} for r in data],
-                         use_container_width=True,hide_index=True)
-        else:
-            st.info('Esperando mercados de 15 minutos verificables en la API pública de Kalshi. No se simulan entradas sin datos reales.')
-        choices=snap.get('radar_candidates') or []
-        if choices:
-            st.write('**Candidatas baratas:** '+', '.join(f"{r['asset']} {r['buy_side']} {r['entry_ask_cents']:.1f}¢" for r in choices))
-        history=[r for r in (snap.get('trades') or []) if 'MULTICRYPTO_MINORIAS' in str(r.get('entry_evidence',''))]
-        if history:
-            won=sum(1 for r in history if r.get('closed') and (r.get('pnl') or 0)>0)
-            lost=sum(1 for r in history if r.get('closed') and (r.get('pnl') or 0)<=0)
-            pnl=sum(r.get('pnl') or 0 for r in history if r.get('closed'))
-            st.caption(f'Prueba: {won} ganadas · {lost} perdidas · {sum(not bool(r.get("closed")) for r in history)} abiertas · resultado neto ${pnl:.2f}')
-    multicrypto_radar_view()
+    @st.fragment(run_every=2)
+    def live_terminal():
+        terminal(snapshot=controller.snapshot(), reply=st.session_state.get('alpha_reply'),
+                 key='alpha_terminal', default=None, on_change=handle_terminal_change)
+    live_terminal()
 
 if __name__=='__main__':
     from streamlit.runtime.scriptrunner import get_script_run_ctx
