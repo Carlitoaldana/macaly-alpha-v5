@@ -2707,53 +2707,28 @@ def _direction_consistent(candidate, signal, active=None):
     return agree >= 3 and agree > oppose
 
 
-def _round_opening_crosscheck(state, candidate, signal, now):
-    """Require fresh directional evidence before the first entry of this ticker.
-
-    Old candles remain context, never sufficient evidence for an opening entry.
-    Each live feed has a separate short tape. Later reversals are unrestricted.
-    """
+def _first_signal_data_check(state, candidate, signal):
+    """Require a valid live price for the first signal of the round."""
     if state.get("first_direction") in ("UP", "DOWN"):
         state["opening_conflict"] = None
         return candidate
-    def wait(reason):
-        state["opening_conflict"] = reason
-        return None
-    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
-        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
+
     if not signal or signal.get("data_valid") is False:
-        return wait("Esperando datos actuales para la primera señal")
+        state["opening_conflict"] = "Esperando datos actuales para la primera señal"
+        return None
+
     price = _plan_number(signal.get("price"))
     atr = _plan_number(signal.get("atr"))
     source = signal.get("price_source")
     if (price is None or price <= 0 or atr is None or atr <= 0
             or source not in ("COINBASE", "KALSHI LIVE")):
-        return wait("Esperando precio en vivo para la primera señal")
-    stamp = now.timestamp()
-    tapes = state.setdefault("opening_live_tapes", {})
-    tape = tapes.get(source, [])
-    if tape and (stamp < tape[-1][0] or stamp-tape[-1][0] > LIVE_PRICE_MAX_AGE):
-        tape = []
-    tape = [x for x in tape if 0 <= stamp-x[0] <= 30]
-    if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
-        tape.append([stamp, price])
-    tapes[source] = tape
+        state["opening_conflict"] = "Esperando precio en vivo para la primera señal"
+        return None
+
     if candidate not in ("UP", "DOWN"):
-        return wait("Analizando fuerza actual antes de la primera señal")
-    if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
-        return wait("Observando movimiento actual antes de la primera señal")
-    prices = [float(x[1]) for x in tape]
-    sign = 1 if candidate == "UP" else -1
-    split = len(prices)//2
-    net = sign*(prices[-1]-prices[0])
-    recent = sign*(prices[-1]-prices[split])
-    travel = sum(abs(y-x) for x,y in zip(prices,prices[1:]))
-    efficiency = net/max(travel, 1e-8)
-    minimum = max(2.0, .10*atr)
-    latest = sign*(prices[-1]-prices[-2])
-    if (net < minimum or recent < .5*minimum or efficiency < .60
-            or latest < -.25*minimum):
-        return wait("Sin fuerza actual suficiente para " + candidate)
+        state["opening_conflict"] = "Analizando fuerza actual antes de la primera señal"
+        return None
+
     state["opening_conflict"] = None
     return candidate
 
@@ -2813,7 +2788,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         candidate = None
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
     level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    candidate = _first_signal_data_check(state, candidate, signal)
     # Opening-only veto. Once the round has a confirmed first direction,
     # subsequent retention/reversal is governed by its separate checks.
     if state.get("first_direction") not in ("UP", "DOWN"):
@@ -5026,7 +5001,6 @@ def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
-        state.setdefault("opening_live_tapes", {})
         _reset_withdrawal(state)
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
