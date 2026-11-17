@@ -1586,10 +1586,12 @@ CORE_SERIES_15M = {
 }
 EXTRA_SERIES_15M = {
     'DOGE': 'KXDOGE15M',
+    'NEAR': 'KXNEAR15M',
 }
 SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
-RADAR_REVISION = 'radar-5x15-v8'
-DIRECTION_MIN = 3
+RADAR_REVISION = 'radar-6x15-v10-4x70'
+DIRECTION_MIN = 4
+DIRECTION_CONFIDENCE_MIN = 70
 ROUND_LIMIT = 2
 QUOTE_MAX_AGE = 25
 
@@ -1675,9 +1677,9 @@ def valid_radar_rows(rows, now):
 
 
 def radar_decision(rows, entry_limit):
-    up = sorted((asset for asset, row in rows.items() if row['yes'] > 50),
+    up = sorted((asset for asset, row in rows.items() if row['yes'] >= DIRECTION_CONFIDENCE_MIN),
                 key=lambda asset: (-rows[asset]['yes'], asset))
-    down = sorted((asset for asset, row in rows.items() if row['yes'] < 50),
+    down = sorted((asset for asset, row in rows.items() if row['yes'] <= 100 - DIRECTION_CONFIDENCE_MIN),
                   key=lambda asset: (rows[asset]['yes'], asset))
     if len(up) >= DIRECTION_MIN:
         side, leaders, opposite, ask = 'UP', up[:DIRECTION_MIN], down, 'yes_ask'
@@ -1765,7 +1767,7 @@ class PaperBot(Bot):
         self.snapshot['mode'] = 'SIMULACIÓN'
         self.snapshot['radar'] = [{'asset': asset, 'detail': 'Consultando'} for asset in SERIES_15M]
         self.snapshot['updated'] = stamp()
-        self.snapshot['radar_summary'] = 'Consultando las cinco monedas del radar.'
+        self.snapshot['radar_summary'] = 'Consultando las seis monedas del radar.'
         if 'round_close' not in {r[1] for r in self.db.execute('PRAGMA table_info(trades)')}:
             self.db.execute('ALTER TABLE trades ADD COLUMN round_close TEXT')
         self.db.execute('CREATE INDEX IF NOT EXISTS trades_round_close ON trades(round_close)')
@@ -1877,7 +1879,7 @@ class PaperBot(Bot):
                 entry_limit = self.settings['radar_entry_limit_cents']
                 fresh_side, leaders, eligible, _, _ = radar_decision(fresh_rows, entry_limit)
                 if fresh_side != side:
-                    notes[asset] = 'Se perdió la confirmación de tres monedas durante la verificación'
+                    notes[asset] = 'Se perdió la confirmación de cuatro monedas al 70 % durante la verificación'
                     break
                 if asset not in eligible or time.monotonic() - book['at'] > 10:
                     notes[asset] = 'Cotización vencida durante la verificación'
@@ -2732,7 +2734,7 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · 5 MONEDAS · 3 PARA CONFIRMAR · SALDO VIRTUAL')
+    st.caption('SIMULACIÓN · 6 MONEDAS · 4 AL 70 % PARA CONFIRMAR · SALDO VIRTUAL')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
