@@ -2527,7 +2527,7 @@ if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRada
 $('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● '+esc(s.mode);$('#executionFooter').textContent=esc(s.mode);
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.radar_entry_limit_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-renderPositions(s,fresh);$('#cashLabel').textContent='Resultado registrado: '+money(s.totals.cash)+' · consultar saldo real en Kalshi';
+renderPositions(s,fresh);$('#cashLabel').textContent=s.account_balance!=null?'Saldo REAL disponible en Kalshi: '+money(s.account_balance)+(s.account_balance_updated?' · actualizado '+localtime(s.account_balance_updated):''):(s.execution_mode==='live'?'Saldo real no disponible · comprueba conexión Kalshi':'Conecta Kalshi para consultar tu saldo real');
 if(!loaded||!dirty){for(const [name,key] of Object.entries(names)){
 const field=form.elements[name],value=String(s.settings[key]);
 if(name==='stopProfit'&&!Array.from(field.options).some(option=>option.value===value))field.add(new Option(value+'%',value));
@@ -2688,6 +2688,9 @@ class LiveBot(PaperBot):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.client = None
+        self._account_balance = None
+        self._account_balance_updated = None
+        self._account_balance_checked = 0.0
         self.running = False
         self.snapshot['mode'] = 'REAL · SIN CONECTAR'
         self.db.execute('CREATE TABLE IF NOT EXISTS live_order_attempts (ticker TEXT NOT NULL, action TEXT NOT NULL, attempted TEXT NOT NULL, PRIMARY KEY(ticker,action))')
@@ -2695,8 +2698,16 @@ class LiveBot(PaperBot):
 
     def connect(self, key_id, pem):
         _verify_kalshi_account(key_id, pem)
+        client = KalshiTradingClient(key_id, pem)
+        balance_result = client.balance()
+        cents = balance_result.get('balance') if isinstance(balance_result, dict) else None
+        if isinstance(cents, bool) or not isinstance(cents, (int, float)) or cents < 0:
+            raise ValueError('Kalshi no devolvió un saldo real válido.')
         with self.lock:
-            self.client = KalshiTradingClient(key_id, pem)
+            self.client = client
+            self._account_balance = cents / 100
+            self._account_balance_updated = stamp()
+            self._account_balance_checked = time.monotonic()
             self.running = False
             self.snapshot['mode'] = 'REAL · CONECTADO'
         self.event('CONEXIÓN', 'Cuenta real verificada. Entradas pausadas hasta pulsar Iniciar.')
@@ -2781,10 +2792,33 @@ class LiveBot(PaperBot):
                                 (stamp(), 'LIQUIDACIÓN REAL' if settlement else 'VENTA REAL', f"#{p['id']} · {reason}"))
 
     def view(self):
+        # Consultar Kalshi cada 30 segundos; no confundir saldo real con capital configurado.
+        with self.lock:
+            client = self.client
+            refresh = client is not None and time.monotonic() - self._account_balance_checked >= 30
+            if refresh:
+                self._account_balance_checked = time.monotonic()
+        if refresh:
+            try:
+                response = client.balance()
+                cents = response.get('balance') if isinstance(response, dict) else None
+                if isinstance(cents, bool) or not isinstance(cents, (int, float)) or cents < 0:
+                    raise ValueError('Saldo inválido')
+                with self.lock:
+                    if self.client is client:
+                        self._account_balance = cents / 100
+                        self._account_balance_updated = stamp()
+            except (ValueError, OSError):
+                with self.lock:
+                    if self.client is client:
+                        self._account_balance = None  # Nunca mostrar un saldo antiguo como actual.
+                        self._account_balance_updated = None
         result = super().view()
-        result.update(mode='REAL' if self.client else 'REAL · SIN CONECTAR',
-                      execution_mode='live' if self.client else 'disconnected',
-                      account_balance=None)
+        with self.lock:
+            result.update(mode='REAL' if self.client else 'REAL · SIN CONECTAR',
+                          execution_mode='live' if self.client else 'disconnected',
+                          account_balance=self._account_balance if self.client else None,
+                          account_balance_updated=self._account_balance_updated if self.client else None)
         return result
 
 class Controller:
