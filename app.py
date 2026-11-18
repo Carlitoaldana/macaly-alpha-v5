@@ -1682,12 +1682,14 @@ def radar_decision(rows, entry_limit):
     down = sorted((asset for asset, row in rows.items() if row['yes'] <= 100 - DIRECTION_CONFIDENCE_MIN),
                   key=lambda asset: (rows[asset]['yes'], asset))
     if len(up) >= DIRECTION_MIN:
-        side, leaders, opposite, ask = 'UP', up[:DIRECTION_MIN], down, 'yes_ask'
+        side, leaders, ask = 'UP', up[:DIRECTION_MIN], 'yes_ask'
     elif len(down) >= DIRECTION_MIN:
-        side, leaders, opposite, ask = 'DOWN', down[:DIRECTION_MIN], up, 'no_ask'
+        side, leaders, ask = 'DOWN', down[:DIRECTION_MIN], 'no_ask'
     else:
         return None, [], [], len(up), len(down)
-    candidates = sorted((asset for asset in opposite if rows[asset][ask] <= entry_limit),
+    # Price eligibility is independent of the asset's own confidence group.
+    candidates = sorted((asset for asset, row in rows.items()
+                         if row[ask] <= entry_limit),
                         key=lambda asset: (rows[asset][ask], asset))
     return side, leaders, candidates, len(up), len(down)
 
@@ -1955,7 +1957,7 @@ class PaperBot(Bot):
         else:
             direction = 'SÍ' if majority == 'UP' else 'NO'
             opportunity = (' · Candidatas: ' + ', '.join(candidates)
-                           if candidates else f' · Sin contrarias a {entry_limit}¢ o menos')
+                           if candidates else f' · Sin contratos elegibles a {entry_limit}¢ o menos')
             summary = f'Mayoría {direction} · {yes} SÍ / {no} NO' + opportunity
         display = []
         for asset in SERIES_15M:
