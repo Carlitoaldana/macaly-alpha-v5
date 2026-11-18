@@ -2682,6 +2682,9 @@ def _direction_evidence(signal):
     momentum = _plan_number(signal.get("mom3"))
     if momentum is not None and momentum != 0:
         families["momentum"] = "UP" if momentum > 0 else "DOWN"
+    ut = signal.get("ut_direction")
+    if ut in ("UP", "DOWN"):
+        families["ut_bot"] = ut
     return families
 
 
@@ -2700,7 +2703,8 @@ def _direction_consistent(candidate, signal, active=None):
     oppose = len(families) - agree
     if active in ("UP", "DOWN") and active != candidate:
         return agree >= 3 and oppose == 0
-    return agree >= 3 and agree > oppose
+    # UT participa en el consenso del cerebro para la primera entrada.
+    return agree >= 3 and agree > oppose and families.get("ut_bot") == candidate
 
 
 def _first_signal_data_check(state, candidate, signal):
@@ -4983,6 +4987,24 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     _TRACE_CONTEXT.build_payload = None
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
+    # UT Bot Alerts: misma función ATR(10), sensibilidad 1.0 de las flechas.
+    # La última flecha define el lado UT vigente, sin exigir una flecha nueva
+    # en cada actualización de la ronda.
+    try:
+        ut_frame = df.copy().sort_values("time").drop_duplicates("time")
+        ut_frame["time"] = pd.to_datetime(ut_frame["time"], utc=True)
+        ut_marks = _chart_ut_markers(ut_frame, atr_period=10, sensitivity=1.0)
+        sig["ut_direction"] = ut_marks[-1]["direction"] if ut_marks else None
+        sig["ut_marker_time"] = ut_marks[-1]["time"] if ut_marks else None
+        # El motor recibe UT como evidencia técnica, antes de decidir la
+        # primera entrada; no reemplaza EMA, momentum, RSI ni estructura.
+        if sig["ut_direction"] in ("UP", "DOWN"):
+            sig["ut_consensus"] = _direction_evidence(sig)
+        else:
+            sig["ut_consensus"] = _direction_evidence(sig)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        sig["ut_direction"] = None
+        sig["ut_marker_time"] = None
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
         payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
