@@ -1592,7 +1592,7 @@ SERIES_15M = {**CORE_SERIES_15M, **EXTRA_SERIES_15M}
 RADAR_REVISION = 'radar-6x15-4x70-v9'
 DIRECTION_MIN = 4
 DIRECTION_CONFIDENCE_MIN = 70
-ROUND_LIMIT = 2
+ROUND_LIMIT = 1
 QUOTE_MAX_AGE = 25
 
 
@@ -1854,7 +1854,7 @@ class PaperBot(Bot):
                     '(round_close IS NULL AND julianday(opened)>=julianday(?) AND julianday(opened)<julianday(?))',
                     (close_key, (row['close'] - timedelta(minutes=15)).isoformat(), close_key)).fetchone()[0]
                 if count >= ROUND_LIMIT:
-                    notes[asset] = 'Límite de dos entradas alcanzado'
+                    notes[asset] = 'Límite de una entrada alcanzado'
                     break
                 if self.db.execute('SELECT 1 FROM trades WHERE ticker=?', (row['ticker'],)).fetchone():
                     notes[asset] = 'Ya registrada en esta ronda'
@@ -2268,7 +2268,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <thead><tr><th>Moneda</th><th>Contrato</th><th>SÍ implícito</th><th>NO implícito</th><th>Comprar SÍ</th><th>Comprar NO</th><th>Estado</th></tr></thead>
 <tbody id="radarRows"></tbody>
 </table></div>
-<div class="notice">Cuatro monedas vigentes con al menos 70% en la misma dirección confirman la señal · Por debajo de 70% no cuenta · Hasta dos monedas distintas por ronda.</div>
+<div class="notice">Cuatro monedas vigentes con al menos 70% en la misma dirección confirman la señal · Por debajo de 70% no cuenta · Máximo una moneda por ronda.</div>
 </article>
 </section>
 <section id="operacion" class="page hidden">
@@ -2327,7 +2327,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 </select>
 <small>Cierra toda la posición si hay compradores suficientes al porcentaje elegido o superior. El 100% espera la liquidación oficial.</small>
 </div>
-<div class="notice">Hasta dos monedas distintas por ronda.</div>
+<div class="notice">Máximo una moneda por ronda.</div>
 </div>
 </article>
 </div>
