@@ -2378,9 +2378,9 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Conexión Kalshi</h2>
 <div class="body">
-<button id="connectionMode" class="primary" type="button" aria-controls="kalshiAccount" aria-expanded="false">Modo simulación</button>
+<button id="connectionMode" class="primary" type="button" aria-controls="kalshiAccount" aria-expanded="false">Cuenta Kalshi</button>
 <div id="kalshiPublic">
-<p class="muted">Datos públicos de Kalshi. Compras y ventas exclusivamente virtuales.</p>
+<p class="muted">Datos públicos de Kalshi. Conecta tu cuenta para habilitar órdenes reales.</p>
 <div class="notice"><span id="connectionNotice">Consultando la API pública.</span></div>
 </div>
 <form id="kalshiAccount" class="hidden" autocomplete="off">
@@ -2395,7 +2395,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label for="privateKey">Clave privada</label>
 <textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM" spellcheck="false" autocomplete="off"></textarea>
 </div>
-<p class="muted">Conectar verifica tu cuenta. Las operaciones siguen en simulación.</p>
+<p class="muted">Conectar habilita órdenes reales. Las compras comienzan únicamente al pulsar Iniciar.</p>
 <button id="testApi" class="primary" type="submit">CONECTAR</button>
 <div class="notice" id="kalshiAccountStatus" role="status">Cuenta sin conectar.</div>
 </form>
@@ -2503,7 +2503,7 @@ connectionMode.onclick=()=>{
   const showAccount=kalshiAccount.classList.contains('hidden');
   kalshiAccount.classList.toggle('hidden',!showAccount);
   $('#kalshiPublic').classList.toggle('hidden',showAccount);
-  connectionMode.textContent=showAccount?'Modo real · conexión':'Modo simulación';
+  connectionMode.textContent=showAccount?'Cuenta Kalshi · conexión':'Cuenta Kalshi';
   connectionMode.setAttribute('aria-expanded',String(showAccount));
   if(!showAccount)$('#privateKey').value='';
   height();
@@ -2524,10 +2524,10 @@ function update(s){current=s;const fresh=isFresh(s),active=fresh?s.signal:null;
 const direction=active==='SÍ'?'UP':active==='NO'?'DOWN':null;
 const radarMarkup=(s.radar||[]).map(r=>'<tr><td>'+coinLabel(r)+'</td><td>'+esc(r.ticker||r.last_ticker)+'</td><td>'+pct(r.yes)+'</td><td>'+pct(r.no)+'</td><td>'+cents(r.yes_ask)+'</td><td>'+cents(r.no_ask)+'</td><td>'+esc(r.detail)+'</td></tr>').join('');
 if(radarMarkup!==lastRadarMarkup){$('#radarRows').innerHTML=radarMarkup;lastRadarMarkup=radarMarkup}
-$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● SIMULACIÓN';$('#executionFooter').textContent='SIMULACIÓN';
+$('#status').textContent=s.status;$('#sideStatus').textContent=s.running?'ACTIVO':'PAUSADO';$('#radar').classList.toggle('paused',!fresh);$('#radarSignal').textContent=direction||'—';$('#activeSignal').textContent=direction||(s.radar_count>=5?'SIN MAYORÍA':'ESPERANDO DATOS');$('#marketLabel').textContent=fresh?' · DATOS ACTIVOS':' · SIN DATOS';$('#feedStatus').textContent=fresh&&s.radar_count?'● Mercado conectado':'● Esperando datos';$('#executionModeLabel').textContent='● '+esc(s.mode);$('#executionFooter').textContent=esc(s.mode);
 $('#radarNotice').textContent=(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada');$('#entryLimit').textContent=s.settings.radar_entry_limit_cents+' ¢';$('#goalDisplay').textContent=money(s.settings.daily_goal_dollars);$('#sessionTime').textContent='MIAMI · '+localtime(new Date().toISOString());
 let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{metrics[i].textContent=(value>0?'+':'')+money(value);metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';$('#progressText').textContent=progress.toFixed(0)+'% · '+s.totals.completed+' cerradas · '+s.totals.wins+' ganadas / '+s.totals.losses+' perdidas';$('.mini-radar strong').textContent=progress.toFixed(0)+'%';
-renderPositions(s,fresh);$('#cashLabel').textContent='Disponible del bot: '+money(s.totals.cash)+' · virtual';
+renderPositions(s,fresh);$('#cashLabel').textContent='Resultado registrado: '+money(s.totals.cash)+' · consultar saldo real en Kalshi';
 if(!loaded||!dirty){for(const [name,key] of Object.entries(names)){
 const field=form.elements[name],value=String(s.settings[key]);
 if(name==='stopProfit'&&!Array.from(field.options).some(option=>option.value===value))field.add(new Option(value+'%',value));
@@ -2617,6 +2617,176 @@ def _verify_kalshi_account(key_id, pem):
         raise ValueError('Kalshi no devolvió un saldo verificable.')
 
 
+
+class KalshiTradingClient:
+    """Authenticated live orders. Never assume an HTTP success means a fill."""
+    def __init__(self, key_id, pem):
+        from cryptography.hazmat.primitives import serialization
+        self.key_id = key_id.strip()
+        self.key = serialization.load_pem_private_key(pem.strip().encode(), password=None)
+        self.root = 'https://external-api.kalshi.com'
+
+    def request(self, method, path, payload=None):
+        import base64
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import rsa, ed25519, padding
+        from urllib.error import HTTPError
+        timestamp = str(int(time.time() * 1000))
+        message = (timestamp + method + path.split('?')[0]).encode()
+        if isinstance(self.key, rsa.RSAPrivateKey):
+            digest = hashes.SHA256()
+            signature = self.key.sign(message, padding.PSS(mgf=padding.MGF1(digest), salt_length=digest.digest_size), digest)
+        elif isinstance(self.key, ed25519.Ed25519PrivateKey):
+            signature = self.key.sign(message)
+        else:
+            raise ValueError('Tipo de clave privada no compatible.')
+        headers = {'KALSHI-ACCESS-KEY': self.key_id,
+                   'KALSHI-ACCESS-TIMESTAMP': timestamp,
+                   'KALSHI-ACCESS-SIGNATURE': base64.b64encode(signature).decode(),
+                   'Content-Type': 'application/json', 'User-Agent': 'JCAlphaEdge/live'}
+        data = json.dumps(payload).encode() if payload is not None else None
+        try:
+            with urlopen(Request(self.root + path, data=data, headers=headers, method=method), timeout=12) as response:
+                return json.load(response)
+        except HTTPError as error:
+            raise ValueError(f'Kalshi HTTP {error.code}: orden no confirmada.') from None
+        except (OSError, ValueError) as error:
+            raise ValueError('No se pudo confirmar la respuesta de Kalshi; revisar órdenes antes de reintentar.') from error
+
+    def balance(self):
+        return self.request('GET', '/trade-api/v2/portfolio/balance')
+
+    def order(self, ticker, side, action, quantity, cents):
+        import uuid
+        if not 1 <= int(cents) <= 99 or quantity < 1:
+            raise ValueError('Precio o cantidad inválidos.')
+        order_id = str(uuid.uuid4())
+        payload = {'ticker': ticker, 'client_order_id': order_id, 'type': 'limit',
+                   'action': action, 'side': 'yes' if side == 'UP' else 'no',
+                   'count': int(quantity), 'yes_price' if side == 'UP' else 'no_price': int(cents),
+                   'time_in_force': 'fill_or_kill'}
+        response = self.request('POST', '/trade-api/v2/portfolio/orders', payload)
+        order = response.get('order') if isinstance(response, dict) else None
+        if not isinstance(order, dict):
+            raise ValueError('Orden enviada pero sin confirmación verificable; revisar Kalshi.')
+        exchange_id = order.get('order_id')
+        if not exchange_id:
+            raise ValueError('Kalshi no devolvió identificador de orden; revisar Kalshi.')
+        # The order detail, not the POST acknowledgment, determines whether filled.
+        verified = self.request('GET', '/trade-api/v2/portfolio/orders/' + quote(str(exchange_id), safe=''))
+        detail = verified.get('order') if isinstance(verified, dict) else None
+        if not isinstance(detail, dict):
+            raise ValueError('Orden sin estado verificable; revisar Kalshi.')
+        filled = int(detail.get('fill_count') or 0)
+        if filled != quantity:
+            raise ValueError(f'Orden {exchange_id}: {filled}/{quantity} ejecutados; revisar Kalshi antes de continuar.')
+        return exchange_id
+
+
+class LiveBot(PaperBot):
+    """Live-only execution: never write a trade unless Kalshi confirms its fill."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.client = None
+        self.running = False
+        self.snapshot['mode'] = 'REAL · SIN CONECTAR'
+        self.db.execute('CREATE TABLE IF NOT EXISTS live_order_attempts (ticker TEXT NOT NULL, action TEXT NOT NULL, attempted TEXT NOT NULL, PRIMARY KEY(ticker,action))')
+        self.db.commit()
+
+    def connect(self, key_id, pem):
+        _verify_kalshi_account(key_id, pem)
+        with self.lock:
+            self.client = KalshiTradingClient(key_id, pem)
+            self.running = False
+            self.snapshot['mode'] = 'REAL · CONECTADO'
+        self.event('CONEXIÓN', 'Cuenta real verificada. Entradas pausadas hasta pulsar Iniciar.')
+
+    def command(self, name):
+        if name == 'start' and self.client is None:
+            raise ValueError('Conecta primero tu cuenta real de Kalshi.')
+        return super().command(name)
+
+    def _enter_radar(self, rows, candidates, side, priority=None):
+        notes = {}
+        if self.client is None or not self.running or self.close_requested or side not in ('UP', 'DOWN'):
+            return notes
+        for asset in candidates:
+            row = rows[asset]
+            with self.lock:
+                if not self.running or self.client is None:
+                    break
+                close_key = row['close'].isoformat()
+                if self.db.execute('SELECT 1 FROM trades WHERE ticker=?', (row['ticker'],)).fetchone() or self.db.execute(
+                    'SELECT 1 FROM live_order_attempts WHERE ticker=? AND action=\'buy\'', (row['ticker'],)).fetchone():
+                    continue
+                count = self.db.execute('SELECT COUNT(*) FROM trades WHERE round_close=?', (close_key,)).fetchone()[0]
+                if count >= ROUND_LIMIT:
+                    break
+                totals = self.totals()
+                if self.settings['daily_goal_dollars'] and totals['accumulated'] >= self.settings['daily_goal_dollars']:
+                    break
+                budget = min(self.settings['radar_budget_dollars'], self.settings['max_trade_dollars'])
+            try:
+                feed = self.extra_feed if asset in EXTRA_SERIES_15M else self.feed
+                book = feed.book(row['ticker'])
+                with self.lock:
+                    fresh = valid_radar_rows(rows, utcnow())
+                    fresh_side, _, eligible, _, _ = radar_decision(fresh, self.settings['radar_entry_limit_cents'])
+                    if fresh_side != side or asset not in eligible or time.monotonic() - book['at'] > 10:
+                        continue
+                    sized = size_for_budget(book[side]['asks'], budget,
+                                            self.settings['fee_cents_per_contract'],
+                                            self.settings['radar_entry_limit_cents'], allow_partial=True)
+                    if not sized:
+                        continue
+                    quantity, price = sized
+                    # Persist attempt before network request to prevent duplicate orders after timeouts.
+                    with self.db:
+                        self.db.execute("INSERT INTO live_order_attempts(ticker,action,attempted) VALUES (?, 'buy', ?)", (row['ticker'], stamp()))
+                    order_id = self.client.order(row['ticker'], side, 'buy', quantity, int(round(price)))
+                    evidence = {'mode': 'live', 'kalshi_order_id': order_id, 'asset': asset}
+                    opened = stamp()
+                    fee = quantity * self.settings['fee_cents_per_contract'] / 100
+                    with self.db:
+                        self.db.execute("""INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,
+                            tp_pct,sl_pct,reverse,entry_evidence,round_close)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                            (row['ticker'], side, quantity, price, fee, opened, 0, 0, 0, dumps(evidence), close_key))
+                        self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
+                                        (opened, 'COMPRA REAL', f'{asset} · {quantity} contratos · Kalshi #{order_id}'))
+                    notes[asset] = 'Compra REAL confirmada · ' + str(order_id)
+            except Exception as exc:
+                self.running = False
+                self.event('ORDEN DETENIDA', f'{asset}: {exc}')
+                notes[asset] = str(exc)
+                break
+        return notes
+
+    def _close(self, p, price, reason, settlement=False):
+        if not settlement:
+            if self.client is None:
+                raise ValueError('Sin conexión real: venta bloqueada.')
+            with self.db:
+                self.db.execute("INSERT INTO live_order_attempts(ticker,action,attempted) VALUES (?, 'sell', ?)", (p['ticker'], stamp()))
+            order_id = self.client.order(p['ticker'], p['side'], 'sell', p['quantity'], int(round(price)))
+            reason = f'{reason} · Kalshi #{order_id}'
+        # A finalized settlement is handled by the exchange, not a sell order.
+        fee = 0 if settlement else self.settings['fee_cents_per_contract'] * p['quantity'] / 100
+        pnl = round((price - p['entry']) * p['quantity'] / 100 - p['entry_fee'] - fee, 8)
+        with self.db:
+            cur = self.db.execute('UPDATE trades SET exit=?,exit_fee=?,closed=?,reason=?,pnl=? WHERE id=? AND closed IS NULL',
+                                  (price, fee, stamp(), reason, pnl, p['id']))
+            if cur.rowcount:
+                self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
+                                (stamp(), 'LIQUIDACIÓN REAL' if settlement else 'VENTA REAL', f"#{p['id']} · {reason}"))
+
+    def view(self):
+        result = super().view()
+        result.update(mode='REAL' if self.client else 'REAL · SIN CONECTAR',
+                      execution_mode='live' if self.client else 'disconnected',
+                      account_balance=None)
+        return result
+
 class Controller:
     def __init__(self, bot):
         self.bot = bot
@@ -2638,8 +2808,8 @@ class Controller:
             if action == 'command':
                 command = payload.get('command')
                 self.bot.command(command)
-                reply['message'] = {'start': 'Simulación activada.', 'pause': 'Entradas pausadas.',
-                                    'close': 'Cierre virtual solicitado.'}[command]
+                reply['message'] = {'start': 'Compras REALES activadas.', 'pause': 'Entradas pausadas.',
+                                    'close': 'Cierre REAL solicitado.'}[command]
             elif action == 'settings':
                 if payload.keys() - {'starting_balance', 'daily_goal_dollars',
                                      'radar_budget_dollars', 'radar_stop_profit_cents',
@@ -2648,8 +2818,8 @@ class Controller:
                 self.bot.save_settings(payload)
                 reply['message'] = 'Ajustes guardados y aplicados.'
             elif action == 'verify_kalshi':
-                _verify_kalshi_account(payload.get('key_id'), payload.get('pem'))
-                reply['message'] = 'Cuenta de Kalshi verificada. Operaciones en simulación.'
+                self.bot.connect(payload.get('key_id'), payload.get('pem'))
+                reply['message'] = 'Cuenta REAL conectada. Pulsa Iniciar para activar compras.'
             elif action == 'export':
                 stream = io.StringIO()
                 writer = csv.writer(stream)
@@ -2675,7 +2845,7 @@ def _shared_runtime_bot():
     import sys
 
     db = Path(os.environ.get('ALPHA_DB', ROOT / 'data' / 'alpha.sqlite3'))
-    db = db.with_name(db.stem + '_paper_app84' + db.suffix).resolve()
+    db = db.with_name(db.stem + '_live_app105' + db.suffix).resolve()
     candidate = types.ModuleType('_alpha_edge_radar_runtime')
     candidate.lock = threading.RLock()
     candidate.bots = {}
@@ -2697,7 +2867,7 @@ def _shared_runtime_bot():
             else:
                 import fcntl
                 fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            bot = PaperBot(db)
+            bot = LiveBot(db)
             bot._process_lock = held
             bot.start_worker()
         except Exception:
@@ -2734,7 +2904,7 @@ def streamlit_main():
         st.session_state.alpha_radar_controller = Controller(bot)
         st.session_state.alpha_reply = None
     controller = st.session_state.alpha_radar_controller
-    st.caption('SIMULACIÓN · 6 MONEDAS · 4 AL 70% PARA CONFIRMAR · SALDO VIRTUAL')
+    st.caption('MODO REAL · 6 MONEDAS · REQUIERE CONEXIÓN KALSHI')
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
