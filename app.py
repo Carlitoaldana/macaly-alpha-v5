@@ -2625,6 +2625,9 @@ class KalshiTradingClient:
         self.key_id = key_id.strip()
         self.key = serialization.load_pem_private_key(pem.strip().encode(), password=None)
         self.root = 'https://external-api.kalshi.com'
+        self._request_lock = threading.RLock()
+        self._next_request_at = 0.0
+        self._cooldown_until = 0.0
 
     def request(self, method, path, payload=None):
         import base64
@@ -2645,13 +2648,29 @@ class KalshiTradingClient:
                    'KALSHI-ACCESS-SIGNATURE': base64.b64encode(signature).decode(),
                    'Content-Type': 'application/json', 'User-Agent': 'JCAlphaEdge/live'}
         data = json.dumps(payload).encode() if payload is not None else None
-        try:
-            with urlopen(Request(self.root + path, data=data, headers=headers, method=method), timeout=12) as response:
-                return json.load(response)
-        except HTTPError as error:
-            raise ValueError(f'Kalshi HTTP {error.code}: orden no confirmada.') from None
-        except (OSError, ValueError) as error:
-            raise ValueError('No se pudo confirmar la respuesta de Kalshi; revisar órdenes antes de reintentar.') from error
+        with self._request_lock:
+            now = time.monotonic()
+            if now < self._cooldown_until:
+                remaining = math.ceil(self._cooldown_until - now)
+                raise ValueError(f'Kalshi limita solicitudes (HTTP 429). Espera {remaining} s antes de volver a consultar.')
+            if now < self._next_request_at:
+                time.sleep(self._next_request_at - now)
+            self._next_request_at = time.monotonic() + 1.5
+            try:
+                with urlopen(Request(self.root + path, data=data, headers=headers, method=method), timeout=12) as response:
+                    return json.load(response)
+            except HTTPError as error:
+                if error.code == 429:
+                    retry_after = error.headers.get('Retry-After', '')
+                    try:
+                        wait = max(30.0, min(float(retry_after), 300.0))
+                    except (TypeError, ValueError):
+                        wait = 60.0
+                    self._cooldown_until = time.monotonic() + wait
+                    raise ValueError(f'Kalshi HTTP 429: espera {math.ceil(wait)} s; no se reenvió la orden.') from None
+                raise ValueError(f'Kalshi HTTP {error.code}: operación no confirmada; consulta las órdenes en Kalshi.') from None
+            except (OSError, ValueError) as error:
+                raise ValueError('No se pudo confirmar la respuesta de Kalshi; revisar órdenes antes de reintentar.') from error
 
     def balance(self):
         return self.request('GET', '/trade-api/v2/portfolio/balance')
@@ -2691,13 +2710,14 @@ class LiveBot(PaperBot):
         self._account_balance = None
         self._account_balance_updated = None
         self._account_balance_checked = 0.0
+        self._balance_retry_after = 0.0
         self.running = False
         self.snapshot['mode'] = 'REAL · SIN CONECTAR'
         self.db.execute('CREATE TABLE IF NOT EXISTS live_order_attempts (ticker TEXT NOT NULL, action TEXT NOT NULL, attempted TEXT NOT NULL, PRIMARY KEY(ticker,action))')
         self.db.commit()
 
     def connect(self, key_id, pem):
-        _verify_kalshi_account(key_id, pem)
+        # La primera consulta de saldo valida también las credenciales; evitar doble GET.
         client = KalshiTradingClient(key_id, pem)
         balance_result = client.balance()
         cents = balance_result.get('balance') if isinstance(balance_result, dict) else None
@@ -2795,7 +2815,9 @@ class LiveBot(PaperBot):
         # Consultar Kalshi cada 30 segundos; no confundir saldo real con capital configurado.
         with self.lock:
             client = self.client
-            refresh = client is not None and time.monotonic() - self._account_balance_checked >= 30
+            refresh = (client is not None and
+                       time.monotonic() >= self._balance_retry_after and
+                       time.monotonic() - self._account_balance_checked >= 120)
             if refresh:
                 self._account_balance_checked = time.monotonic()
         if refresh:
@@ -2808,10 +2830,11 @@ class LiveBot(PaperBot):
                     if self.client is client:
                         self._account_balance = cents / 100
                         self._account_balance_updated = stamp()
-            except (ValueError, OSError):
+            except (ValueError, OSError) as exc:
                 with self.lock:
                     if self.client is client:
-                        self._account_balance = None  # Nunca mostrar un saldo antiguo como actual.
+                        self._balance_retry_after = time.monotonic() + (120 if '429' in str(exc) else 45)
+                        self._account_balance = None
                         self._account_balance_updated = None
         result = super().view()
         with self.lock:
