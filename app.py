@@ -1734,7 +1734,7 @@ def _fetch_btc_candle_source(source, requested_at):
         if (not isinstance(rows, list) or not rows or
                 any(not isinstance(row, (list, tuple)) or len(row) != 8 for row in rows)):
             raise ValueError("KRAKEN: respuesta BTC/USD inválida.")
-        frame = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "vwap", "volume", "count"])
+        frame = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume", "count"])
     else:
         raise ValueError("Fuente de velas desconocida.")
     return _validate_btc_candle_frame(frame, requested_at, source)
@@ -2015,7 +2015,7 @@ def _indicator_frame(df):
     atr=x["atr"].replace(0,np.nan); pdi=100*plus.ewm(alpha=1/14,adjust=False).mean()/atr; mdi=100*minus.ewm(alpha=1/14,adjust=False).mean()/atr
     dx=100*(pdi-mdi).abs()/(pdi+mdi).replace(0,np.nan)
     x["plus_di"]=pdi; x["minus_di"]=mdi; x["adx"]=dx.ewm(alpha=1/14,adjust=False).mean()
-    typical=(high+low+close)/3; vol=x["volume"].fillna(0); x["vwap"]=(typical*vol).rolling(60,min_periods=1).sum()/vol.rolling(60,min_periods=1).sum().replace(0,np.nan)
+    vol=x["volume"].fillna(0)
     x["vol_ratio"]=vol/vol.rolling(20).mean().replace(0,np.nan)
     return x
 
@@ -2181,14 +2181,14 @@ def _internal_impulse_context(one, price, atr, mom3, mom15, rvol):
 
 def _entry_route_checks(sig, seconds_left):
     """Evaluate both sides from the same evidence; shared by engine and UI."""
-    required = ("rsi", "rsi3", "adx3", "vwap_atr", "macd1", "macd3",
+    required = ("rsi", "rsi3", "adx3", "macd1", "macd3",
                 "vol_ratio", "mom3", "target_atr", "price_ema9_atr")
     if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
         return {"valid":False, "sides":{}, "noise_ok":False}
-    r1,r3,adx,vw,m1,m3,vol,mom,cushion,live_ema = (float(sig[k]) for k in required)
+    r1,r3,adx,m1,m3,vol,mom,cushion,live_ema = (float(sig[k]) for k in required)
     d3 = sig.get("trend3")
     impulse = sig.get("impulse_internal") or {}
-    noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
+    noise_ok = not (abs(mom)<.025 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
     sides = {}
     for side,sign,other in (("UP",1,"DOWN"),("DOWN",-1,"UP")):
         up = sign == 1
@@ -2198,22 +2198,22 @@ def _entry_route_checks(sig, seconds_left):
         current = [
             ("EMA de 1 minuto y precio actual a favor", sig.get("ema") == ("BULL" if up else "BEAR") and live_ema*sign>0),
             ("RSI y momentum actuales a favor", (r1>=53 if up else r1<=47) and mom*sign>=.025),
-            ("MACD de 1 minuto y VWAP a favor", m1*sign>0 and vw*sign>=.03),
+            ("MACD de 1 minuto a favor", m1*sign>0),
             ("Impulso actual sin agotamiento detectado", not exhausted),
         ]
         early_three = d3 != other or (reliable and strength>=.75 and mom*sign>.04 and vol>=.9)
-        rsi_vwap = (r1>=52 and vw>=.05) if up else (r1<=48 and vw<=-.05)
+        rsi_direction = (r1>=52) if up else (r1<=48)
         routes = [
             ("IMPULSO ACTUAL", current),
             ("TENDENCIA ALINEADA", [
                 ("Tendencia de 3 minutos a favor", d3 == side),
                 ("Fuerza de tendencia o RSI suficientes", adx >= 20 or (r3 >= 52 if up else r3 <= 48)),
-                ("VWAP y momentum actual respaldan la tendencia", (vw>-.15 if up else vw<.15) and mom*sign>=.012),
+                ("Momentum actual respalda la tendencia", mom*sign>=.012),
                 ("Sin agotamiento detectado", not exhausted),
             ]),
             ("TEMPRANA", [
                 ("MACD de 3 minutos a favor", m3*sign>0),
-                ("RSI de 1 minuto y VWAP a favor", rsi_vwap),
+                ("RSI de 1 minuto a favor", rsi_direction),
                 ("Momentum de 3 minutos a favor", mom*sign>.015),
                 ("Tendencia de 3 minutos compatible o superada por fuerza actual", early_three),
                 ("Sin agotamiento detectado", not exhausted),
@@ -2227,7 +2227,7 @@ def _entry_route_checks(sig, seconds_left):
             ("GIRO TEMPRANO", [
                 ("MACD y momentum respaldan el giro", m3*sign>0 and mom*sign>.04),
                 ("RSI de 1 y 3 minutos respaldan el giro", (r1>=54 and r3>=50) if up else (r1<=46 and r3<=50)),
-                ("VWAP y distancia suficientes", vw*sign>=.08 and abs(cushion)>=.30),
+                ("Momentum y distancia suficientes", mom*sign>=.04 and abs(cushion)>=.30),
                 ("Impulso y volumen suficientes", reliable and strength>=.70 and vol>=.9),
                 ("Sin agotamiento detectado", not exhausted),
             ]),
@@ -2237,7 +2237,7 @@ def _entry_route_checks(sig, seconds_left):
         routes.append(("FLUJO + IMPULSO", [
             ("Flujo agresor significativo a favor", flow_ok),
             ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and live_ema*sign>0),
-            ("Momentum y VWAP a favor", mom*sign>=.012 and vw*sign>=-.04),
+            ("Momentum a favor", mom*sign>=.012),
             ("Tendencia de 3 minutos compatible o momentum reforzado", d3 != other or mom * sign >= .025),
             ("Impulso fiable sin agotamiento", reliable and not exhausted),
         ]))
@@ -2448,7 +2448,6 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
     distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
     target_atr=(distance/atr) if distance is not None else 0.0
-    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
     adx3 = float(l3["adx"]) if pd.notna(l3["adx"]) else 0.0
     adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
     rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
@@ -2461,7 +2460,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         flow_context["valid"] = (flow_side in ("UP","DOWN") and
             float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
             float(whale.get("flow_strength") or 0)>=.20)
-    route_input = {"rsi":rsi1,"rsi3":rsi3,"adx3":adx3,"vwap_atr":vwap_atr,
+    route_input = {"rsi":rsi1,"rsi3":rsi3,"adx3":adx3,
         "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
         "mom3":mom3,"target_atr":target_atr,"distance":distance,
         "price_ema9_atr":(price-float(l1["ema9"]))/atr,
@@ -2516,7 +2515,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if d3=="UP" else "BAJISTA" if d3=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"adx3":adx3,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"adx3":adx3,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
 
 
 def build_presignal(sig, seconds_left):
@@ -2542,7 +2541,6 @@ def build_presignal(sig, seconds_left):
     macd5 = float(sig.get("macd5", 0) or 0)
     plus_di = float(sig.get("plus_di", 0) or 0)
     minus_di = float(sig.get("minus_di", 0) or 0)
-    vwap_atr = float(sig.get("vwap_atr", 0) or 0)
     target_atr = float(sig.get("target_atr", 0) or 0)
 
     secs = 900 if seconds_left is None else max(0, int(seconds_left))
@@ -2578,8 +2576,6 @@ def build_presignal(sig, seconds_left):
     if plus_di > minus_di: bull += 0.50 * slow
     elif minus_di > plus_di: bear += 0.50 * slow
 
-    if vwap_atr >= 0.03: bull += 0.70
-    elif vwap_atr <= -0.03: bear += 0.70
 
     # El target gana importancia progresivamente. No inventa dirección:
     # usa únicamente dónde está BTC respecto al target en este instante.
@@ -2762,10 +2758,9 @@ def _update_public_profit_alert(state, signal, market, seconds_left):
     state["public_profit_peak"] = peak
     try:
         short_momentum = float(signal.get("mom3") or 0)
-        vwap_atr = float(signal.get("vwap_atr") or 0)
         probability = float(signal.get("up_probability") if side == "UP" else signal.get("down_probability"))
         direction = 1 if side == "UP" else -1
-        weakening = (direction * short_momentum < 0 or direction * vwap_atr < -0.12
+        weakening = (direction * short_momentum < 0
                      or probability < 55)
     except (TypeError, ValueError):
         weakening = False
@@ -3069,7 +3064,7 @@ def _background_get_live_price(market):
 SHADOW_AI_DB = "alpha_ai_shadow.db"
 SHADOW_FEATURES = ("rsi", "rsi3", "rsi5", "mom3", "mom5", "mom15", "vol_ratio",
                    "technical_score", "target_score", "adx", "macd3", "macd5",
-                   "atr", "vwap_atr", "target_atr", "distance_pct")
+                   "atr", "target_atr", "distance_pct")
 
 def _shadow_capture(ticker, sig, state, seconds_left):
     """Read-only capture of existing engine output; no signal writes or model inference."""
@@ -3871,16 +3866,11 @@ def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=
     frame["rsi"] = 100 - 100/(1 + gains/losses.replace(0, np.nan))
     frame.loc[(losses == 0) & (gains > 0), "rsi"] = 100
     frame.loc[(losses == 0) & (gains == 0), "rsi"] = 50
-    # VWAP diario UTC de la historia disponible; nunca inventa volumen histórico.
-    typical = (frame["high"] + frame["low"] + close)/3
-    day = frame["time"].dt.floor("D")
-    vol = frame["volume"].astype(float)
-    frame["vwap"] = (typical*vol).groupby(day).cumsum()/vol.groupby(day).cumsum().replace(0, np.nan)
     frame = frame.tail(180).reset_index(drop=True)
     rows = []
     for _, row in frame.iterrows():
         item = {k: (float(row[k]) if pd.notna(row[k]) and np.isfinite(float(row[k])) else None)
-                for k in ["open", "high", "low", "close", "volume", "ema9", "ema21", "rsi", "vwap"]}
+                for k in ["open", "high", "low", "close", "volume", "ema9", "ema21", "rsi"]}
         item["t"] = int(row["time"].timestamp())
         rows.append(item)
     tape = st.session_state.get("whale_flow_tape", []) if whale is not None else []
@@ -4014,7 +4004,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 <script>
 let D=__PAYLOAD__; const $=id=>document.getElementById(id), fmt=(v,n=2)=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:n,maximumFractionDigits:n}), usd=v=>v==null?'—':'$'+fmt(v), compact=v=>v==null?'—':v>=1e6?'$'+(v/1e6).toFixed(2)+'M':v>=1000?'$'+(v/1000).toFixed(0)+'K':'$'+fmt(v,0);
 let saved={};try{saved=JSON.parse(localStorage.getItem('btc-neon-panel-v1')||'{}')}catch(e){}
-let toggles=Object.assign({ema9:true,ema21:true,vwap:true,volume:true,rsi:true,},saved.toggles),visible=saved.visible||32,offset=saved.offset||0,pricePan=Number.isFinite(saved.pricePan)?saved.pricePan:0;
+let toggles=Object.assign({ema9:true,ema21:true,volume:true,rsi:true,},saved.toggles),visible=saved.visible||32,offset=saved.offset||0,pricePan=Number.isFinite(saved.pricePan)?saved.pricePan:0;
 function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
 for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
 function refreshLabels(){
@@ -4029,8 +4019,8 @@ $('momrows').replaceChildren();
 for(const key of ['mom3','mom5','mom15']){const v=D[key],box=document.createElement('div');box.className='metric';box.innerHTML='<small>'+key.slice(3)+' MINUTOS</small><b class="'+(v>=0?'green':'red')+'">'+(v==null?'—':(v>0?'+':'')+fmt(v,2)+'%')+'</b>';$('momrows').append(box)}
 }
 refreshLabels();
-const colors={ema9:'#f000ff',ema21:'#00eaff',vwap:'#6261ff',volume:'#00d7b0',rsi:'#f000ff'};
-for(const [key,label] of Object.entries({ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',volume:'VOLUME',rsi:'RSI'})){const b=document.createElement('button');b.style.setProperty('--c',colors[key]);b.dataset.key=key;b.onclick=()=>{toggles[key]=!toggles[key];persist();draw()};$('toggles').append(b);b.dataset.label=label}
+const colors={ema9:'#f000ff',ema21:'#00eaff',volume:'#00d7b0',rsi:'#f000ff'};
+for(const [key,label] of Object.entries({ema9:'EMA9',ema21:'EMA21',volume:'VOLUME',rsi:'RSI'})){const b=document.createElement('button');b.style.setProperty('--c',colors[key]);b.dataset.key=key;b.onclick=()=>{toggles[key]=!toggles[key];persist();draw()};$('toggles').append(b);b.dataset.label=label}
 // The original custom SVG/pointer engine has been fully replaced by TradingView Lightweight Charts.
 // The surrounding cards, signals, toolbars, Python payload and market calculations remain unchanged.
 let lwChart=null, candleSeries=null, volumeSeries=null, overlays={}, levelLines=[], rsiChart=null, rsiSeries=null;
@@ -4043,7 +4033,7 @@ function seriesRows(key){return (D.rows||[]).filter(r=>Number.isFinite(r.t)&&Num
 function refreshToggles(){
  for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(!!toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
  const last=D.rows?.[D.rows.length-1];
- $('legend').innerHTML=last?['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join(''):'';
+ $('legend').innerHTML=last?['ema9','ema21'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join(''):'';
 }
 function initChart(){
  if(!window.LightweightCharts){$('canvas').textContent='No se pudo cargar la gráfica de TradingView. Verifica la conexión de internet.';return false;}
@@ -4061,7 +4051,7 @@ function initChart(){
   handleScale:{axisPressedMouseMove:{time:true,price:true},mouseWheel:true,pinch:true,axisDoubleClickReset:true}
  });
  candleSeries=lwChart.addCandlestickSeries({...candleOptions,priceFormat:{type:'price',precision:2,minMove:.01},lastValueVisible:true,priceLineVisible:true});
- for(const k of ['ema9','ema21','vwap'])overlays[k]=lwChart.addLineSeries({color:colors[k],lineWidth:2,visible:!!toggles[k],lastValueVisible:false,priceLineVisible:false,...(k==='vwap'?{lineStyle:L.LineStyle.Dashed}:{})});
+ for(const k of ['ema9','ema21'])overlays[k]=lwChart.addLineSeries({color:colors[k],lineWidth:2,visible:!!toggles[k],lastValueVisible:false,priceLineVisible:false,});
  volumeSeries=lwChart.addHistogramSeries({priceScaleId:'',visible:!!toggles.volume,priceLineVisible:false,lastValueVisible:false});
  volumeSeries.priceScale().applyOptions({scaleMargins:{top:.82,bottom:0}});
  rsiChart=L.createChart($('rsi-pane'),{
@@ -4106,7 +4096,7 @@ function redrawData(preserve=true){
   return {time:mark.time,position:up?'belowBar':'aboveBar',
           shape:up?'arrowUp':'arrowDown',color:up?'#38eac3':'#ff7777',size:1.6};
  }));
- for(const k of ['ema9','ema21','vwap']){overlays[k].setData(seriesRows(k));overlays[k].applyOptions({visible:!!toggles[k]});}
+ for(const k of ['ema9','ema21']){overlays[k].setData(seriesRows(k));overlays[k].applyOptions({visible:!!toggles[k]});}
  volumeSeries.setData((D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r.volume)).map(r=>({time:r.t,value:r.volume,color:r.close>=r.open?'#00dfb573':'#e64b4b73'})));
  volumeSeries.applyOptions({visible:!!toggles.volume});
  rsiSeries.setData(seriesRows('rsi'));
