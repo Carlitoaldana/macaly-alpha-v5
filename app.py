@@ -584,11 +584,7 @@ def _reset_withdrawal(state):
                  withdraw_since=None, withdraw_last_at=None, retention_warning=None)
 
 def _round_opening_crosscheck(state, candidate, signal, now, market):
-    """Confirm the first signal with distinct live observations of this round.
-
-    The rolling window is evidence, not a timer that automatically releases a
-    signal. Source timestamps prevent cached prices from counting twice.
-    """
+    """Validate one fresh observation from the current round; no impulse gate."""
     def wait(reason):
         state["opening_conflict"] = reason
         return None
@@ -597,54 +593,19 @@ def _round_opening_crosscheck(state, candidate, signal, now, market):
     if pd.isna(start) and not pd.isna(end):
         start = end - pd.Timedelta(minutes=15)
     source = signal.get("price_source")
-    target = _plan_number(get_target_from_market(market))
-    key = [str(start), str(end), source, target, candidate]
-    if state.get("opening_market_key") != key:
-        state.update(opening_market_key=key, opening_market_samples=[])
     price = _plan_number(signal.get("price"))
     observed = getattr(_PRICE_OBSERVATIONS, "values", {}).get(source)
     stamp = pd.Timestamp(now).timestamp()
-    if (pd.isna(start) or pd.isna(end) or target is None or price is None
-            or price <= 0 or candidate not in ("UP", "DOWN")
-            or signal.get("data_valid") is False or observed is None):
-        state["opening_market_samples"] = []
-        return wait("Esperando lecturas nuevas del mercado")
+    if (pd.isna(start) or pd.isna(end) or price is None or price <= 0
+            or candidate not in ("UP", "DOWN") or signal.get("data_valid") is False
+            or observed is None):
+        return wait("Esperando una lectura válida de esta ronda")
     observed = float(observed)
     if not np.isfinite(observed) or not start.timestamp() <= observed <= stamp:
-        state["opening_market_samples"] = []
         return wait("Esperando precio de esta ronda")
-    if stamp-observed > SIGNAL_CONFIRM_MAX_GAP:
-        state["opening_market_samples"] = []
+    if stamp - observed > SIGNAL_CONFIRM_MAX_GAP:
         return wait("Esperando precio actualizado")
-    tape = state.get("opening_market_samples") or []
-    if tape and (observed < tape[-1][0] or observed-tape[-1][0] > SIGNAL_CONFIRM_MAX_GAP):
-        tape = []
-    tape = [x for x in tape if 0 <= stamp-x[0] <= 16]
-    if not tape or observed-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
-        tape = tape + [[observed, price]]
-    state["opening_market_samples"] = tape
-    if len(tape) < 4 or tape[-1][0]-tape[0][0] < 6:
-        return wait("Analizando lecturas nuevas de esta ronda")
-    prices = [x[1] for x in tape]
-    sign = 1 if candidate == "UP" else -1
-    steps = [sign*(b-a) for a,b in zip(prices, prices[1:])]
-    travel = sum(abs(x) for x in steps)
-    net = sum(steps)
-    split = len(tape)//2
-    recent = sign*(prices[-1]-prices[split])
-    if (travel <= 0 or net/travel < .60 or recent <= 0
-            or sum(x > 0 for x in steps)/len(steps) < .60 or steps[-1] < 0):
-        return wait("Movimiento sin respaldo suficiente para " + candidate)
-    # Repeated target crossings indicate indecision rather than confirmation.
-    sides = [1 if p > target else -1 for p in prices if p != target]
-    if sum(a != b for a,b in zip(sides, sides[1:])) > 1:
-        return wait("Precio indeciso alrededor del target")
-    gap = sign*(target-price)
-    velocity = min(net/(tape[-1][0]-tape[0][0]),
-                   recent/(tape[-1][0]-tape[split][0]))
-    remaining = end.timestamp()-stamp
-    if gap > 0 and velocity*remaining < gap:
-        return wait("Movimiento insuficiente frente al target")
+    state["opening_market_samples"] = [[observed, price]]
     state["opening_conflict"] = None
     return candidate
 
