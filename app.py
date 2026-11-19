@@ -220,8 +220,6 @@ def extract_kalshi_btc_price(data):
 def _indicator_frame(df):
     x = df.copy().sort_values("time").reset_index(drop=True)
     close, high, low = x["close"], x["high"], x["low"]
-    x["ema9"] = close.ewm(span=9, adjust=False).mean()
-    x["ema21"] = close.ewm(span=21, adjust=False).mean()
     delta = close.diff(); gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
     ag = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
     al = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
@@ -537,8 +535,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
     def direction(row):
-        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        bull=(row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
+        bear=(row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
         return "UP" if bull else "DOWN" if bear else "NEUTRAL"
     d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
     atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
@@ -577,7 +575,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"market_entry_gate":market_gate,"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"ut_signal":ut,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"market_entry_gate":market_gate,"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"NO APLICA","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"ut_signal":ut,"macd1":float(l1["macd_hist"]),}
 
 def _reset_withdrawal(state):
     state.update(withdraw_direction=None, withdraw_source=None, withdraw_count=0,
@@ -734,10 +732,10 @@ def _entry_route_checks(signal, seconds_left):
 def _entry_route_checks(sig, seconds_left):
     """Evaluate both sides from the same evidence; shared by engine and UI."""
     required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
-                "vol_ratio", "mom3", "mom5", "target_atr", "price_ema9_atr")
+                "vol_ratio", "mom3", "mom5", "target_atr")
     if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
         return {"valid":False, "sides":{}, "noise_ok":False}
-    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion,live_ema = (float(sig[k]) for k in required)
+    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion = (float(sig[k]) for k in required)
     d3,d5 = sig.get("trend3"), sig.get("trend5")
     impulse = sig.get("impulse_internal") or {}
     noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
@@ -748,7 +746,7 @@ def _entry_route_checks(sig, seconds_left):
         strength = float(impulse.get("up" if up else "down", 0))
         reliable = bool(impulse.get("reliable"))
         current = [
-            ("EMA de 1 minuto y precio actual a favor", sig.get("ema") == ("BULL" if up else "BEAR") and live_ema*sign>0),
+            ("Precio actual respecto a VWAP", vw*sign>0),
             ("RSI y momentum actuales a favor", (r1>=53 if up else r1<=47) and mom*sign>=.025),
             ("MACD de 1 minuto y VWAP a favor", m1*sign>0 and vw*sign>=.03),
             ("Impulso actual sin agotamiento detectado", not exhausted),
@@ -788,7 +786,7 @@ def _entry_route_checks(sig, seconds_left):
         flow_ok = flow.get("direction")==side and flow.get("valid",False)
         routes.append(("FLUJO + IMPULSO", [
             ("Flujo agresor significativo a favor", flow_ok),
-            ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and live_ema*sign>0),
+            ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and vw*sign>0),
             ("Momentum y VWAP a favor", mom*sign>=.012 and vw*sign>=-.04),
             ("Contexto contrario corroborado por momentum", d5!=other or (mom5*sign>=.025 and abs(mom)>=.025)),
             ("Impulso fiable sin agotamiento", reliable and not exhausted),
@@ -974,8 +972,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
     def direction(row):
-        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        bull=(row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
+        bear=(row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
         return "UP" if bull else "DOWN" if bear else "NEUTRAL"
     d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
     atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
@@ -997,8 +995,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     route_input = {"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
         "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
         "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
-        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
-        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
+        "ema":"NO APLICA",
         "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
     route_view = _entry_route_checks(route_input, seconds_left)
     eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
@@ -1045,7 +1042,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"NO APLICA","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),}
 
 def _execution_signal(df, target, seconds_left, live_price, source):
     # App 84 structure/level brain, no UT Bot and no fixed opening-minute delay.
@@ -2453,7 +2450,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Indicadores</h2>
 <div class="body">
-<div class="field">EMA 9 / EMA 21<strong id="emaValue">—</strong>
+<div class="field">Tendencia (MACD)<strong id="emaValue">—</strong>
 </div>
 <div class="field">RSI 14<strong id="rsiValue">—</strong>
 </div>
@@ -2769,7 +2766,7 @@ if(!loaded||(!dirty&&settingsSignature!==signature)){settingsSignature=signature
 martingalePreview();
 setRows($('#entriesRows'),s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join(''));$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 setRows($('#logs'),s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join(''));
-setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
+setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.metrics?.macd1>0?'ALCISTA':s.metrics?.macd1<0?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;setText($('#connectionNotice'),(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:''));height();tick()}
 function tick(){
   const now=Date.now();
