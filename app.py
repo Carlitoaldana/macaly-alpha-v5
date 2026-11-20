@@ -2734,8 +2734,8 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     def wait(reason):
         state["opening_conflict"] = reason
         return None
-    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
-        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
+    if state.get("opening_gate_revision") != "fresh_first_entry_v2":
+        state.update(opening_gate_revision="fresh_first_entry_v2", opening_live_tapes={})
     if not signal or signal.get("data_valid") is False:
         return wait("Esperando datos actuales para la primera señal")
     price = _plan_number(signal.get("price"))
@@ -2753,11 +2753,21 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
         tape.append([stamp, price])
     tapes[source] = tape
-    if candidate not in ("UP", "DOWN"):
-        return wait("Analizando fuerza actual antes de la primera señal")
     if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
         return wait("Observando movimiento actual antes de la primera señal")
     prices = [float(x[1]) for x in tape]
+    if candidate not in ("UP", "DOWN"):
+        # The current price must be on the same side of the round target as the move.
+        move = prices[-1] - prices[0]
+        distance = _plan_number(signal.get("distance"))
+        if distance is None or move * distance <= 0:
+            return wait("Esperando un movimiento claro respecto al target")
+        candidate = "UP" if move > 0 else "DOWN"
+        structure = signal.get("structure_internal") or {}
+        levels = structure.get("level_decision") or {}
+        if (levels.get("veto") == candidate or
+                (structure.get(candidate.lower() + "_blocked") and levels.get("breakout") != candidate)):
+            return wait("Esperando confirmación del nivel para " + candidate)
     sign = 1 if candidate == "UP" else -1
     split = len(prices)//2
     net = sign*(prices[-1]-prices[0])
@@ -2831,6 +2841,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
     level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    if candidate in ("UP", "DOWN"):
+        level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
     # Opening-only veto. Once the round has a confirmed first direction,
     # subsequent retention/reversal is governed by its separate checks.
     if state.get("first_direction") not in ("UP", "DOWN"):
@@ -5043,9 +5055,9 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "early_no_ema_v1":
+    if state.get("signal_engine_revision") != "opening_live_direction_v2":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "early_no_ema_v1"
+        state["signal_engine_revision"] = "opening_live_direction_v2"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
