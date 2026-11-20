@@ -33,7 +33,7 @@ SIGNAL_CONFIRM_INTERVAL = 2.0
 SIGNAL_CONFIRM_MAX_GAP = 10.0
 LIVE_PRICE_MAX_AGE = 30.0
 _PRICE_OBSERVATIONS = threading.local()
-SIGNAL_ENGINE_REVISION = "ut_app58_56262de0955c"
+SIGNAL_ENGINE_REVISION = "vwap_momentum_ut1_v3"
 
 def _valid_live_observation(price, observed_at, source):
     value = float(price)
@@ -220,14 +220,6 @@ def extract_kalshi_btc_price(data):
 def _indicator_frame(df):
     x = df.copy().sort_values("time").reset_index(drop=True)
     close, high, low = x["close"], x["high"], x["low"]
-    delta = close.diff(); gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
-    ag = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    al = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    rs = ag / al.replace(0, np.nan)
-    rsi = 100 - 100 / (1 + rs)
-    rsi = rsi.mask((al == 0) & (ag > 0), 100.0)
-    rsi = rsi.mask((ag == 0) & (al > 0), 0.0)
-    x["rsi"] = rsi.fillna(50.0)
     e12=close.ewm(span=12,adjust=False).mean(); e26=close.ewm(span=26,adjust=False).mean()
     x["macd"]=e12-e26; x["macd_signal"]=x["macd"].ewm(span=9,adjust=False).mean(); x["macd_hist"]=x["macd"]-x["macd_signal"]
     prev=close.shift(1); tr=pd.concat([(high-low),(high-prev).abs(),(low-prev).abs()],axis=1).max(axis=1)
@@ -351,235 +343,6 @@ def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
             "reliable": True, "efficiency": round(float(efficiency), 3),
             "recent_atr": round(recent, 3)}
 
-def _ut_bot_events(df, minutes, now):
-    """UT Bot sobre cierres OHLC, sensibilidad 1 y ATR Wilder de 10 velas."""
-    interval = pd.Timedelta(minutes=minutes)
-    received = pd.to_datetime(df.attrs.get("received_at"), utc=True, errors="coerce")
-    if pd.isna(received):
-        received = now
-    current = now.floor(f"{minutes}min")
-    bars = (df.loc[df["time"] <= now.floor("min")].set_index("time")
-            .resample(f"{minutes}min").agg(high=("high", "max"), low=("low", "min"),
-                                           close=("close", "last"), count=("close", "size")))
-    bars = bars.loc[(bars["count"] == minutes) | ((bars.index == current) & (bars["count"] > 0))]
-    provisional = confirmed = confirmed_at = prior_side = closed_move = None
-    atr = stop = previous = previous_stamp = None
-    seed = []
-    for stamp, bar in bars.iterrows():
-        end = stamp + interval
-        if stamp != current and end > received:
-            continue
-        if stamp == current and previous_stamp != stamp - interval:
-            break
-        close = float(bar.close)
-        true_range = float(bar.high - bar.low)
-        if previous is not None:
-            true_range = max(true_range, abs(bar.high - previous), abs(bar.low - previous))
-        if atr is None:
-            seed.append(true_range)
-            if len(seed) < 10:
-                previous = close
-                previous_stamp = stamp
-                continue
-            atr = sum(seed) / 10
-        else:
-            atr = (9 * atr + true_range) / 10
-        if stop is None:
-            stop = close - atr
-        else:
-            if close > stop and previous > stop:
-                next_stop = max(stop, close - atr)
-            elif close < stop and previous < stop:
-                next_stop = min(stop, close + atr)
-            else:
-                next_stop = close - atr if close > stop else close + atr
-            side = ("UP" if previous <= stop and close > next_stop else
-                    "DOWN" if previous >= stop and close < next_stop else None)
-            if stamp == current:
-                provisional = side
-            else:
-                if previous_stamp == stamp - interval:
-                    closed_move = close - previous
-                else:
-                    closed_move = None
-                if side is not None and side != confirmed:
-                    prior_side, confirmed = confirmed, side
-                    confirmed_at = end
-            stop = next_stop
-        previous = close
-        previous_stamp = stamp
-    return provisional, confirmed, confirmed_at, prior_side, closed_move
-
-def _market_window_evidence(a):
-    """Measure activity without requiring a directional trend.
-
-    Only explicit compression of both price travel and candle ranges counts as
-    slow evidence. Direction changes and volume alone never close the gate.
-    Thresholds are relative to the observed volatility, not a fixed BTC distance.
-    """
-    if not np.all(np.isfinite(a)):
-        return None
-    atr = float(np.median(a[-6:-1, 5]))
-    if atr <= 0:
-        return None
-    moves = np.diff(a[:, 3])
-    recent = moves[-3:]
-    net = float(recent.sum())
-    ranges = a[:, 1] - a[:, 2]
-    # A price-relative floor prevents hours of tiny candles from becoming
-    # "active" merely because the rolling ATR has also shrunk to nearly zero.
-    reference = max(atr, float(np.median(ranges[:-6])),
-                    float(np.median(a[:, 3])) * .00005, 1e-12)
-    # Six completed minutes describe the regime; single candles do not toggle it.
-    travel = float(np.abs(moves[-6:]).sum()) / reference
-    mean_range = float(np.mean(ranges[-6:])) / reference
-    span = float(np.max(a[-6:, 1]) - np.min(a[-6:, 2])) / reference
-    slow = travel <= .90 and mean_range <= .40 and span <= .85
-    active = travel >= 1.80 and mean_range >= .55 and span >= 1.10
-    efficiency3 = abs(net) / max(float(np.abs(recent).sum()), 1e-12)
-    efficiency5 = abs(float(moves[-5:].sum())) / max(float(np.abs(moves[-5:]).sum()), 1e-12)
-    base_volume = float(np.mean(a[:-6, 4]))
-    volume = float(np.mean(a[-6:, 4])) / base_volume if base_volume > 0 else 0.0
-    return {"strong_entry": bool(active), "continuing": bool(not slow),
-            "slow_evidence": bool(slow),
-            "direction": "UP" if net >= 0 else "DOWN", "net": net,
-            "atr": atr, "strength_atr": abs(net)/atr,
-            "efficiency3": efficiency3, "efficiency5": efficiency5,
-            "pace": travel/6, "volume_ratio": volume,
-            "body_ratio": float(np.mean(np.abs(a[-6:, 3]-a[-6:, 0]) /
-                                         np.maximum(ranges[-6:], 1e-12))),
-            "activity_travel": travel, "activity_range": mean_range,
-            "activity_span": span}
-
-def _strong_market_context(one, live_price, now=None):
-    """Replay observed closed candles, independent of refreshes and round changes.
-
-    Sustained activity activates the gate. Three consecutive completed one-minute
-    evaluations with explicit slow compression deactivate. Repeated ticks never count as
-    additional weak candles. Re-entry always needs strong evidence again.
-    This is a market-regime heuristic, not a calibrated forecast.
-    """
-    blocked = {"allowed": False, "direction": None, "reason": "SIN DATOS ACTUALES"}
-    try:
-        now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
-        now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
-        x = one.copy()
-        x["time"] = pd.to_datetime(x["time"], utc=True, errors="coerce")
-        x = x.sort_values("time")
-        x = x[x["time"] + pd.Timedelta(minutes=1) <= now]
-        if len(x) < 26:
-            return blocked
-        latest = x.tail(26)
-        if (not latest["time"].diff().iloc[1:].eq(pd.Timedelta(minutes=1)).all() or
-                (now-(x["time"].iloc[-1]+pd.Timedelta(minutes=1))).total_seconds() > 90):
-            return blocked
-        a = x[["open", "high", "low", "close", "volume", "atr"]].astype(float).to_numpy()
-        valid = (np.all(np.isfinite(a), axis=1) & np.all(a[:, :4] > 0, axis=1) &
-                 (a[:, 4] >= 0) & (a[:, 1] >= a[:, 2]) &
-                 (a[:, 1] >= np.maximum(a[:, 0], a[:, 3])) &
-                 (a[:, 2] <= np.minimum(a[:, 0], a[:, 3])))
-        price = float(live_price)
-        if not valid[-26:].all() or not np.isfinite(price) or price <= 0:
-            return blocked
-        active = False; weak = 0; side = None; evidence = None
-        stamps = x["time"].reset_index(drop=True)
-        for end in range(26, len(a)+1):
-            start = end-26
-            contiguous = stamps.iloc[start:end].diff().iloc[1:].eq(pd.Timedelta(minutes=1)).all()
-            evidence = _market_window_evidence(a[start:end]) if valid[start:end].all() and contiguous else None
-            if evidence is None:
-                active = False; weak = 0; side = None
-                continue
-            if evidence["strong_entry"]:
-                active = True; weak = 0
-            elif active:
-                weak = weak+1 if evidence["slow_evidence"] else 0
-                if weak >= 3:
-                    active = False; side = None
-            if active and evidence["net"] != 0:
-                side = evidence["direction"]
-        if evidence is None:
-            return blocked
-        allowed = bool(active)
-        # Live retracements can defer a specific entry, but never blink the
-        # market-regime banner between closed-candle evaluations.
-        live_ok = bool(side and (1 if side == "UP" else -1)*(price-a[-1, 3]) >= -.15*evidence["atr"])
-        return {**evidence, "allowed": allowed, "direction": side if allowed else None,
-                "reason": ("IMPULSO FUERTE" if evidence["strong_entry"] else "MERCADO ACTIVO")
-                          if allowed else "MERCADO LENTO",
-                "evaluated_at": now.timestamp(), "live_entry_ok": live_ok,
-                "weak_closed_evaluations": weak, "last_closed_price": float(a[-1, 3]),
-                "last_closed_at": stamps.iloc[-1].isoformat()}
-    except (KeyError, TypeError, ValueError, IndexError, OverflowError):
-        return blocked
-
-def _market_entry_allowed(signal, side, now=None):
-    """Activity gate only; UT decides direction. Absent/stale evidence blocks entries."""
-    signal = signal or {}
-    gate = signal.get("market_entry_gate") or {}
-    stamp = _plan_number(gate.get("evaluated_at"))
-    current = pd.Timestamp.now(tz="UTC").timestamp() if now is None else pd.Timestamp(now).timestamp()
-    return (signal.get("data_valid") is not False and side in ("UP", "DOWN") and
-            gate.get("allowed") is True and
-            stamp is not None and 0 <= current-stamp <= SIGNAL_CONFIRM_MAX_GAP)
-
-def _pause_market_signal(state, reason):
-    # Preserve the first real signal and its outcome; pause only the live arrow.
-    state.update(active_direction=None, active_since=None, pending_direction=None,
-                 pending_count=0, pending_since=None, pending_last_at=None,
-                 pending_price_source=None, opening_market_samples=[],
-                 market_wait_reason=reason, opening_conflict=reason)
-
-def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
-    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
-    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
-    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
-    def direction(row):
-        bull=(row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
-        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
-    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
-    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
-    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
-    target_atr=(distance/atr) if distance is not None else 0.0
-    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
-    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
-    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
-    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
-    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
-    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
-    market_gate = _strong_market_context(one, price)
-    # Evaluate all routes for both directions before choosing any candidate.
-    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
-    flow_context = {"direction":flow_side, "valid":False}
-    if isinstance(whale,dict):
-        flow_context["valid"] = (flow_side in ("UP","DOWN") and
-            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
-            float(whale.get("flow_strength") or 0)>=.20)
-    now = pd.Timestamp.now(tz="UTC")
-    ut_open, ut_closed, ut_closed_at, prior_side, closed_move = _ut_bot_events(df, 2, now)
-    ut_short, _, _, _, _ = _ut_bot_events(df, 1, now)
-    ut = {"direction": ut_closed, "ut_short": ut_short, "prior_side": prior_side,
-          "open_side": ut_open, "received_at": df.attrs.get("received_at"),
-          "closed_move": closed_move,
-          "closed_at": ut_closed_at.isoformat() if ut_closed_at is not None else None}
-    candidate = None
-    quality = "SIN CONFIRMACIÓN"
-    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
-                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
-    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
-    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
-    # Closing support adapts continuously; it is NOT a calibrated win probability.
-    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
-        weight = .35 + .35 * (180 - seconds_left) / 180
-        evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
-    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
-    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"market_entry_gate":market_gate,"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"NO APLICA","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"ut_signal":ut,"macd1":float(l1["macd_hist"]),}
-
-def _reset_withdrawal(state):
-    state.update(withdraw_direction=None, withdraw_source=None, withdraw_count=0,
-                 withdraw_since=None, withdraw_last_at=None, retention_warning=None)
 
 def _round_opening_crosscheck(state, candidate, signal, now, market):
     """Validate one fresh observation from the current round; no impulse gate."""
@@ -607,205 +370,37 @@ def _round_opening_crosscheck(state, candidate, signal, now, market):
     state["opening_conflict"] = None
     return candidate
 
-def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
-    """Publica la dirección vigente del indicador en una ronda válida."""
-    state["opening_conflict"] = None
-    market = market or {}
-    now_ts = pd.Timestamp(now)
-    end = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
-    round_open = pd.to_datetime(market.get("open_time"), utc=True, errors="coerce")
-    if pd.isna(round_open) and not pd.isna(end):
-        round_open = end - pd.Timedelta(minutes=15)
-
-    _reset_withdrawal(state)
-    state.update(pending_direction=None, pending_count=0, pending_since=None,
-                 pending_last_at=None, pending_price_source=None)
-    if not pd.isna(round_open):
-        if state.get("ut_round_policy") != 1:
-            state.update(active_direction=None, active_since=None, exit_plan=None, ut_round_policy=1)
-
-    signal = signal or {}
-    gate = signal.get("market_entry_gate") or {}
-    gate_side = gate.get("direction")
-    if not _market_entry_allowed(signal, gate_side, now):
-        _pause_market_signal(state, gate.get("reason") or "SIN DATOS ACTUALES")
-        return
-    observed = getattr(_PRICE_OBSERVATIONS, "values", {}).get(signal.get("price_source"))
-    if (signal.get("price_source") not in ("COINBASE", "KALSHI LIVE") or observed is None or
-            not np.isfinite(observed) or not 0 <= now_ts.timestamp()-observed <= SIGNAL_CONFIRM_MAX_GAP):
-        _pause_market_signal(state, "SIN PRECIO EN VIVO ACTUAL")
-        return
-    state["market_wait_reason"] = None
-    if (pd.isna(round_open) or pd.isna(end) or not round_open <= now_ts < end
-            or signal.get("data_valid") is False):
-        _pause_market_signal(state, "SIN RONDA O DATOS ACTUALES")
-        return
-    seconds_left = (end - now_ts).total_seconds()
-
-    # Keep the last confirmed UT flip separate from the displayed Kalshi side.
-    ut = signal.get("ut_signal") or {}
-    event_at = pd.to_datetime(ut.get("closed_at"), utc=True, errors="coerce")
-    saved_at = pd.to_datetime(state.get("ut_flip_at"), utc=True, errors="coerce")
-    if (candidate in ("UP", "DOWN") and not pd.isna(event_at) and event_at <= now_ts
-            and (pd.isna(saved_at) or event_at > saved_at)):
-        state.update(ut_flip_at=event_at.isoformat(), ut_side=candidate,
-                     ut_prior_side=ut.get("prior_side") or state.get("ut_side"),
-                     ut_flip_fallback=state.get("active_direction"))
-        saved_at = event_at
-    side = state.get("ut_side")
-    if side not in ("UP", "DOWN") or pd.isna(saved_at) or saved_at > now_ts:
-        _pause_market_signal(state, "SIN DIRECCIÓN CONFIRMADA")
-        return
-
-    active = state.get("active_direction")
-    if state.get("first_direction") is None:
-        confirmed = _round_opening_crosscheck(state, candidate, signal, now, market)
-        if confirmed != side:
-            state.update(active_direction=None, active_since=None)
-            return
-        received_at = pd.to_datetime(ut.get("received_at"), utc=True, errors="coerce")
-        if (now_ts < round_open + pd.Timedelta(seconds=NEW_ROUND_WAIT)
-                or pd.isna(received_at) or not round_open <= received_at <= now_ts
-                or candidate != side or event_at != saved_at):
-            return
-        # An opposite open candle pauses the first signal until the UT resolves it.
-        if ut.get("open_side") in ("UP", "DOWN") and ut["open_side"] != side:
-            return
-        active = side
-    elif saved_at <= round_open:
-        active = side
-    else:
-        fallback = state.get("ut_flip_fallback") or state.get("ut_prior_side")
-        price = _plan_number(signal.get("price"))
-        target = _plan_number(get_target_from_market(market))
-        if price is not None and target is not None:
-            sign = 1 if side == "UP" else -1
-            gap = sign * (target - price)
-            # Use the latest closed two-minute move, scaled to the remaining time.
-            move = _plan_number(ut.get("closed_move"))
-            if gap <= 0 or (move is not None and sign * move * seconds_left / 120 >= gap):
-                active = side
-            elif fallback in ("UP", "DOWN"):
-                active = fallback
-        elif active is None:
-            active = fallback
-
-    if not _market_entry_allowed(signal, active, now):
-        _pause_market_signal(state, "DIRECCIÓN SIN IMPULSO FUERTE")
-        return
-    if state.get("active_direction") != active:
-        # Fresh observations are mandatory for re-entry and reversal as well.
-        if _round_opening_crosscheck(state, active, signal, now, market) != active:
-            # A prospective reversal must not erase the confirmed live signal.
-            # A blocked regime or invalid data still pauses it above.
-            return
-    if state.get("active_direction") != active:
-        state.update(active_direction=active, active_since=now)
-    if state.get("first_direction") is None:
-        state.update(first_direction=active, first_signal_time=now,
-                     first_signal_seconds=seconds_left,
-                     first_signal_price=get_yes_ask(market) if active == "UP" else get_no_ask(market))
-
-
-def _execution_signal(df, target, seconds_left, live_price, source):
-    # Same candidacy rules as app 58 build_signal; no tracing/UI side effects.
-    sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
-    sig.update(price_source=source, data_valid=True, engine_revision=SIGNAL_ENGINE_REVISION)
-    side = sig['ut_signal']['direction']
-    if seconds_left is not None and 0 < seconds_left <= 900 and target is not None and _market_entry_allowed(sig, side):
-        sig['candidate'] = side
-        sig['quality'] = sig['entry_route_internal'] = 'SEÑAL DIRECTA'
-    if not _market_entry_allowed(sig, side):
-        sig['candidate'] = None
-        sig['quality'] = sig['entry_route_internal'] = 'ESPERANDO · ' + sig['market_entry_gate']['reason']
-    return sig
-
-def _entry_route_checks(signal, seconds_left):
-    # Execution adapter: old indicator routes must not override the UT brain.
-    side = (signal or {}).get('candidate')
-    valid = seconds_left is not None and 0 < seconds_left <= 900 and _market_entry_allowed(signal, side)
-    return {'valid': bool(valid), 'sides': {s: [{'complete': bool(valid and side == s), 'name': 'UT APP 58'}] for s in ('UP','DOWN')}}
-
-
 
 # --- APP 84 STRUCTURAL SIGNAL BRAIN ---
-def _entry_route_checks(sig, seconds_left):
-    """Evaluate both sides from the same evidence; shared by engine and UI."""
-    required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
-                "vol_ratio", "mom3", "mom5", "target_atr")
-    if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
-        return {"valid":False, "sides":{}, "noise_ok":False}
-    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion = (float(sig[k]) for k in required)
-    d3,d5 = sig.get("trend3"), sig.get("trend5")
-    impulse = sig.get("impulse_internal") or {}
-    noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
+def _entry_route_checks(signal, seconds_left):
+    required = ("vwap_atr", "mom3", "target_atr")
+    values = [_plan_number(signal.get(key)) for key in required]
+    if signal.get("data_valid") is False or any(value is None for value in values):
+        return {"valid": False, "sides": {}, "noise_ok": False}
+
+    vwap_distance, momentum, target_distance = values
+    outside_noise = abs(vwap_distance) >= .05
     sides = {}
-    for side,sign,other in (("UP",1,"DOWN"),("DOWN",-1,"UP")):
-        up = sign == 1
-        exhausted = bool(impulse.get("exhaust_up" if up else "exhaust_down"))
-        strength = float(impulse.get("up" if up else "down", 0))
-        reliable = bool(impulse.get("reliable"))
-        current = [
-            ("Precio actual respecto a VWAP", vw*sign>0),
-            ("RSI y momentum actuales a favor", (r1>=53 if up else r1<=47) and mom*sign>=.025),
-            ("MACD de 1 minuto y VWAP a favor", m1*sign>0 and vw*sign>=.03),
-            ("Impulso actual sin agotamiento detectado", not exhausted),
-        ]
-        early_five = d5 != other or (reliable and strength>=.75 and mom*sign>.04 and vol>=.9)
-        rsi_vwap = (r1>=52 and vw>=.05) if up else (r1<=48 and vw<=-.05)
-        routes = [
-            ("IMPULSO ACTUAL", current),
-            ("TENDENCIA ALINEADA", [
-                ("Tendencias de 3 y 5 minutos a favor", d3==side and d5==side),
-                ("Fuerza de tendencia o RSI suficientes", adx>=20 or ((r3>=52 and r5>=50) if up else (r3<=48 and r5<=50))),
-                ("VWAP y momentum actual respaldan la tendencia", (vw>-.15 if up else vw<.15) and mom*sign>=.012),
-                ("Sin agotamiento detectado", not exhausted),
-            ]),
-            ("TEMPRANA", [
-                ("MACD de 3 minutos a favor", m3*sign>0),
-                ("RSI de 1 minuto y VWAP a favor", rsi_vwap),
-                ("Momentum de 3 minutos a favor", mom*sign>.015),
-                ("Contexto de 5 minutos respaldado o superado por fuerza actual", early_five),
-                ("Sin agotamiento detectado", not exhausted),
-            ]),
-            ("TEMPRANA ACELERADA", [
-                ("MACD y momentum a favor", m3*sign>0 and mom*sign>.015),
-                ("Contexto de 5 minutos no contrario", d5!=other),
-                ("Impulso fuerte con volumen y ADX", reliable and strength>=.65 and adx>=20 and vol>=.8),
-                ("Sin agotamiento detectado", not exhausted),
-            ]),
-            ("GIRO TEMPRANO", [
-                ("MACD y momentum respaldan el giro", m3*sign>0 and mom*sign>.04),
-                ("RSI de 1 y 3 minutos respaldan el giro", (r1>=54 and r3>=50) if up else (r1<=46 and r3<=50)),
-                ("VWAP y distancia suficientes", vw*sign>=.08 and abs(cushion)>=.30),
-                ("Impulso y volumen suficientes", reliable and strength>=.70 and vol>=.9),
-                ("Sin agotamiento detectado", not exhausted),
-            ]),
-        ]
-        flow = sig.get("flow_context_internal") or {}
-        flow_ok = flow.get("direction")==side and flow.get("valid",False)
-        routes.append(("FLUJO + IMPULSO", [
-            ("Flujo agresor significativo a favor", flow_ok),
-            ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and vw*sign>0),
-            ("Momentum y VWAP a favor", mom*sign>=.012 and vw*sign>=-.04),
-            ("Contexto contrario corroborado por momentum", d5!=other or (mom5*sign>=.025 and abs(mom)>=.025)),
-            ("Impulso fiable sin agotamiento", reliable and not exhausted),
-        ]))
+    for side, sign in (("UP", 1), ("DOWN", -1)):
         target_ok = True
-        if sig.get("distance") is not None and seconds_left is not None:
-            remaining = float(np.clip(seconds_left,0,900))
-            weight = .12+.88*(1-remaining/900)**1.6
-            tolerance = 1.8-1.4*weight
-            if -sign*cushion>tolerance:
-                target_ok = (reliable and strength>=.75 and mom*sign>.04 and not exhausted
-                             and (all(ok for _,ok in current) or d3==side or d5==side))
-        sides[side] = []
-        for name,checks in routes:
-            checks = checks+[("Fuera de la zona de ruido",noise_ok),
-                            ("Distancia al target y tiempo respaldan la dirección",target_ok)]
-            sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
-                                "total":len(checks),"complete":all(bool(ok) for _,ok in checks)})
-    return {"valid":True,"sides":sides,"noise_ok":noise_ok}
+        if signal.get("distance") is not None and seconds_left is not None:
+            remaining = min(max(seconds_left, 0), 900)
+            tolerance = 1.8 - 1.4 * (.12 + .88 * (1 - remaining / 900) ** 1.6)
+            target_ok = -sign * target_distance <= tolerance or momentum * sign > .04
+        checks = [
+            ("Precio del lado de la señal respecto al VWAP", vwap_distance * sign >= .05),
+            ("Momentum de 3 minutos a favor", momentum * sign > .015),
+            ("Distancia al objetivo y tiempo compatibles", target_ok),
+        ]
+        sides[side] = [{
+            "name": "IMPULSO TEMPRANO",
+            "checks": checks,
+            "met": sum(bool(passed) for _, passed in checks),
+            "total": len(checks),
+            "complete": all(passed for _, passed in checks),
+        }]
+    return {"valid": True, "sides": sides, "noise_ok": outside_noise}
+
 
 def _structure_context(df, price, atr, rvol):
     """Same previous-20-candle levels used by the chart; no look-ahead.
@@ -853,7 +448,7 @@ def _structure_context(df, price, atr, rvol):
             "break_up": bool(break_up), "break_down": bool(break_down),
             "event": event}
 
-def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvol, whale):
+def _level_decision_context(df, price, atr, seconds_left, target, mom3, rvol):
     """Unified price-structure decision for the OFFICIAL signal only.
 
     Look for repeatedly tested zones, current rejection/continuation, and the
@@ -880,11 +475,8 @@ def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvo
     hi = float(latest["high"])
     lo = float(latest["low"])
     volume_ok = bool(rvol >= 1.05)
-    whale = whale if isinstance(whale,dict) else {}
-    buy = float(whale.get("buy30") or 0)
-    sell = float(whale.get("sell30") or 0)
-    bearish_pressure = mom3 < 0 and (rsi < 52 or sell > buy)
-    bullish_pressure = mom3 > 0 and (rsi > 48 or buy > sell)
+    bearish_pressure = mom3 < 0
+    bullish_pressure = mom3 > 0
     # Breakout confirmation uses direction, continuation and volume/impulse.
     breakout_up = (close > resistance+tol and prev_close > resistance
                    and close >= prev_close and (volume_ok or mom3 > .04))
@@ -980,7 +572,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
     target_atr=(distance/atr) if distance is not None else 0.0
     vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
-    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
+    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0
     rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
     mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
     trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
@@ -992,7 +584,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         flow_context["valid"] = (flow_side in ("UP","DOWN") and
             float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
             float(whale.get("flow_strength") or 0)>=.20)
-    route_input = {"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
+    route_input = {"adx":adx5,"vwap_atr":vwap_atr,
         "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
         "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
         "ema":"NO APLICA",
@@ -1004,7 +596,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     # PRESEÑAL is computed separately and is not modified.
     structure = _structure_context(df, price, atr, rvol)
     levels = _level_decision_context(
-        df, price, atr, seconds_left, target, mom3, rsi1, rvol, whale)
+        df, price, atr, seconds_left, target, mom3, rvol)
     structure["level_decision"] = levels
     if levels["veto"] in ("UP", "DOWN"):
         eligible[levels["veto"]] = []
@@ -1042,12 +634,49 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"NO APLICA","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),}
+    return {"price":price,"candle_price":candle_price,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"NO APLICA","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),}
+
+def _ut_direction_1m(candles, now):
+    """Latest confirmed UT arrow from closed 1-minute candles."""
+    received = pd.to_datetime(candles.attrs.get("received_at"), utc=True, errors="coerce")
+    cutoff = now if pd.isna(received) else min(now, received)
+    closed = candles.loc[candles["time"] + pd.Timedelta(minutes=1) <= cutoff]
+    atr = stop = previous = direction = None
+    seed = []
+    for row in closed.sort_values("time").itertuples(index=False):
+        close = float(row.close)
+        span = float(row.high - row.low)
+        if previous is not None:
+            span = max(span, abs(row.high - previous), abs(row.low - previous))
+        if atr is None:
+            seed.append(span)
+            if len(seed) < 10:
+                previous = close
+                continue
+            atr = sum(seed) / 10
+        else:
+            atr = (9 * atr + span) / 10
+        if stop is None:
+            next_stop = close - atr
+        elif close > stop and previous > stop:
+            next_stop = max(stop, close - atr)
+        elif close < stop and previous < stop:
+            next_stop = min(stop, close + atr)
+        else:
+            next_stop = close - atr if close > stop else close + atr
+        if stop is not None:
+            if previous <= stop and close > next_stop:
+                direction = "UP"
+            elif previous >= stop and close < next_stop:
+                direction = "DOWN"
+        stop, previous = next_stop, close
+    return direction
+
 
 def _execution_signal(df, target, seconds_left, live_price, source):
-    # App 84 structure/level brain, no UT Bot and no fixed opening-minute delay.
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
-    sig.update(price_source=source, data_valid=True, engine_revision="app84_structure_hybrid_v1")
+    sig.update(price_source=source, data_valid=True, engine_revision=SIGNAL_ENGINE_REVISION,
+               ut_1m_direction=_ut_direction_1m(df, pd.Timestamp.now(tz="UTC")))
     return sig
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
@@ -1068,6 +697,9 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state.update(pending_direction=None, pending_count=0)
         return
     # Require live price evidence; no fixed 60-second observation.
+    if state.get("first_direction") is None and signal.get("ut_1m_direction") != candidate:
+        state["opening_conflict"] = f"Esperando flecha UT de 1 minuto a favor de {candidate}."
+        return
     confirmed = _round_opening_crosscheck(state, candidate, signal, current, market)
     if confirmed != candidate:
         return
@@ -1079,7 +711,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
                      first_signal_price=get_yes_ask(market) if candidate == "UP" else get_no_ask(market))
 
 
-engine=types.SimpleNamespace(**{n:globals()[n] for n in ['_confirmation_without_trace', '_entry_route_checks', '_execution_signal', '_fetch_btc_candle_source', '_fetch_current_btc_candles', '_indicator_frame', '_internal_impulse_context', '_market_entry_allowed', '_market_window_evidence', '_pause_market_signal', '_plan_number', '_resample_indicators', '_reset_withdrawal', '_round_opening_crosscheck', '_signal_engine_without_trace', '_structure_context', '_level_decision_context', '_opening_level_gate', '_strong_market_context', '_valid_live_observation', '_validate_btc_candle_frame', 'add_indicators', 'extract_kalshi_btc_price', 'get_event_ticker_from_market', 'get_no_ask', 'get_seconds_remaining', 'get_target_from_market', 'get_yes_ask', 'new_round_state', 'numeric_kalshi_price']})
+engine=types.SimpleNamespace(**{n:globals()[n] for n in ['_confirmation_without_trace', '_entry_route_checks', '_execution_signal', '_fetch_btc_candle_source', '_fetch_current_btc_candles', '_indicator_frame', '_internal_impulse_context', '_plan_number', '_resample_indicators', '_round_opening_crosscheck', '_signal_engine_without_trace', '_structure_context', '_level_decision_context', '_opening_level_gate', '_valid_live_observation', '_validate_btc_candle_frame', 'add_indicators', 'extract_kalshi_btc_price', 'get_event_ticker_from_market', 'get_no_ask', 'get_seconds_remaining', 'get_target_from_market', 'get_yes_ask', 'new_round_state', 'numeric_kalshi_price']})
 import csv
 import hashlib
 import hmac
@@ -1586,7 +1218,7 @@ class Bot:
                            'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
                            'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
                            'price':sig['price'],'source':sig['price_source'],'quality':sig['quality'],
-                           'rsi':sig['rsi'],'ema':sig['ema'],'metrics':clean_json(sig),'updated':stamp(),
+                           'ema':sig['ema'],'metrics':clean_json(sig),'updated':stamp(),
                            'book':book,'target':engine.get_target_from_market(market),
                            'price_chart':round_price_chart(market,sig,self.snapshot.get('price_chart')),
                            'retention':state.get('retention_warning')}
@@ -1716,8 +1348,6 @@ class AccountMarketData(MarketData):
 
 
 class ConnectedBot(Bot):
-    def __init__(self, *args, **kwargs):
-        raise ValueError("Versión de simulación: dinero real desactivado.")
     """Separate account ledger. Only confirmed exchange fills create/close trades."""
     def __init__(self,db_path,account):
         self.account=account;self.account_cash=account.balance();self.balance_at=time.monotonic()
@@ -1881,7 +1511,6 @@ class ConnectedBot(Bot):
         return result
 
 
-
 class PaperBot(Bot):
     """Virtual ledger and public GET-only feed; never owns an account client."""
     execution_mode = "paper"
@@ -1945,9 +1574,6 @@ class PaperBot(Bot):
 
 
 def _connect_kalshi(controller,payload):
-    raise ValueError("Versión de simulación: conexión para operar con dinero real desactivada.")
-
-def _connect_kalshi_disabled_original(controller,payload):
     if time.monotonic()<getattr(controller,'connect_retry_at',0):
         raise ValueError(f'Espera {math.ceil(controller.connect_retry_at-time.monotonic())} segundos antes de volver a conectar (HTTP 429).')
     controller.connection_stage='validar el modo y el estado del bot'
@@ -1973,6 +1599,8 @@ def _connect_kalshi_disabled_original(controller,payload):
         registry=getattr(root,'connected_accounts',None)
         if registry is None:registry={};root.connected_accounts=registry
         linked=registry.get(client.identity)
+        if linked is None and registry:
+            raise ValueError("Este servidor ya tiene una cuenta real conectada.")
         if linked is None:
             base=Path(root.db.execute('PRAGMA database_list').fetchone()[2] or ROOT/'data'/'alpha.sqlite3')
             path=base.with_name(base.stem+'.kalshi-'+client.identity+'.sqlite3');path.parent.mkdir(parents=True,exist_ok=True)
@@ -2002,13 +1630,15 @@ def _connect_kalshi_disabled_original(controller,payload):
                     if linked.thread is None or not linked.thread.is_alive():linked.db.close()
                 process_lock.close()
                 raise
-        elif linked.running:raise ValueError('Esta cuenta ya está operando. Paúsala antes de reconectar.')
-        else:linked.account=client;linked.feed.account=client
+        else:
+            with linked.lock:
+                if not linked.running:
+                    linked.account = client
+                    linked.feed.account = client
         controller.bot=linked
-    return {'message':'Cuenta REAL'+f' conectada · saldo ${cash:.2f}. Entradas pausadas; pulsa INICIAR cuando quieras operar.',
+    status = 'Entradas activas.' if linked.running else 'Entradas pausadas; pulsa INICIAR cuando quieras operar.'
+    return {'message': f'Cuenta REAL conectada · saldo ${cash:.2f}. {status}',
             'verified_at':stamp(),'environment':env,'balance':cash}
-
-
 
 
 _TERMINAL_HTML = r"""
@@ -2452,8 +2082,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <div class="body">
 <div class="field">Tendencia (MACD)<strong id="emaValue">—</strong>
 </div>
-<div class="field">RSI 14<strong id="rsiValue">—</strong>
-</div>
 <div class="field">Momentum<strong id="momentumValue">—</strong>
 </div>
 <div class="field">Volumen relativo<strong id="volumeValue">—</strong>
@@ -2467,7 +2095,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Conexión Kalshi</h2>
 <div class="body">
-<p class="muted">Con Dinero virtual encendido se prueba sin una cuenta real. Apaga el switch para usar la conexión REAL. Conectar verifica la cuenta y deja las entradas pausadas; INICIAR activa las operaciones.</p>
+<p class="muted">Selecciona Modo real arriba para conectar tu cuenta. Conectar verifica la cuenta y deja las entradas pausadas; INICIAR activa las operaciones.</p>
 <div class="field">
 <label>Cuenta REAL de Kalshi</label>
 </div>
@@ -2479,7 +2107,7 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <label>Clave privada</label>
 <textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM del entorno elegido" spellcheck="false" autocomplete="off"></textarea>
 </div>
-<p class="muted">Para reconectar tras reinicios, guarda una vez KALSHI_API_KEY_ID y KALSHI_PRIVATE_KEY en los secretos del servidor. Las claves pegadas solo aquí duran hasta el reinicio. Al volver a la página se recupera la cuenta conectada en este servidor.</p>
+<p class="muted">Las claves se conservan en memoria hasta que se reinicia el servidor. En una sesión nueva vuelve a conectar la cuenta.</p>
 <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testApi" class="primary">CONECTAR</button></div><div class="notice"><span id="connectionNotice">Cuenta sin conectar.</span></div>
 </div>
 </article>
@@ -2766,7 +2394,7 @@ if(!loaded||(!dirty&&settingsSignature!==signature)){settingsSignature=signature
 martingalePreview();
 setRows($('#entriesRows'),s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join(''));$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 setRows($('#logs'),s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join(''));
-setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.metrics?.macd1>0?'ALCISTA':s.metrics?.macd1<0?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
+setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.metrics?.macd1>0?'ALCISTA':s.metrics?.macd1<0?'BAJISTA':'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;setText($('#connectionNotice'),(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:''));height();tick()}
 function tick(){
   const now=Date.now();
@@ -2793,10 +2421,6 @@ class Controller:
         self.connection_root=bot
         self.seen={}
         self.connection={'message':('Prueba virtual · datos públicos; sin órdenes reales.' if getattr(bot,'execution_mode',None)=='paper' else 'REAL · Cuenta pendiente de conectar.')}
-        active=[]  # Explicit mode selection owns which ledger is shown.
-        if len(active)==1:
-            self.bot=active[0]
-            self.connection={'message':'Cuenta REAL recuperada.','environment':'live'}
     def handle(self,event):
         if not isinstance(event,dict) or event.get('action')=='ack':
             return None
@@ -2822,8 +2446,7 @@ class Controller:
                 reply['message']='Kalshi responde: '+market['ticker']
                 self.connection={'message':'Consulta pública verificada: '+market['ticker'],'verified_at':stamp()}
             elif action=='verify_demo':
-                if getattr(self.bot,'execution_mode',None)=='paper':raise ValueError('Apaga Dinero virtual antes de conectar una cuenta real.')
-                self.auto_disabled=False
+                if getattr(self.bot,'execution_mode',None)=='paper':raise ValueError('Activa Modo real antes de conectar tu cuenta.')
                 self.connection=_connect_kalshi(self,payload)
                 reply['message']=self.connection['message']
             elif action=='sync_account':
@@ -2877,45 +2500,6 @@ class Controller:
         return result
 
 
-
-def _saved_kalshi_credentials(secrets_source=None):
-    def read(name):
-        value=os.environ.get(name)
-        if value is None and secrets_source is not None:
-            try:value=secrets_source.get(name,'')
-            except Exception:value=''
-        return value.strip() if isinstance(value,str) else ''
-    key_id=read('KALSHI_API_KEY_ID');pem=read('KALSHI_PRIVATE_KEY')
-    # Accept multiline secrets as well as escaped newlines in environment values.
-    return key_id,pem.replace('\\n','\n')
-
-def _auto_connect_saved(controller,credentials):
-    if getattr(controller,'auto_disabled',False) or isinstance(controller.bot,(ConnectedBot,PaperBot)):return
-    key_id,pem=credentials
-    if not key_id and not pem:return
-    root=controller.connection_root
-    with root.lock:
-        if time.monotonic()<getattr(root,'saved_retry_at',0):return
-        if not key_id or not pem:
-            controller.connection={'message':'Completa KALSHI_API_KEY_ID y KALSHI_PRIVATE_KEY en los secretos del servidor.'}
-            return
-        if root.running:return
-        identity=hashlib.sha256(('live:'+key_id).encode()).hexdigest()[:24]
-        linked=getattr(root,'connected_accounts',{}).get(identity)
-        if linked is not None and not linked.stop_event.is_set():
-            controller.bot=linked
-            controller.connection={'message':'Cuenta REAL conectada con las claves guardadas en el servidor.','environment':'live'}
-            return
-        try:
-            controller.connection=_connect_kalshi(controller,dict(environment='live',accept_real=True,key_id=key_id,pem=pem))
-            controller.connection['message']='Cuenta REAL conectada automáticamente. Entradas pausadas; pulsa INICIAR para comprar.'
-        except Exception as exc:
-            root.saved_retry_at=max(time.monotonic()+30,getattr(controller,'connect_retry_at',0))
-            message=str(exc) if isinstance(exc,ValueError) else 'No se pudo completar la conexión automática.'
-            controller.connection={'message':message+' Se reintentará automáticamente en al menos 30 segundos.','state':'error'}
-
-
-
 PAPER_RUNTIME_REVISION = "martingale_sim_kalshi_chart_v1"
 
 def _refresh_runtime_bot(root, paper_mode):
@@ -2936,7 +2520,6 @@ def _refresh_runtime_bot(root, paper_mode):
                 linked.feed.__class__=AccountMarketData
     root.start_worker()
     return root
-
 
 
 def _runtime_registry():
@@ -3018,30 +2601,27 @@ def streamlit_main():
     import tempfile
     st.set_page_config(page_title='ALPHA EDGE · BTC 15 MIN',layout='wide',initial_sidebar_state='collapsed')
     st.markdown('<style>.block-container{padding:0!important;max-width:100%!important}header,footer{display:none!important}.stApp{background:#080e22}</style>',unsafe_allow_html=True)
+    real_mode = st.toggle("Modo real", key="alpha_real_mode")
     try:
-        password=os.environ.get('ALPHA_PASSWORD') or st.secrets.get('ALPHA_PASSWORD','')
-    except Exception:
-        password=os.environ.get('ALPHA_PASSWORD','')
-    if password and not st.session_state.get('alpha_authenticated'):
-        supplied=st.text_input('Contraseña de ALPHA EDGE',type='password')
-        if st.button('Entrar'):
-            if hmac.compare_digest(supplied.encode(),password.encode()):
-                st.session_state.alpha_authenticated=True;st.rerun()
-            else:st.error('Contraseña incorrecta.')
-        st.stop()
-
-    try:
-        bot=_shared_runtime_bot(True)
+        bot = _shared_runtime_bot(not real_mode)
     except (OSError,RuntimeError):
         st.error('El motor anterior sigue ocupando el historial. Reinicia la app para cargar esta versión.')
         st.stop()
-    controller=st.session_state.get('alpha_controller')
-    if controller is None or controller.bot is not bot:
-        controller=Controller(bot)
-        st.session_state.alpha_controller=controller
-        st.session_state.alpha_reply=None
-    controller.__class__=Controller
-    st.caption('MODO PRUEBA · SALDO VIRTUAL')
+    mode = "live" if real_mode else "paper"
+    controller_key = "alpha_controller_" + mode
+    reply_key = "alpha_reply_" + mode
+    controller = st.session_state.get(controller_key)
+    if controller is None or controller.connection_root is not bot:
+        controller = Controller(bot)
+        st.session_state[controller_key] = controller
+        st.session_state[reply_key] = None
+    controller.__class__ = Controller
+    if not real_mode and st.session_state.get("alpha_previous_real_mode"):
+        live = st.session_state.get("alpha_controller_live")
+        if live is not None and isinstance(live.bot, ConnectedBot):
+            live.bot.command("pause")
+    st.session_state["alpha_previous_real_mode"] = real_mode
+    st.caption("MODO REAL · CONECTA TU CUENTA" if real_mode else "SIMULACIÓN · SALDO VIRTUAL")
     digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
     directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
     directory.mkdir(parents=True,exist_ok=True)
@@ -3051,7 +2631,7 @@ def streamlit_main():
 
     @st.fragment(run_every=2)
     def live_terminal():
-        event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
+        event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get(reply_key),key="alpha_terminal_" + mode,default=None)
         if isinstance(event,dict) and event.get('action')=='ack':
             st.session_state.alpha_reply=None
         elif isinstance(event,dict) and event.get('id') not in controller.seen:
