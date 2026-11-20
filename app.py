@@ -220,8 +220,6 @@ def extract_kalshi_btc_price(data):
 def _indicator_frame(df):
     x = df.copy().sort_values("time").reset_index(drop=True)
     close, high, low = x["close"], x["high"], x["low"]
-    e12=close.ewm(span=12,adjust=False).mean(); e26=close.ewm(span=26,adjust=False).mean()
-    x["macd"]=e12-e26; x["macd_signal"]=x["macd"].ewm(span=9,adjust=False).mean(); x["macd_hist"]=x["macd"]-x["macd_signal"]
     prev=close.shift(1); tr=pd.concat([(high-low),(high-prev).abs(),(low-prev).abs()],axis=1).max(axis=1)
     x["atr"]=tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
     up=high.diff(); dn=-low.diff(); plus=up.where((up>dn)&(up>0),0.0); minus=dn.where((dn>up)&(dn>0),0.0)
@@ -564,8 +562,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
     candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
     def direction(row):
-        bull=(row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
-        bear=(row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        bull=(row["plus_di"]>row["minus_di"])
+        bear=(row["minus_di"]>row["plus_di"])
         return "UP" if bull else "DOWN" if bear else "NEUTRAL"
     d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
     atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
@@ -575,7 +573,6 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0
     rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
     mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
-    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
     impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
     # Evaluate all routes for both directions before choosing any candidate.
     flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
@@ -584,11 +581,8 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         flow_context["valid"] = (flow_side in ("UP","DOWN") and
             float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
             float(whale.get("flow_strength") or 0)>=.20)
-    route_input = {"adx":adx5,"vwap_atr":vwap_atr,
-        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
-        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
-        "ema":"NO APLICA",
-        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
+    route_input = {"vwap_atr": vwap_atr, "mom3": mom3,
+                   "target_atr": target_atr, "distance": distance}
     route_view = _entry_route_checks(route_input, seconds_left)
     eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
                 for side in ("UP","DOWN")}
@@ -616,7 +610,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     if structure["down_blocked"] and levels["breakout"] != "DOWN":
         eligible["DOWN"] = []
     # Mandatory boundary gate on the OFFICIAL entry candidate, independent
-    # of route scoring or EMA momentum. Presignal is untouched.
+    # of route scoring. Presignal is computed separately.
     opening_levels = _opening_level_gate(df, price, atr, rvol, target)
     structure["opening_level_gate"] = opening_levels
     for blocked_side in opening_levels["blocked"]:
@@ -627,14 +621,14 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
                     "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
-    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
+    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+float(np.clip(target_atr,-2,2))
     # Closing support adapts continuously; it is NOT a calibrated win probability.
     if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
         weight = .35 + .35 * (180 - seconds_left) / 180
         evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
     up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
     momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
-    return {"price":price,"candle_price":candle_price,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"NO APLICA","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),}
+    return {"price":price,"candle_price":candle_price,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,}
 
 def _ut_direction_1m(candles, now):
     """Latest confirmed UT arrow from closed 1-minute candles."""
@@ -1218,7 +1212,7 @@ class Bot:
                            'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
                            'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
                            'price':sig['price'],'source':sig['price_source'],'quality':sig['quality'],
-                           'ema':sig['ema'],'metrics':clean_json(sig),'updated':stamp(),
+                           'metrics':clean_json(sig),'updated':stamp(),
                            'book':book,'target':engine.get_target_from_market(market),
                            'price_chart':round_price_chart(market,sig,self.snapshot.get('price_chart')),
                            'retention':state.get('retention_warning')}
@@ -2080,8 +2074,6 @@ th{color:var(--muted);font-size:9px;text-transform:uppercase}
 <article class="panel">
 <h2>Indicadores</h2>
 <div class="body">
-<div class="field">Tendencia (MACD)<strong id="emaValue">—</strong>
-</div>
 <div class="field">Momentum<strong id="momentumValue">—</strong>
 </div>
 <div class="field">Volumen relativo<strong id="volumeValue">—</strong>
@@ -2394,7 +2386,7 @@ if(!loaded||(!dirty&&settingsSignature!==signature)){settingsSignature=signature
 martingalePreview();
 setRows($('#entriesRows'),s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join(''));$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
 setRows($('#logs'),s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join(''));
-setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.metrics?.macd1>0?'ALCISTA':s.metrics?.macd1<0?'BAJISTA':'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
+setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
 endAt=s.market?.close_time?Date.parse(s.market.close_time):null;setText($('#connectionNotice'),(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:''));height();tick()}
 function tick(){
   const now=Date.now();
