@@ -2218,12 +2218,6 @@ def _entry_route_checks(sig, seconds_left):
                 ("Tendencia de 3 minutos compatible o superada por fuerza actual", early_three),
                 ("Sin agotamiento detectado", not exhausted),
             ]),
-            ("TEMPRANA SIN EMAS", [
-                ("RSI de 1 minuto a favor", r1>=53 if up else r1<=47),
-                ("MACD de 1 minuto a favor", m1*sign>0),
-                ("Momentum de 3 minutos a favor", mom*sign>.015),
-                ("Sin agotamiento detectado", not exhausted),
-            ]),
             ("TEMPRANA ACELERADA", [
                 ("MACD y momentum a favor", m3*sign>0 and mom*sign>.015),
                 ("Tendencia de 3 minutos compatible", d3 != other),
@@ -2507,11 +2501,7 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         eligible[blocked_side] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
-    quality = "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
-    if candidate:
-        routes = eligible[candidate]
-        quality = next((route["name"] for route in routes if route["name"] == "TEMPRANA SIN EMAS"),
-                       routes[0]["name"])
+    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
                     "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
@@ -2699,7 +2689,7 @@ def _direction_evidence(signal):
     return families
 
 
-def _direction_consistent(candidate, signal, active=None, *, first_entry=False):
+def _direction_consistent(candidate, signal, active=None, *, first_signal=False):
     """Single policy for entry and reversal, using nonduplicated families.
 
     Reversal requires stronger consensus than first entry; a transient
@@ -2707,19 +2697,13 @@ def _direction_consistent(candidate, signal, active=None, *, first_entry=False):
     """
     if candidate not in ("UP", "DOWN"):
         return False
-    if (first_entry and active not in ("UP", "DOWN") and signal
-            and signal.get("data_valid") is not False and signal.get("candidate") == candidate
-            and signal.get("entry_route_internal") == "TEMPRANA SIN EMAS"):
-        # The engine has already checked RSI, MACD and momentum for this route.
-        return True
     families = _direction_evidence(signal)
-    if len(families) < 3:
-        return False
     agree = sum(v == candidate for v in families.values())
     oppose = len(families) - agree
     if active in ("UP", "DOWN") and active != candidate:
         return agree >= 3 and oppose == 0
-    return agree >= 3 and agree > oppose
+    minimum_agreement = 2 if first_signal else 3
+    return agree >= minimum_agreement and agree > oppose
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
@@ -2734,8 +2718,8 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     def wait(reason):
         state["opening_conflict"] = reason
         return None
-    if state.get("opening_gate_revision") != "fresh_first_entry_v2":
-        state.update(opening_gate_revision="fresh_first_entry_v2", opening_live_tapes={})
+    if state.get("opening_gate_revision") != "fresh_first_entry_v1":
+        state.update(opening_gate_revision="fresh_first_entry_v1", opening_live_tapes={})
     if not signal or signal.get("data_valid") is False:
         return wait("Esperando datos actuales para la primera señal")
     price = _plan_number(signal.get("price"))
@@ -2753,21 +2737,11 @@ def _round_opening_crosscheck(state, candidate, signal, now):
     if not tape or stamp-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
         tape.append([stamp, price])
     tapes[source] = tape
+    if candidate not in ("UP", "DOWN"):
+        return wait("Analizando fuerza actual antes de la primera señal")
     if len(tape) < 3 or tape[-1][0]-tape[0][0] < 6:
         return wait("Observando movimiento actual antes de la primera señal")
     prices = [float(x[1]) for x in tape]
-    if candidate not in ("UP", "DOWN"):
-        # The current price must be on the same side of the round target as the move.
-        move = prices[-1] - prices[0]
-        distance = _plan_number(signal.get("distance"))
-        if distance is None or move * distance <= 0:
-            return wait("Esperando un movimiento claro respecto al target")
-        candidate = "UP" if move > 0 else "DOWN"
-        structure = signal.get("structure_internal") or {}
-        levels = structure.get("level_decision") or {}
-        if (levels.get("veto") == candidate or
-                (structure.get(candidate.lower() + "_blocked") and levels.get("breakout") != candidate)):
-            return wait("Esperando confirmación del nivel para " + candidate)
     sign = 1 if candidate == "UP" else -1
     split = len(prices)//2
     net = sign*(prices[-1]-prices[0])
@@ -2834,15 +2808,13 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     """
     # A candidate is not a confirmation when the available directional
     # evidence contradicts it. Keep the active signal while reassessing.
-    first_entry = state.get("first_direction") not in ("UP", "DOWN")
+    first_signal = state.get("first_direction") not in ("UP", "DOWN")
     if candidate in ("UP", "DOWN") and not _direction_consistent(
-            candidate, signal, state.get("active_direction"), first_entry=first_entry):
+            candidate, signal, state.get("active_direction"), first_signal=first_signal):
         candidate = None
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
     level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
     candidate = _round_opening_crosscheck(state, candidate, signal, now)
-    if candidate in ("UP", "DOWN"):
-        level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
     # Opening-only veto. Once the round has a confirmed first direction,
     # subsequent retention/reversal is governed by its separate checks.
     if state.get("first_direction") not in ("UP", "DOWN"):
@@ -5055,9 +5027,9 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "opening_live_direction_v2":
+    if state.get("signal_engine_revision") != "unified_evidence_v7_3m":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "opening_live_direction_v2"
+        state["signal_engine_revision"] = "unified_evidence_v7_3m"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
