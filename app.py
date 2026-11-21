@@ -2218,6 +2218,12 @@ def _entry_route_checks(sig, seconds_left):
                 ("Tendencia de 3 minutos compatible o superada por fuerza actual", early_three),
                 ("Sin agotamiento detectado", not exhausted),
             ]),
+            ("TEMPRANA SIN EMAS", [
+                ("RSI de 1 minuto a favor", r1>=53 if up else r1<=47),
+                ("MACD de 1 minuto a favor", m1*sign>0),
+                ("Momentum de 3 minutos a favor", mom*sign>.015),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
             ("TEMPRANA ACELERADA", [
                 ("MACD y momentum a favor", m3*sign>0 and mom*sign>.015),
                 ("Tendencia de 3 minutos compatible", d3 != other),
@@ -2501,7 +2507,11 @@ def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whal
         eligible[blocked_side] = []
     choices = [side for side in ("UP","DOWN") if eligible[side]]
     candidate = choices[0] if len(choices)==1 else None
-    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
+    quality = "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
+    if candidate:
+        routes = eligible[candidate]
+        quality = next((route["name"] for route in routes if route["name"] == "TEMPRANA SIN EMAS"),
+                       routes[0]["name"])
     flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
                     "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
     # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
@@ -2689,7 +2699,7 @@ def _direction_evidence(signal):
     return families
 
 
-def _direction_consistent(candidate, signal, active=None, *, first_signal=False):
+def _direction_consistent(candidate, signal, active=None, *, first_entry=False):
     """Single policy for entry and reversal, using nonduplicated families.
 
     Reversal requires stronger consensus than first entry; a transient
@@ -2697,13 +2707,19 @@ def _direction_consistent(candidate, signal, active=None, *, first_signal=False)
     """
     if candidate not in ("UP", "DOWN"):
         return False
+    if (first_entry and active not in ("UP", "DOWN") and signal
+            and signal.get("data_valid") is not False and signal.get("candidate") == candidate
+            and signal.get("entry_route_internal") == "TEMPRANA SIN EMAS"):
+        # The engine has already checked RSI, MACD and momentum for this route.
+        return True
     families = _direction_evidence(signal)
+    if len(families) < 3:
+        return False
     agree = sum(v == candidate for v in families.values())
     oppose = len(families) - agree
     if active in ("UP", "DOWN") and active != candidate:
         return agree >= 3 and oppose == 0
-    minimum_agreement = 2 if first_signal else 3
-    return agree >= minimum_agreement and agree > oppose
+    return agree >= 3 and agree > oppose
 
 
 def _round_opening_crosscheck(state, candidate, signal, now):
@@ -2808,13 +2824,24 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     """
     # A candidate is not a confirmation when the available directional
     # evidence contradicts it. Keep the active signal while reassessing.
-    first_signal = state.get("first_direction") not in ("UP", "DOWN")
-    if candidate in ("UP", "DOWN") and not _direction_consistent(
-            candidate, signal, state.get("active_direction"), first_signal=first_signal):
+    first_entry = state.get("first_direction") not in ("UP", "DOWN")
+    if first_entry:
+        votes = list(_direction_evidence(signal).values())
+        up = votes.count("UP")
+        down = votes.count("DOWN")
+        candidate = None
+        if up >= 2 and up > down:
+            candidate = "UP"
+        elif down >= 2 and down > up:
+            candidate = "DOWN"
+        state["opening_conflict"] = None
+    elif candidate in ("UP", "DOWN") and not _direction_consistent(
+            candidate, signal, state.get("active_direction"), first_entry=first_entry):
         candidate = None
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
     level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    if first_entry and (signal or {}).get("price_source") not in ("COINBASE", "KALSHI LIVE"):
+        candidate = None
     # Opening-only veto. Once the round has a confirmed first direction,
     # subsequent retention/reversal is governed by its separate checks.
     if state.get("first_direction") not in ("UP", "DOWN"):
@@ -2888,52 +2915,18 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         return
 
-    last = state.get("pending_last_at")
-    if isinstance(last, str):
-        try:
-            last = datetime.fromisoformat(last)
-        except ValueError:
-            last = None
-    since = state.get("pending_since")
-    if isinstance(since, str):
-        try:
-            since = datetime.fromisoformat(since)
-        except ValueError:
-            since = None
-
-    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
-                              or (now - last).total_seconds() < 0)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        last = since = None
-    if state.get("pending_direction") != candidate:
-        state["pending_direction"] = candidate
-        state["pending_count"] = 1
-        state["pending_since"] = now.isoformat()
-        state["pending_last_at"] = now.isoformat()
-        return
-
-    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] = int(state.get("pending_count", 0)) + 1
-        state["pending_last_at"] = now.isoformat()
-
-    elapsed = (now - since).total_seconds() if since else 0
-    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
-        state["active_direction"] = candidate
-        state["active_since"] = now
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+    state["active_direction"] = candidate
+    state["active_since"] = now
+    if state.get("first_direction") is None:
+        state["first_direction"] = candidate
+        state["first_signal_time"] = now
+        state["first_signal_seconds"] = seconds_left
+        state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                       else get_no_ask(market))
+    state["pending_direction"] = None
+    state["pending_count"] = 0
+    state["pending_since"] = None
+    state["pending_last_at"] = None
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -5027,9 +5020,9 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "unified_evidence_v7_3m":
+    if state.get("signal_engine_revision") != "early_no_ema_v1":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "unified_evidence_v7_3m"
+        state["signal_engine_revision"] = "early_no_ema_v1"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
