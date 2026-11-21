@@ -3685,6 +3685,35 @@ def get_coinbase_order_book():
             "imbalance": imbalance, "reliable": True}
 
 
+def render_book_gauge(book):
+    heading = '<div class="rlabel">CONTROL DEL LIBRO · BTC/USD</div>'
+    source = '<small>Coinbase · Valor de las órdenes pendientes en los 15 mejores niveles por lado</small>'
+    if not book or not book.get("reliable"):
+        return f'<section class="rcard" style="text-align:center;padding:16px">{heading}<p>Libro sin datos</p>{source}</section>'
+
+    imbalance = book["imbalance"]
+    buy = round(50 * (1 + imbalance))
+    sell = 100 - buy
+    label = {"UP": "Dominan los compradores", "DOWN": "Dominan los vendedores"}.get(
+        book["direction"], "Libro equilibrado"
+    )
+    angle = 90 * imbalance
+    return f'''<section class="rcard" style="text-align:center;padding:16px">
+      {heading}
+      <svg viewBox="0 0 220 107" aria-hidden="true" style="width:min(90%,260px);display:block;margin:8px auto">
+        <path d="M20 98 A90 90 0 0 1 110 8" fill="none" stroke="#ed606d" stroke-width="9"/>
+        <path d="M110 8 A90 90 0 0 1 200 98" fill="none" stroke="#00dfb5" stroke-width="9"/>
+        <path d="M96 9 Q110 6 124 9" fill="none" stroke="#d3b77f" stroke-width="9"/>
+        <path d="M106 98 L110 17 L114 98 Z" fill="#f2f6ff"
+          style="transform-origin:110px 98px;transform:rotate({angle:.2f}deg);transition:transform .7s ease"/>
+        <circle cx="110" cy="98" r="6" fill="#d3b77f"/>
+      </svg>
+      <strong>{label}</strong>
+      <div class="pleg"><span class="red">Venta {sell}%</span><span class="green">Compra {buy}%</span></div>
+      {source}
+    </section>'''
+
+
 def get_order_flow_advisory(whale):
     if not whale:
         return {"direction": None, "imbalance": 0, "reliable": False}
@@ -4531,16 +4560,12 @@ def live_dashboard():
 
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
     ut_warning = active in ("UP", "DOWN") and ut.get("ut_short") in ("UP", "DOWN") and ut["ut_short"] != active
-    profit_notice = state.get("public_profit_alert") if state else None
-    # Independent notices: neither hides the other or modifies the signal.
     weakness_html = (
         '<div class="weakness-inline" role="status">⚠ ' +
         html.escape(f"{active} PERDIENDO FUERZA" if ut_warning else round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
         '</div>'
         if (ut_warning or round_signal.get("reversal")) and active in ("UP", "DOWN") else ""
     )
-    if active in ("UP", "DOWN") and isinstance(profit_notice, dict):
-        weakness_html += '<div class="weakness-inline" role="status">💰 ASEGURAR GANANCIAS</div>'
 
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
@@ -4644,6 +4669,7 @@ def live_dashboard():
     <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
   </section>
 
+  {render_book_gauge(order_book)}
   {reader_html}
 
 
