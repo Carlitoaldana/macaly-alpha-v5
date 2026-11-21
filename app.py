@@ -3687,9 +3687,9 @@ def get_coinbase_order_book():
 
 def render_book_gauge(book):
     heading = '<div class="rlabel">CONTROL DEL LIBRO · BTC/USD</div>'
-    source = '<small>Coinbase · Valor de las órdenes pendientes en los 15 mejores niveles por lado</small>'
+    source = '<small style="display:block;font-size:10px;line-height:1.2;color:#b9c9dc">Coinbase · Valor de órdenes · 15 niveles por lado</small>'
     if not book or not book.get("reliable"):
-        return f'<section class="rcard" style="text-align:center;padding:16px">{heading}<p>Libro sin datos</p>{source}</section>'
+        return f'<section class="rcard" style="padding:8px 10px">{heading}<strong style="font-size:13px">Libro sin datos</strong>{source}</section>'
 
     imbalance = book["imbalance"]
     buy = round(50 * (1 + imbalance))
@@ -3698,9 +3698,8 @@ def render_book_gauge(book):
         book["direction"], "Libro equilibrado"
     )
     angle = 90 * imbalance
-    return f'''<section class="rcard" style="text-align:center;padding:16px">
-      {heading}
-      <svg viewBox="0 0 220 107" aria-hidden="true" style="width:min(90%,260px);display:block;margin:8px auto">
+    return f'''<section class="rcard" style="display:grid;grid-template-columns:min(30%,100px) minmax(0,1fr);align-items:center;gap:10px;padding:8px 10px">
+      <svg viewBox="0 0 220 107" aria-hidden="true" style="width:100%;height:auto;display:block">
         <path d="M20 98 A90 90 0 0 1 110 8" fill="none" stroke="#ed606d" stroke-width="9"/>
         <path d="M110 8 A90 90 0 0 1 200 98" fill="none" stroke="#00dfb5" stroke-width="9"/>
         <path d="M96 9 Q110 6 124 9" fill="none" stroke="#d3b77f" stroke-width="9"/>
@@ -3708,9 +3707,14 @@ def render_book_gauge(book):
           style="transform-origin:110px 98px;transform:rotate({angle:.2f}deg);transition:transform .7s ease"/>
         <circle cx="110" cy="98" r="6" fill="#d3b77f"/>
       </svg>
-      <strong>{label}</strong>
-      <div class="pleg"><span class="red">Venta {sell}%</span><span class="green">Compra {buy}%</span></div>
-      {source}
+      <div style="display:grid;gap:3px;line-height:1.2">
+        {heading}
+        <strong style="font-size:13px">{label}</strong>
+        <div style="display:flex;flex-wrap:wrap;gap:3px 12px;font-size:11px;font-weight:800">
+          <span class="red">Venta {sell}%</span><span class="green">Compra {buy}%</span>
+        </div>
+        {source}
+      </div>
     </section>'''
 
 
