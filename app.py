@@ -2825,23 +2825,12 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
     # A candidate is not a confirmation when the available directional
     # evidence contradicts it. Keep the active signal while reassessing.
     first_entry = state.get("first_direction") not in ("UP", "DOWN")
-    if first_entry:
-        votes = list(_direction_evidence(signal).values())
-        up = votes.count("UP")
-        down = votes.count("DOWN")
-        candidate = None
-        if up >= 2 and up > down:
-            candidate = "UP"
-        elif down >= 2 and down > up:
-            candidate = "DOWN"
-        state["opening_conflict"] = None
-    elif candidate in ("UP", "DOWN") and not _direction_consistent(
+    if candidate in ("UP", "DOWN") and not _direction_consistent(
             candidate, signal, state.get("active_direction"), first_entry=first_entry):
         candidate = None
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
     level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
-    if first_entry and (signal or {}).get("price_source") not in ("COINBASE", "KALSHI LIVE"):
-        candidate = None
+    candidate = _round_opening_crosscheck(state, candidate, signal, now)
     # Opening-only veto. Once the round has a confirmed first direction,
     # subsequent retention/reversal is governed by its separate checks.
     if state.get("first_direction") not in ("UP", "DOWN"):
@@ -2915,18 +2904,52 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         return
 
-    state["active_direction"] = candidate
-    state["active_since"] = now
-    if state.get("first_direction") is None:
-        state["first_direction"] = candidate
-        state["first_signal_time"] = now
-        state["first_signal_seconds"] = seconds_left
-        state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                       else get_no_ask(market))
-    state["pending_direction"] = None
-    state["pending_count"] = 0
-    state["pending_since"] = None
-    state["pending_last_at"] = None
+    last = state.get("pending_last_at")
+    if isinstance(last, str):
+        try:
+            last = datetime.fromisoformat(last)
+        except ValueError:
+            last = None
+    since = state.get("pending_since")
+    if isinstance(since, str):
+        try:
+            since = datetime.fromisoformat(since)
+        except ValueError:
+            since = None
+
+    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
+                              or (now - last).total_seconds() < 0)):
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
+        last = since = None
+    if state.get("pending_direction") != candidate:
+        state["pending_direction"] = candidate
+        state["pending_count"] = 1
+        state["pending_since"] = now.isoformat()
+        state["pending_last_at"] = now.isoformat()
+        return
+
+    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
+        state["pending_count"] = int(state.get("pending_count", 0)) + 1
+        state["pending_last_at"] = now.isoformat()
+
+    elapsed = (now - since).total_seconds() if since else 0
+    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
+            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+        state["active_direction"] = candidate
+        state["active_since"] = now
+        if state.get("first_direction") is None:
+            state["first_direction"] = candidate
+            state["first_signal_time"] = now
+            state["first_signal_seconds"] = seconds_left
+            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                           else get_no_ask(market))
+        state["pending_direction"] = None
+        state["pending_count"] = 0
+        state["pending_since"] = None
+        state["pending_last_at"] = None
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -3683,39 +3706,6 @@ def get_coinbase_order_book():
     imbalance = (buy - sell) / (buy + sell)
     return {"direction": "UP" if imbalance >= .15 else "DOWN" if imbalance <= -.15 else None,
             "imbalance": imbalance, "reliable": True}
-
-
-def render_book_gauge(book):
-    heading = '<div class="rlabel">CONTROL DEL LIBRO · BTC/USD</div>'
-    source = '<small style="display:block;font-size:10px;line-height:1.2;color:#b9c9dc">Coinbase · Valor de órdenes · 15 niveles por lado</small>'
-    if not book or not book.get("reliable"):
-        return f'<section class="rcard" style="padding:8px 10px">{heading}<strong style="font-size:13px">Libro sin datos</strong>{source}</section>'
-
-    imbalance = book["imbalance"]
-    buy = round(50 * (1 + imbalance))
-    sell = 100 - buy
-    label = {"UP": "Dominan los compradores", "DOWN": "Dominan los vendedores"}.get(
-        book["direction"], "Libro equilibrado"
-    )
-    angle = 90 * imbalance
-    return f'''<section class="rcard" style="display:grid;grid-template-columns:min(30%,100px) minmax(0,1fr);align-items:center;gap:10px;padding:8px 10px">
-      <svg viewBox="0 0 220 107" aria-hidden="true" style="width:100%;height:auto;display:block">
-        <path d="M20 98 A90 90 0 0 1 110 8" fill="none" stroke="#ed606d" stroke-width="9"/>
-        <path d="M110 8 A90 90 0 0 1 200 98" fill="none" stroke="#00dfb5" stroke-width="9"/>
-        <path d="M96 9 Q110 6 124 9" fill="none" stroke="#d3b77f" stroke-width="9"/>
-        <path d="M106 98 L110 17 L114 98 Z" fill="#f2f6ff"
-          style="transform-origin:110px 98px;transform:rotate({angle:.2f}deg);transition:transform .7s ease"/>
-        <circle cx="110" cy="98" r="6" fill="#d3b77f"/>
-      </svg>
-      <div style="display:grid;gap:3px;line-height:1.2">
-        {heading}
-        <strong style="font-size:13px">{label}</strong>
-        <div style="display:flex;flex-wrap:wrap;gap:3px 12px;font-size:11px;font-weight:800">
-          <span class="red">Venta {sell}%</span><span class="green">Compra {buy}%</span>
-        </div>
-        {source}
-      </div>
-    </section>'''
 
 
 def get_order_flow_advisory(whale):
@@ -4564,12 +4554,16 @@ def live_dashboard():
 
     # Advertencia compacta únicamente visual; usa el aviso existente del motor.
     ut_warning = active in ("UP", "DOWN") and ut.get("ut_short") in ("UP", "DOWN") and ut["ut_short"] != active
+    profit_notice = state.get("public_profit_alert") if state else None
+    # Independent notices: neither hides the other or modifies the signal.
     weakness_html = (
         '<div class="weakness-inline" role="status">⚠ ' +
         html.escape(f"{active} PERDIENDO FUERZA" if ut_warning else round_signal.get("reversal_text") or "SEÑAL PERDIENDO FUERZA") +
         '</div>'
         if (ut_warning or round_signal.get("reversal")) and active in ("UP", "DOWN") else ""
     )
+    if active in ("UP", "DOWN") and isinstance(profit_notice, dict):
+        weakness_html += '<div class="weakness-inline" role="status">💰 ASEGURAR GANANCIAS</div>'
 
     reader_html = f'''
   <section class="reader jcclose" style="--rb:{reader['border']};--rbg:{reader['bg']};--rr:{reader['color']}">
@@ -4673,7 +4667,6 @@ def live_dashboard():
     <div class="pleg"><span class="green">● &nbsp;UP&nbsp; {up}%</span><span class="red">● &nbsp;DOWN&nbsp; {down}%</span></div>
   </section>
 
-  {render_book_gauge(order_book)}
   {reader_html}
 
 
