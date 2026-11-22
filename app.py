@@ -543,7 +543,13 @@ def confirm_round_marker(payload, saved, market, flow_side):
     minute = now // 60 * 60
     rows = payload["rows"]
     for ticker, marker in list(saved.items()):
-        if marker["time"] < now - 4 * 3600:
+        # Versiones anteriores guardaban {minuto: "UP" o "DOWN"}.
+        if isinstance(ticker, int) and isinstance(marker, str) and marker in ("UP", "DOWN"):
+            marker = saved[ticker] = {"time": ticker, "direction": marker}
+        if (not isinstance(marker, dict)
+                or not isinstance(marker.get("time"), int)
+                or marker.get("direction") not in ("UP", "DOWN")
+                or marker["time"] < now - 4 * 3600):
             del saved[ticker]
     active = market and _KalshiPublicReads._is_current(
         market, datetime.fromtimestamp(now, timezone.utc))
@@ -551,6 +557,7 @@ def confirm_round_marker(payload, saved, market, flow_side):
     side = payload["ut_side"]
     if ticker and rows and rows[-1]["t"] == minute and side in ("UP", "DOWN") and side == flow_side:
         saved.setdefault(ticker, {"time": minute, "direction": side})
+        saved.pop(saved[ticker]["time"], None)
     visible = {row["t"] for row in rows}
     payload["reversal_markers"] = sorted(
         (marker for marker in saved.values() if marker["time"] in visible),
