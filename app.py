@@ -1,4 +1,10 @@
+import copy
 import json
+import random
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 
 import numpy as np
@@ -6,7 +12,7 @@ import pandas as pd
 import requests
 import streamlit as st
 
-st.set_page_config(page_title="Gráfica BTC · UP / DOWN", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Gráfica BTC · UP / DOWN", layout="wide", initial_sidebar_state="collapsed")
 
 
 def _validate_btc_candle_frame(frame, requested_at, source):
@@ -302,6 +308,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 #whale,#momentum,.floatcounts,.tooltip{display:none!important}
 #rsi-pane{position:relative;overflow:hidden}
 @media(max-width:480px){#canvas{height:375px!important}}
+.expanded-chart #canvas{height:max(180px,calc(100dvh - 260px))!important}
 </style>
 <section class="panel">
 <!-- Panel BTC/USD y tarjetas visuales retirados. Se conservan los nodos que usa el JavaScript para actualizar datos. -->
@@ -311,13 +318,21 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 <div class="tools"><h3>INDICADORES</h3><div class="toggles" id="toggles"></div><div class="legend" id="legend"></div></div>
 <div class="floatcounts"><div>🐋 BUY WHALES <b id="floatbuy"></b></div><div>🐋 SELL WHALES <b id="floatsell"></b></div></div>
 <div class="tooltip" id="tooltip">Arrastra velas y escala de precios · pellizca para zoom · AHORA regresa al presente.</div><div class="canvas" id="canvas"></div><div id="rsi-pane" style="height:110px;display:none;background:#06121a;border-top:1px solid #294c69"></div>
-<div class="chartnav"><button id="older" aria-label="Velas anteriores">←</button><button id="newer" aria-label="Velas siguientes">→</button><button id="zoomin" aria-label="Acercar">＋</button><button id="zoomout" aria-label="Alejar">−</button><button id="reset">AHORA</button><span id="viewtf"></span></div>
+<div class="chartnav"><button id="older" aria-label="Velas anteriores">←</button><button id="newer" aria-label="Velas siguientes">→</button><button id="zoomin" aria-label="Acercar">＋</button><button id="zoomout" aria-label="Alejar">−</button><button id="reset">AHORA</button><button id="expand" type="button" aria-pressed="false">AMPLIAR</button><span id="viewtf"></span></div>
 </section>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 let D=__PAYLOAD__; const $=id=>document.getElementById(id), fmt=(v,n=2)=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:n,maximumFractionDigits:n}), usd=v=>v==null?'—':'$'+fmt(v), compact=v=>v==null?'—':v>=1e6?'$'+(v/1e6).toFixed(2)+'M':v>=1000?'$'+(v/1000).toFixed(0)+'K':'$'+fmt(v,0);
 let saved={};try{saved=JSON.parse(localStorage.getItem('btc-neon-panel-v1')||'{}')}catch(e){}
 let toggles=Object.assign({ema9:true,ema21:true,vwap:true,volume:true,rsi:true,},saved.toggles),visible=saved.visible||32,offset=saved.offset||0,pricePan=Number.isFinite(saved.pricePan)?saved.pricePan:0;
+$('expand').addEventListener('click',()=>{
+ const host=window.frameElement?.parentElement;
+ if(!host)return;
+ const expanded=host.classList.toggle('expanded');
+ document.documentElement.classList.toggle('expanded-chart',expanded);
+ $('expand').textContent=expanded?'SALIR':'AMPLIAR';
+ $('expand').setAttribute('aria-pressed',String(expanded));
+});
 function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
 for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
 function refreshLabels(){
@@ -415,7 +430,7 @@ function redrawData(preserve=true){
  rsiSeries.setData(seriesRows('rsi'));
  $('rsi-pane').style.display=toggles.rsi?'block':'none';
  for(const l of levelLines)candleSeries.removePriceLine(l);levelLines=[];
- for(const [value,label,color] of [[D.target,'TARGET','#f1c46b'],[D.support,'SUPPORT','#00dfb5'],[D.resistance,'RESISTANCE','#e64b4b']]){
+ for(const [value,label,color] of [[D.target,'TARGET KALSHI','#f1c46b'],[D.support,'SUPPORT','#00dfb5'],[D.resistance,'RESISTANCE','#e64b4b']]){
   if(Number.isFinite(value))levelLines.push(candleSeries.createPriceLine({price:value,color,lineWidth:1,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:label}));
  }
  try{
@@ -520,6 +535,227 @@ def confirm_live_markers(payload, saved, flow_side, current_minute):
         payload["reversal_markers"] = []
 
 
+class _KalshiPublicReads:
+    """Una consulta por recurso para todas las sesiones e hilos del proceso."""
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cache = {}
+        self.failures = {}
+        self.retry_at = 0.0
+        self.rate_failures = 0
+        self.current_round = None
+
+    @staticmethod
+    def _is_current(market, now=None):
+        if not isinstance(market, dict) or not str(market.get("ticker", "")).startswith("KXBTC15M-"):
+            return False
+        if market.get("status") not in (None, "open", "active"):
+            return False
+        now = now or datetime.now(timezone.utc)
+        try:
+            close = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
+            # Nunca seleccionar la ronda futura ni conservar la anterior.
+            if close.tzinfo is None or not 0 < (close - now).total_seconds() <= 900:
+                return False
+            if market.get("open_time"):
+                opened = datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00"))
+                if opened.tzinfo is None or opened > now:
+                    return False
+            return True
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def _has_target(market):
+        return any(_KalshiPublicReads._valid_strike(market.get(key))
+                   for key in ("floor_strike", "cap_strike"))
+
+    @staticmethod
+    def _valid_strike(value):
+        try:
+            return np.isfinite(float(value)) and float(value) > 1000
+        except (TypeError, ValueError):
+            return False
+
+    def _round_metadata(self):
+        # El target y el cierre verificados siguen siendo válidos para ESTE ticker.
+        # Las cotizaciones no: no reutilizar bids/asks ni precios de contrato antiguos.
+        keys = ("ticker", "event_ticker", "open_time", "close_time", "status",
+                "floor_strike", "cap_strike")
+        return {key: copy.deepcopy(self.current_round[key]) for key in keys
+                if key in self.current_round}
+
+    def current_market(self):
+        with self.lock:
+            if not self._is_current(self.current_round):
+                self.current_round = None
+            try:
+                if self.current_round:
+                    ticker = self.current_round["ticker"]
+                    market = self.get("/markets/" + ticker, ttl=2.0, timeout=6).get("market")
+                    if not isinstance(market, dict) or market.get("ticker") != ticker:
+                        raise ValueError("Kalshi devolvió una respuesta incompleta para la ronda actual.")
+                    market = copy.deepcopy(market)
+                    for key in ("open_time", "close_time", "event_ticker"):
+                        if not market.get(key) and key in self.current_round:
+                            market[key] = self.current_round[key]
+                    if not self._is_current(market):
+                        self.current_round = None
+                        return None
+                    market = copy.deepcopy(market)
+                    # Un detalle parcial no borra un strike ya verificado del mismo ticker.
+                    if not self._has_target(market):
+                        for key in ("floor_strike", "cap_strike"):
+                            if key in self.current_round:
+                                market[key] = self.current_round[key]
+                else:
+                    # El filtro status=open puede omitir una ronda que figura como active.
+                    # Acotar por cierre y validar estado/horario localmente.
+                    minute = int(datetime.now(timezone.utc).timestamp()) // 60 * 60
+                    data = self.get("/markets", params={"limit": 100,
+                                    "series_ticker": "KXBTC15M",
+                                    "min_close_ts": minute,
+                                    "max_close_ts": minute + 960}, ttl=2.0, timeout=10)
+                    markets = [m for m in data.get("markets", []) if self._is_current(m)]
+                    if not markets:
+                        return None
+                    markets.sort(key=lambda m: str(m["close_time"]))
+                    market = copy.deepcopy(markets[0])
+                    if not self._has_target(market):
+                        ticker = market["ticker"]
+                        detail = self.get("/markets/" + ticker, ttl=2.0, timeout=6).get("market")
+                        if not isinstance(detail, dict) or detail.get("ticker") != ticker:
+                            raise ValueError("Kalshi no entregó el detalle de la ronda actual.")
+                        market = detail
+                if not self._is_current(market):
+                    self.current_round = None
+                    return None
+                if not self._has_target(market):
+                    raise ValueError("La ronda actual todavía no entregó un target verificable.")
+                self.current_round = copy.deepcopy(market)
+                return copy.deepcopy(market)
+            except (requests.RequestException, ValueError, TypeError) as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                if status in (404, 410) or not self._is_current(self.current_round):
+                    self.current_round = None
+                    raise
+                # El reloj se calcula desde close_time, nunca desde un contador guardado.
+                result = self._round_metadata()
+                result["_round_refresh_error"] = str(exc)
+                return result
+
+    def get(self, path, params=None, ttl=2.0, timeout=6):
+        params = dict(params or {})
+        key = (path, json.dumps(params, sort_keys=True))
+        with self.lock:
+            now = time.monotonic()
+            cached = self.cache.get(key)
+            if cached and now < cached[0]:
+                return copy.deepcopy(cached[1])
+            if now < self.retry_at:
+                raise requests.HTTPError(
+                    "Kalshi 429: límite temporal; reintento en "
+                    + str(max(1, int(self.retry_at - now + 0.999))) + " s.")
+            failed = self.failures.get(key)
+            if failed and now < failed[0]:
+                raise requests.RequestException(failed[1])
+            try:
+                response = requests.get(
+                    "https://external-api.kalshi.com/trade-api/v2" + path,
+                    params=params,
+                    headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
+                    timeout=timeout,
+                )
+                if response.status_code == 429:
+                    self.rate_failures = min(self.rate_failures + 1, 5)
+                    delay = min(30.0, 2.0 ** self.rate_failures) + random.uniform(0, 0.5)
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            requested_delay = float(retry_after)
+                        except (TypeError, ValueError):
+                            try:
+                                stamp = parsedate_to_datetime(retry_after)
+                                if stamp.tzinfo is None:
+                                    stamp = stamp.replace(tzinfo=timezone.utc)
+                                requested_delay = (stamp - datetime.now(timezone.utc)).total_seconds()
+                            except (TypeError, ValueError, OverflowError):
+                                requested_delay = 0.0
+                        if np.isfinite(requested_delay):
+                            delay = max(delay, requested_delay)
+                    self.retry_at = time.monotonic() + delay
+                response.raise_for_status()
+                payload = response.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Kalshi devolvió una respuesta incompleta.")
+            except (requests.RequestException, ValueError) as exc:
+                # Los errores tampoco se vuelven a consultar por cada sesión.
+                if len(self.failures) >= 256:
+                    self.failures.pop(next(iter(self.failures)))
+                self.failures[key] = (time.monotonic() + 2.0, str(exc))
+                raise
+            self.rate_failures = 0
+            self.retry_at = 0.0
+            self.failures.pop(key, None)
+            if len(self.cache) >= 256:
+                self.cache.pop(next(iter(self.cache)))
+            effective_ttl = float(ttl)
+            if path == "/markets":
+                # No reutilizar el listado de la ronda cerrada en el cambio de ronda.
+                for market in payload.get("markets", []):
+                    try:
+                        close = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
+                        remaining = (close - datetime.now(timezone.utc)).total_seconds()
+                        if remaining > 0:
+                            effective_ttl = min(effective_ttl, remaining)
+                    except (KeyError, TypeError, ValueError):
+                        pass
+            self.cache[key] = (time.monotonic() + effective_ttl, copy.deepcopy(payload))
+            return payload
+
+
+@st.cache_resource(validate=lambda reader: callable(getattr(reader, "current_market", None)) and hasattr(reader, "current_round"))
+def _kalshi_public_reads():
+    # Cambiar el cuerpo también invalida el recurso de versiones anteriores.
+    reader = _KalshiPublicReads()
+    return reader
+
+
+def get_target_from_market(market):
+    if not market:
+        return None
+
+    for key in ("floor_strike", "cap_strike"):
+        value = market.get(key)
+        if value not in [None, ""]:
+            try:
+                number = float(value)
+                if number > 1000:
+                    return number
+            except Exception:
+                pass
+    return None
+
+
+@st.cache_resource
+def kalshi_target_executor():
+    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="kalshi-target")
+
+
+def current_chart_target(state, reader):
+    future = state.get("kalshi_target_future")
+    if future is not None and future.done():
+        try:
+            state["kalshi_target_market"] = future.result()
+        except (requests.RequestException, ValueError, TypeError):
+            pass
+        future = None
+    if future is None:
+        state["kalshi_target_future"] = kalshi_target_executor().submit(reader.current_market)
+    market = state.get("kalshi_target_market")
+    return get_target_from_market(market) if reader._is_current(market) else None
+
+
 @st.fragment(run_every="2s")
 def live_chart():
     try:
@@ -542,7 +778,8 @@ def live_chart():
         except (ValueError, requests.RequestException):
             pass
 
-    payload = _neon_payload(candles, price, None, None, "1m", {}, None)
+    target = current_chart_target(st.session_state, _kalshi_public_reads())
+    payload = _neon_payload(candles, price, target, None, "1m", {}, None)
     saved = st.session_state.setdefault("aggressor_markers", {})
     current_minute = int(pd.Timestamp(payload["updated"]).floor("min").timestamp())
     confirm_live_markers(payload, saved, flow_side, current_minute)
@@ -558,7 +795,7 @@ def live_chart():
 
 
 st.markdown(
-    '<style>.stApp{background:#06121a}.block-container{padding:1rem .45rem 0}</style>',
+    '<style>.stApp{background:#06121a}[data-testid="stHeader"]{display:none}.block-container{max-width:none;padding:.25rem .35rem 0}#alpha-chart-stable-host.expanded{position:fixed;inset:0;z-index:2147483647;height:100dvh;background:#06121a;overflow:hidden}#alpha-chart-stable-host.expanded iframe{height:100%!important}</style>',
     unsafe_allow_html=True,
 )
 live_chart()
