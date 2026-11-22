@@ -1,19 +1,87 @@
-import copy
+from __future__ import annotations
+import types
 import json
-import random
-import threading
-import time
-from concurrent.futures import ThreadPoolExecutor
-from email.utils import parsedate_to_datetime
-from datetime import datetime, timezone
+from urllib.request import Request, urlopen
+from urllib.parse import urlencode
 
+class Response:
+    def __init__(self, data):
+        self.data = data
+    def raise_for_status(self):
+        pass  # urlopen has already rejected non-2xx responses.
+    def json(self):
+        return self.data
+
+class requests:
+    @staticmethod
+    def get(url, params=None, headers=None, timeout=8):
+        if params:
+            url += ('&' if '?' in url else '?') + urlencode(params)
+        req = Request(url, headers=headers or {'User-Agent': 'AlphaEdge/1.0'}, method='GET')
+        with urlopen(req, timeout=timeout) as response:
+            return Response(json.load(response))
+
+import math
 import numpy as np
 import pandas as pd
-import requests
-import streamlit as st
+import threading
+from datetime import datetime, timezone
+NEW_ROUND_WAIT = 8
+NEW_ENTRY_LOCK = 75
+SIGNAL_CONFIRM_READINGS = 2
+SIGNAL_CONFIRM_INTERVAL = 2.0
+SIGNAL_CONFIRM_MAX_GAP = 10.0
+LIVE_PRICE_MAX_AGE = 30.0
+_PRICE_OBSERVATIONS = threading.local()
+SIGNAL_ENGINE_REVISION = "ut_app58_56262de0955c"
 
-st.set_page_config(page_title="Gráfica BTC · UP / DOWN", layout="wide", initial_sidebar_state="collapsed")
+def _valid_live_observation(price, observed_at, source):
+    value = float(price)
+    stamp = pd.to_datetime(observed_at, utc=True, errors="coerce")
+    if not np.isfinite(value) or value <= 0 or pd.isna(stamp):
+        raise ValueError("Precio o fecha de origen inválidos.")
+    age = (pd.Timestamp.now(tz="UTC") - stamp).total_seconds()
+    if age < -5 or age > LIVE_PRICE_MAX_AGE:
+        raise ValueError("Precio de origen atrasado o fechado en el futuro.")
+    observations = getattr(_PRICE_OBSERVATIONS, "values", {})
+    observations[source] = stamp.timestamp()
+    _PRICE_OBSERVATIONS.values = observations
+    return value
 
+def _plan_number(value):
+    if isinstance(value,bool):return None
+    try:
+        result=float(value)
+        return result if math.isfinite(result) else None
+    except (TypeError,ValueError,OverflowError):return None
+
+def new_round_state(ticker, seconds_left):
+    now = datetime.now(timezone.utc)
+    return {
+        "ticker": ticker,
+        "detected_at": now,
+        "detected_seconds_left": seconds_left,
+        "first_direction": None,
+        "first_signal_time": None,
+        "first_signal_seconds": None,
+        "first_signal_price": None,
+        "active_direction": None,
+        "active_since": None,
+        "last_score": 0.0,
+        "previous_score": 0.0,
+        "opposite_count": 0,
+        "last_live_price": None,
+        "previous_live_price": None,
+        "reversal_warning": False,
+        "reversal_text": "",
+        "fresh_samples": [],
+        "candidate_history": [],
+        "pending_direction": None,
+        "pending_count": 0,
+        "pending_since": None,
+        "pending_last_at": None,
+        "pending_price_source": None,
+    }
 
 def _validate_btc_candle_frame(frame, requested_at, source):
     """Common contract for a single BTC/USD venue; no filling/interpolation."""
@@ -52,7 +120,6 @@ def _validate_btc_candle_frame(frame, requested_at, source):
                        candle_age_seconds=age, candle_source=source, candle_pair="BTC/USD")
     return frame
 
-
 def _fetch_btc_candle_source(source, requested_at):
     """Normalize real public 1m candles, retaining their original OHLCV."""
     start = requested_at.replace(second=0, microsecond=0) - pd.Timedelta(minutes=299)
@@ -89,7 +156,6 @@ def _fetch_btc_candle_source(source, requested_at):
         raise ValueError("Fuente de velas desconocida.")
     return _validate_btc_candle_frame(frame, requested_at, source)
 
-
 def _fetch_current_btc_candles():
     """Use one complete venue history, not bars stitched across exchanges.
 
@@ -107,650 +173,84 @@ def _fetch_current_btc_candles():
             failures.append(source + ": " + str(error))
     raise ValueError("No hay historial BTC/USD completo y actual. " + " | ".join(failures))
 
+def get_event_ticker_from_market(market):
+    if not market:
+        return None
+    event_ticker = market.get("event_ticker")
+    if event_ticker:
+        return str(event_ticker)
+    ticker = market.get("ticker")
+    if not ticker:
+        return None
+    parts = str(ticker).split("-")
+    return "-".join(parts[:-1]) if len(parts) >= 2 else None
 
-@st.cache_data(ttl=5)
-def get_btc_data():
-    return _fetch_current_btc_candles()
+def extract_kalshi_btc_price(data):
+    if not isinstance(data, dict):
+        return None
 
-
-def _chart_ut_state(candles, atr_period=10, sensitivity=1.0):
-    """UT Bot Alerts by QuantNomad, using regular candles and Wilder's ATR."""
-    ranges = []
-    markers = []
-    previous_close = None
-    atr = None
-    stop = None
-    for candle in candles.itertuples(index=False):
-        close = float(candle.close)
-        high = float(candle.high)
-        low = float(candle.low)
-        true_range = high - low
-        if previous_close is not None:
-            true_range = max(true_range, abs(high - previous_close), abs(low - previous_close))
-        prior_close, previous_close = previous_close, close
-
-        if atr is None:
-            ranges.append(true_range)
-            if len(ranges) < atr_period:
-                continue
-            atr = sum(ranges) / atr_period
-        else:
-            atr += (true_range - atr) / atr_period
-        gap = sensitivity * atr
-        prior_stop = stop
-        reference = 0.0 if prior_stop is None else prior_stop
-        if close > reference and prior_close is not None and prior_close > reference:
-            stop = max(reference, close - gap)
-        elif close < reference and prior_close is not None and prior_close < reference:
-            stop = min(reference, close + gap)
-        else:
-            stop = close - gap if close > reference else close + gap
-
-        if prior_stop is None:
+    live_data = data.get("live_data", data)
+    details = live_data.get("details", {}) if isinstance(live_data, dict) else {}
+    # Prefiere la observación fechada más reciente a un cierre anterior.
+    timed_points = []
+    points = details.get("timeseries", []) if isinstance(details, dict) else []
+    for index, point in enumerate(points if isinstance(points, list) else []):
+        if not isinstance(point, dict):
             continue
-        if prior_close <= prior_stop and close > stop:
-            markers.append({"time": int(candle.time.timestamp()), "direction": "UP"})
-        elif prior_close >= prior_stop and close < stop:
-            markers.append({"time": int(candle.time.timestamp()), "direction": "DOWN"})
-    side = None
-    if stop is not None and previous_close != stop:
-        side = "UP" if previous_close > stop else "DOWN"
-    return markers, side
-
-
-def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=None, round_df=None):
-    intervals = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1D": 1440}
-    minutes = intervals[timeframe]
-    frame = df.copy().sort_values("time").drop_duplicates("time")
-    frame["time"] = pd.to_datetime(frame["time"], utc=True)
-    if timeframe in ("3m", "5m", "4h"):
-        frame = frame.set_index("time").resample(f"{minutes}min").agg(
-            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-        ).dropna().reset_index()
-    now = pd.Timestamp.now(tz="UTC")
-    bucket = now.floor(f"{minutes}min")
-    price = float(live_price) if live_price is not None else None
-    if price is not None and len(frame) and frame.iloc[-1]["time"] == bucket:
-        idx = frame.index[-1]
-        frame.loc[idx, "close"] = price
-        frame.loc[idx, "high"] = max(float(frame.loc[idx, "high"]), price)
-        frame.loc[idx, "low"] = min(float(frame.loc[idx, "low"]), price)
-    reversal_markers, ut_side = _chart_ut_state(frame)
-    close = frame["close"].astype(float)
-    frame["ema9"] = close.ewm(span=9, adjust=False).mean()
-    frame["ema21"] = close.ewm(span=21, adjust=False).mean()
-    delta = close.diff()
-    gains = delta.clip(lower=0).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    losses = (-delta.clip(upper=0)).ewm(alpha=1/14, adjust=False, min_periods=14).mean()
-    frame["rsi"] = 100 - 100/(1 + gains/losses.replace(0, np.nan))
-    frame.loc[(losses == 0) & (gains > 0), "rsi"] = 100
-    frame.loc[(losses == 0) & (gains == 0), "rsi"] = 50
-    # VWAP diario UTC de la historia disponible; nunca inventa volumen histórico.
-    typical = (frame["high"].astype(float) + frame["low"].astype(float) + close)/3
-    day = frame["time"].dt.floor("D")
-    vol = frame["volume"].astype(float)
-    frame["vwap"] = (typical*vol).groupby(day).cumsum()/vol.groupby(day).cumsum().replace(0, np.nan)
-    frame = frame.tail(180).reset_index(drop=True)
-    rows = []
-    for _, row in frame.iterrows():
-        item = {k: (float(row[k]) if pd.notna(row[k]) and np.isfinite(float(row[k])) else None)
-                for k in ["open", "high", "low", "close", "volume", "ema9", "ema21", "rsi", "vwap"]}
-        item["t"] = int(row["time"].timestamp())
-        rows.append(item)
-    tape = st.session_state.get("whale_flow_tape", []) if whale is not None else []
-    stamp = now.timestamp()
-    recent = [r for r in tape if 0 <= stamp-float(r["t"]) <= 30]
-    buy = sum(float(r["notional"]) for r in recent if r["side"] == "COMPRA")
-    sell = sum(float(r["notional"]) for r in recent if r["side"] == "VENTA")
-    threshold = 10000
-    buys = sum(r["side"] == "COMPRA" and r["notional"] >= threshold for r in recent)
-    sells = sum(r["side"] == "VENTA" and r["notional"] >= threshold for r in recent)
-    last10 = sum(r["notional"] for r in recent if stamp-r["t"] <= 10)
-    prior20 = sum(r["notional"] for r in recent if 10 < stamp-r["t"] <= 30)
-    activity = (last10/10)/(prior20/20) if prior20 > 0 else None
-    imbalance = abs(buy-sell)/(buy+sell) if buy+sell else 0
-    direction = "UP" if buy > sell else "DOWN" if sell > buy else "NEUTRAL"
-    round_start = round_end = None
-    latest = rows[-1]["close"] if rows else None
-    recent_levels = rows[-21:-1]
-    support = min((r["low"] for r in recent_levels), default=None)
-    resistance = max((r["high"] for r in recent_levels), default=None)
-    if rows:
-        reversal_markers = [mark for mark in reversal_markers if mark["time"] >= rows[0]["t"]]
-    return {"ut_side": ut_side, "observed": int(now.timestamp()), "rows": rows, "reversal_markers": reversal_markers,
-            "candle_source": df.attrs.get("candle_source", "COINBASE"), "timeframe": timeframe, "price": price or latest,
-            "target": float(target) if target is not None else None,
-            "signal": active if active in ("UP", "DOWN") else "ESPERANDO",
-            "up": float(sig.get("up_probability", 50)),
-            "down": float(sig.get("down_probability", 50)),
-            "support": support, "resistance": resistance, "round_start": round_start, "round_end": round_end,
-            "flow": {"ok": whale is not None, "buy": buy, "sell": sell,
-                     "buys": buys, "sells": sells, "direction": direction,
-                     "strength": "ALTA" if imbalance >= .6 else "MEDIA" if imbalance >= .3 else "BAJA",
-                     "activity": activity, "threshold": threshold},
-            "mom3": sig.get("mom3"), "mom5": sig.get("mom5"), "mom15": sig.get("mom15"),
-            "updated": now.strftime("%H:%M:%S UTC"),
-            "age": max(0, stamp-rows[-1]["t"]) if rows else None}
-
-
-_NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<style>
-*{box-sizing:border-box}body{margin:0;background:#06121a;color:#e8edf6;font-family:Inter,system-ui,sans-serif}button,summary{-webkit-tap-highlight-color:transparent}button{font:inherit;cursor:pointer}.panel{box-shadow:0 0 18px #00dfb555,inset 0 0 16px #00dfb518;border:1px solid #00dfb5;border-radius:27px;overflow:hidden;background:radial-gradient(ellipse at 95% 0,rgba(0,100,85,.12),transparent 40%),#06121a;box-shadow:inset 0 0 18px #7b3de31c,0 0 12px #9b54ff20;margin:4px 3px}.header{padding:24px 21px 17px;display:flex;align-items:start;justify-content:space-between;gap:8px}.header h2{margin:0;font-size:25px;letter-spacing:-.8px}.sub{color:#949bb6;font-size:11px;font-weight:700;letter-spacing:1px;margin-top:8px}.price{font-size:25px;letter-spacing:-1px;font-weight:900;color:#00dfb5;text-shadow:0 0 19px #00e4ba40}.live{font-size:10px;color:#00dfb5;text-align:right;margin-top:7px}.cards{padding:0 20px 20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}.card{min-height:104px;padding:17px;border:1px solid #35324d;border-radius:19px;background:linear-gradient(130deg,#0c1421,#080a14)}.card .label{font-size:10px;letter-spacing:1.8px;font-weight:800;color:#7c879d}.card strong{font-size:24px;display:block;margin-top:10px;line-height:1.2}.card small{color:#7e8b9f;font-size:10px;display:block;margin-top:8px}.purple{color:#c080ff}.cyan{color:#54d5f7}.green{color:#00dfb5}.red{color:#e64b4b}.status{font-size:17px!important}.signal{border-color:#9e355b;background:linear-gradient(120deg,#21101e55,#0b0a15)}details{border-top:1px solid #26303c;border-bottom:1px solid #26303c;border-radius:20px;margin:0 0 12px;background:#070c14}summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:22px 20px;font-size:14px;font-weight:850;letter-spacing:.5px}summary::-webkit-details-marker{display:none}summary small{font-size:9px;color:#758894;margin-left:auto;max-width:170px;letter-spacing:1px}summary:after{content:'+';color:#00dfb5;font-size:24px}details[open]>summary:after{content:'−'}.detail{padding:18px 20px 20px;border-top:1px solid #19232e}.detail h3{font-size:13px;margin:0 0 5px}.note{font-size:10px;color:#7e8b9f;line-height:1.7}.watch{font-size:14px;font-weight:800;color:#ffd057;padding:15px 0}.metrics{display:grid;grid-template-columns:1fr 1fr;gap:9px}.metric{border:1px solid #1c2733;background:#080d17;padding:15px;border-radius:13px}.metric small{display:block;color:#8692a9;font-size:10px;font-weight:750;letter-spacing:.4px}.metric b{display:block;font-size:20px;margin-top:9px}.bars{margin:20px 0}.bar{display:flex;gap:12px;align-items:center;font-size:10px;color:#8b96ac;margin:12px 0}.track{height:7px;background:#19202c;border-radius:8px;flex:1}.track i{height:100%;display:block;border-radius:8px}.bar b{width:65px;text-align:right}.count{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}.count .metric{display:flex;align-items:center;justify-content:space-between;gap:6px}.count b{font-size:29px}.difference{margin-top:10px;display:flex;justify-content:space-between;align-items:center}.difference b{font-size:24px}.tools{padding:0 20px}.tools h3{font-size:12px;color:#7f8ca6;letter-spacing:2px;margin:15px 0 12px}.toggles{display:flex;flex-wrap:wrap;gap:9px}.toggle{padding:11px 13px;border:1px solid #23685e;border-radius:30px;background:#130f24;color:#e3e3f5;font-size:11px;font-weight:750}.toggle:before{content:'●';color:var(--c);margin-right:8px;text-shadow:0 0 11px var(--c)}.toggle span{font-size:9px;color:#9390a7;margin-left:6px}.toggle.off{opacity:.4}.legend{font-size:10px;color:#99a4bd;margin:16px 0 10px;display:flex;gap:10px;flex-wrap:wrap;font-weight:700}.canvas{position:relative;width:100%;touch-action:none;cursor:grab}.canvas svg{display:block;width:100%;height:auto;user-select:none}.floatcounts{display:flex;gap:10px;padding:0 20px;margin-top:4px}.floatcounts div{flex:1;border:1px solid #00dfb5;border-radius:14px;padding:10px;color:#00dfb5;font-size:11px;font-weight:800}.floatcounts div:last-child{border-color:#e64b4b;color:#e64b4b}.floatcounts b{font-size:22px;margin-left:8px}.chartnav{display:flex;align-items:center;gap:8px;padding:10px 20px;border-top:1px solid #202738;flex-wrap:wrap}.chartnav button{border:1px solid #393254;border-radius:8px;color:#bec2d6;background:#0e1421;padding:6px 11px;font-size:11px}.chartnav span{font-size:10px;color:#7b879d;margin-left:auto}.tooltip{min-height:33px;padding:6px 20px;color:#aab6cc;font-size:10px;line-height:1.6}.footer{font-size:9px;line-height:1.6;color:#7c889e;padding:10px 20px 18px}.empty{padding:80px 20px;text-align:center;color:#95a0b6}@media(max-width:460px){.header{padding:20px 16px 16px}.header h2,.price{font-size:22px}.cards{grid-template-columns:1fr;padding:0 16px 18px}.card{min-height:106px}.card strong{font-size:25px}.tools,.detail{padding-left:16px;padding-right:16px}summary{padding:20px 16px;font-size:13px}summary small{max-width:135px;font-size:8px}.toggle{padding:10px 12px}.count .metric{padding:10px}.count small{font-size:8px}.count b{font-size:25px}.metric b{font-size:20px}}
-
-/* Strong neon and readable labels across both visual surfaces. */
-.green{color:#00dfb5!important;text-shadow:0 0 5px #00dfb588,0 0 14px #00dfb555!important}
-.red{color:#e64b4b!important;text-shadow:0 0 5px #e64b4b88,0 0 14px #e64b4b55!important}
-.pup,.prob-up{background:#00dfb5!important;box-shadow:0 0 8px #00dfb588,0 0 22px #00dfb544!important}
-.pdown,.prob-down{background:#e64b4b!important;box-shadow:0 0 8px #e64b4b88,0 0 22px #e64b4b44!important}
-.prenote,.readerbody small,.finalnote,.analysistext span,.features span,.chartfoot{font-size:11px!important;color:#cbd5e1!important;line-height:1.5!important}
-.pretitle,.prebadge,.readerhead,.finaltitle,.motionrow small,.analysistext small,.probbox small,.features strong{font-size:10px!important}
-.rhero{filter:drop-shadow(0 0 9px var(--accent))}
-.note,.footer,.sub,.card small,.metric small,.tooltip,.chartnav span,summary small{color:#cbd5e1!important;font-size:11px!important}
-.floatcounts div{border-color:#00dfb5;box-shadow:0 0 9px #00dfb544}.floatcounts div:last-child{border-color:#e64b4b;box-shadow:0 0 9px #e64b4b44}
-.canvas svg rect,.canvas svg line{shape-rendering:geometricPrecision}
-@media(max-width:460px){.finalgrid{grid-template-columns:1fr 1fr}.finalcard.motion{grid-column:1 / -1}.features{grid-template-columns:1fr}.prehead{flex-wrap:wrap;gap:6px}.prebadge{max-width:100%}.finalanalysis{grid-template-columns:1fr 90px}}
-
-
-/* Purple neon outlines, consistent across dashboard and chart cards. */
-.rcard,.mini,.section,.close-reader,.reader,.presignal,.refapp>section[style],
-.finalclose,.finalcard,.analysisbox,.probbox,.chartbox,
-.panel,.card,.metric,details,.floatcounts div{
- border-color:#23685e!important;
- box-shadow:0 0 4px #00dfb51a,inset 0 0 4px #00dfb508!important;
-}
-.panel{border:1.5px solid #23685e!important;margin:8px 6px!important}
-.rcard,.mini,.reader,.presignal,.card,.metric,details{border-width:1.5px!important}
-.techrow,.rnav,.chartnav{border-color:#23685e!important}
-
-
-/* Uniform turquoise presentation. Signal values and timing are unchanged. */
-.stApp,[data-testid="stAppViewContainer"]{background:#06121a!important}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
-.refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp>section[style],
-.panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div{
- background:linear-gradient(125deg,#0c2026,#0a151e)!important;
- border-color:#23685e!important;box-shadow:none!important;
-}
-.refapp .techrow,.refapp .techrow>div,.refapp .rnav,.panel .chartnav{border-color:#244047!important}
-.refapp .gear,.panel summary:after{color:#00dfb5!important;text-shadow:none!important}
-.refapp .finalcard,.refapp .finalclose,.refapp .analysisbox,.refapp .probbox{border-color:#244047!important}
-.stRadio label,[data-testid="stButton"] button,.panel .toggle,.panel .chartnav button{
- background:#0a151e!important;border-color:#23685e!important;color:#e3f0ee!important;
-}
-.panel{background:#06121a!important}
-
-
-/* JC ALPHA EDGE — champagne claro de referencia; solo CSS */
-:root{--jc-gold:#e1c99c;--jc-gold-soft:rgba(225,201,156,.92)}
-.refapp .rcard,.refapp .reader,.refapp .presignal,.refapp .finalclose,
-.refapp .finalcard,.refapp .analysisbox,.refapp .probbox,.refapp .chartbox,
-.refapp>section[style],.refapp .tech,.refapp .rconf,
-.panel,.panel .card,.panel .metric,.panel details,.panel .floatcounts div,
-.panel .chartnav button,.panel .toggle,
-#alpha-recent-alerts .ra93-panel,#alpha-recent-alerts .ra93-card{
- border-color:var(--jc-gold-soft)!important;
- box-shadow:0 0 2px rgba(225,201,156,.13)!important;
-}
-.refapp .techrow,.refapp .techrow>div,.refapp .rnav,
-.refapp .motionrow>div,.panel .chartnav{
- border-color:rgba(225,201,156,.30)!important;
-}
-.refapp .prebadge,.refapp .readerhead em{
- border-color:var(--jc-gold-soft)!important;
-}
-.refapp .rtitle{color:#f1d6a5!important;text-shadow:none!important}
-.refapp .gear{color:#f1d6a5!important;text-shadow:none!important}
-.refapp .rconf{border-color:var(--jc-gold-soft)!important}
-.refapp .rlive{color:#e7d5b8!important;border:1px solid var(--jc-gold-soft)!important;border-radius:18px!important;padding:3px 7px!important;bottom:-2px!important}
-.refapp .rlive i{background:var(--accent)!important;box-shadow:0 0 9px var(--glow)!important}
-/* Colores de señales, alertas, barras y números intactos. */
-
-/* TradingView Lightweight Charts: gestures managed by the native library */
-#canvas{height:420px!important;position:relative!important;overflow:hidden!important;touch-action:none!important;-webkit-user-select:none!important;user-select:none!important}
-#canvas canvas{touch-action:none!important}
-#whale,#momentum,.floatcounts,.tooltip{display:none!important}
-#rsi-pane{position:relative;overflow:hidden}
-@media(max-width:480px){#canvas{height:375px!important}}
-.expanded-chart #canvas{height:max(180px,calc(100dvh - 260px))!important}
-</style>
-<section class="panel">
-<div style="padding:8px 16px;color:#f1d6a5;font-size:14px">Ronda Kalshi · <strong id="round-clock" style="font-variant-numeric:tabular-nums">—</strong></div>
-<!-- Panel BTC/USD y tarjetas visuales retirados. Se conservan los nodos que usa el JavaScript para actualizar datos. -->
-<div style="display:none!important" aria-hidden="true"><span id="subtitle"></span><span id="price"></span><span id="live"></span><span id="signal"></span><span id="model"></span><span id="status"></span><span id="updated"></span></div>
-<details id="whale"><summary>🐋 WHALE FLOW <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>🐋 WHALE FLOW — LIVE</h3><div class="note">Operaciones observadas de Coinbase · últimos 30 s</div><div class="watch" id="watch"></div><div class="metrics"><div class="metric"><small>BUY FLOW</small><b class="green" id="buy"></b></div><div class="metric"><small>SELL FLOW</small><b class="red" id="sell"></b></div><div class="metric"><small>DIFERENCIA</small><b id="diff"></b></div><div class="metric"><small>ACTIVIDAD</small><b id="activity"></b></div><div class="metric"><small>FUERZA DEL DESEQUILIBRIO</small><b id="strength"></b></div></div><div class="bars"><div class="bar">BUY<div class="track"><i id="buybar" style="background:#00dfb5"></i></div><b id="buytotal"></b></div><div class="bar">SELL<div class="track"><i id="sellbar" style="background:#e64b4b"></i></div><b id="selltotal"></b></div></div><div class="count"><div class="metric"><small>🐋 BUY WHALES</small><b class="green" id="buys"></b></div><div class="metric"><small>🐋 SELL WHALES</small><b class="red" id="sells"></b></div></div><div class="metric difference"><small>DIFERENCIA DE OPERACIONES</small><b id="countdiff"></b></div><p class="note">«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. En el laboratorio, el flujo puede apoyar una candidatura solo con confirmación técnica; no decide por sí solo.</p></div></details>
-<details id="momentum"><summary>⚡ SHORT-TERM MOMENTUM <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>MOVIMIENTO RECIENTE DE BTC</h3><div class="metrics" id="momrows"></div><p class="note">Cambio porcentual calculado por el motor en 3, 5 y 15 minutos. La temporalidad de la gráfica no cambia estos valores.</p></div></details>
-<div class="tools"><h3>INDICADORES</h3><div class="toggles" id="toggles"></div><div class="legend" id="legend"></div></div>
-<div class="floatcounts"><div>🐋 BUY WHALES <b id="floatbuy"></b></div><div>🐋 SELL WHALES <b id="floatsell"></b></div></div>
-<div class="tooltip" id="tooltip">Arrastra velas y escala de precios · pellizca para zoom · AHORA regresa al presente.</div><div class="canvas" id="canvas"></div><div id="rsi-pane" style="height:110px;display:none;background:#06121a;border-top:1px solid #294c69"></div>
-<div class="chartnav"><button id="older" aria-label="Velas anteriores">←</button><button id="newer" aria-label="Velas siguientes">→</button><button id="zoomin" aria-label="Acercar">＋</button><button id="zoomout" aria-label="Alejar">−</button><button id="reset">AHORA</button><button id="expand" type="button" aria-pressed="false">AMPLIAR</button><span id="viewtf"></span></div>
-<div id="signal-state" role="status" style="padding:6px 12px;color:#c4d2e2;font-size:12px"></div>
-</section>
-<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
-<script>
-let D=__PAYLOAD__; const $=id=>document.getElementById(id), fmt=(v,n=2)=>v==null?'—':Number(v).toLocaleString('en-US',{minimumFractionDigits:n,maximumFractionDigits:n}), usd=v=>v==null?'—':'$'+fmt(v), compact=v=>v==null?'—':v>=1e6?'$'+(v/1e6).toFixed(2)+'M':v>=1000?'$'+(v/1000).toFixed(0)+'K':'$'+fmt(v,0);
-let saved={};try{saved=JSON.parse(localStorage.getItem('btc-neon-panel-v1')||'{}')}catch(e){}
-let toggles=Object.assign({ema9:true,ema21:true,vwap:true,volume:true,rsi:true,},saved.toggles),visible=saved.visible||32,offset=saved.offset||0,pricePan=Number.isFinite(saved.pricePan)?saved.pricePan:0;
-$('expand').addEventListener('click',()=>{
- const host=window.frameElement?.parentElement;
- if(!host)return;
- const expanded=host.classList.toggle('expanded');
- document.documentElement.classList.toggle('expanded-chart',expanded);
- $('expand').textContent=expanded?'SALIR':'AMPLIAR';
- $('expand').setAttribute('aria-pressed',String(expanded));
-});
-function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
-for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
-function updateRoundClock(){
- const label=$('round-clock');
- if(!Number.isFinite(D.round_close_ms)){label.textContent='Esperando ronda';return;}
- const seconds=Math.max(0,Math.ceil((D.round_close_ms-Date.now())/1000));
- label.textContent=seconds
-   ? Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0')
-   : '0:00 · Esperando nueva ronda';
-}
-setInterval(updateRoundClock,1000);
-function refreshLabels(){
- updateRoundClock();
-$('subtitle').textContent=D.timeframe.toUpperCase()+' · '+(D.candle_source||'COINBASE')+' · BTC SIGNAL';$('price').textContent=usd(D.price);$('live').textContent=D.price==null?'● SIN COTIZACIÓN':'● PRECIO RECIBIDO';$('model').textContent=fmt(D.signal==='UP'?D.up:D.signal==='DOWN'?D.down:Math.max(D.up,D.down),1)+'%';$('status').textContent=D.rows.length?'DATOS RECIBIDOS':'SIN VELAS';$('updated').textContent='Actualizado '+D.updated;$('viewtf').textContent=D.timeframe+' · VELAS REALES';$('signal-state').textContent=D.signal_status||'';
-const F=D.flow,total=F.buy+F.sell,known=F.ok;
-$('watch').textContent=!known?'SIN DATOS DE FLUJO':total===0?'ESPERANDO OPERACIONES':F.direction==='NEUTRAL'?'FLUJO EQUILIBRADO':'WATCH '+F.direction;
-for(const [id,value] of [['buy',F.buy],['sell',F.sell],['buytotal',F.buy],['selltotal',F.sell]])$(id).textContent=known?compact(value):'—';
-$('diff').textContent=known?compact(Math.abs(F.buy-F.sell))+' '+(F.buy>F.sell?'BUY':F.sell>F.buy?'SELL':'NEUTRAL'):'—';$('diff').className=F.buy>F.sell?'green':'red';$('activity').textContent=known&&F.activity!=null?fmt(F.activity,1)+'×':'—';$('strength').textContent=known&&total?F.strength:'—';
-for(const [id,v] of [['buys',F.buys],['sells',F.sells],['floatbuy',F.buys],['floatsell',F.sells]])$(id).textContent=known?v:'—';
-$('countdiff').textContent=known?Math.abs(F.buys-F.sells)+' '+(F.buys>F.sells?'BUY':F.sells>F.buys?'SELL':'NEUTRAL'):'—';$('buybar').style.width=(total?100*F.buy/total:0)+'%';$('sellbar').style.width=(total?100*F.sell/total:0)+'%';
-$('momrows').replaceChildren();
-for(const key of ['mom3','mom5','mom15']){const v=D[key],box=document.createElement('div');box.className='metric';box.innerHTML='<small>'+key.slice(3)+' MINUTOS</small><b class="'+(v>=0?'green':'red')+'">'+(v==null?'—':(v>0?'+':'')+fmt(v,2)+'%')+'</b>';$('momrows').append(box)}
-}
-refreshLabels();
-const colors={ema9:'#f000ff',ema21:'#00eaff',vwap:'#6261ff',volume:'#00d7b0',rsi:'#f000ff'};
-for(const [key,label] of Object.entries({ema9:'EMA9',ema21:'EMA21',vwap:'VWAP',volume:'VOLUME',rsi:'RSI'})){const b=document.createElement('button');b.style.setProperty('--c',colors[key]);b.dataset.key=key;b.onclick=()=>{toggles[key]=!toggles[key];persist();draw()};$('toggles').append(b);b.dataset.label=label}
-// The original custom SVG/pointer engine has been fully replaced by TradingView Lightweight Charts.
-// The surrounding cards, signals, toolbars, Python payload and market calculations remain unchanged.
-let lwChart=null, candleSeries=null, volumeSeries=null, overlays={}, levelLines=[], rsiChart=null, rsiSeries=null;
-let applyingData=false, syncing=false;
-const candleOptions={upColor:'#00dfb5',downColor:'#e64b4b',borderUpColor:'#00dfb5',borderDownColor:'#e64b4b',wickUpColor:'#00dfb5',wickDownColor:'#e64b4b'};
-function chartRows(data){return (data.rows||[]).filter(r=>Number.isFinite(r.t)&&[r.open,r.high,r.low,r.close].every(Number.isFinite))
- .map(r=>({time:r.t,open:r.open,high:r.high,low:r.low,close:r.close}));}
-function seriesRows(key){return (D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r[key]))
- .map(r=>({time:r.t,value:r[key]}));}
-function refreshToggles(){
- for(const b of $('toggles').children){const k=b.dataset.key;b.className='toggle'+(toggles[k]?'':' off');b.setAttribute('aria-pressed',String(!!toggles[k]));b.innerHTML=b.dataset.label+'<span>'+(toggles[k]?'ON':'OFF')+'</span>'}
- const last=D.rows?.[D.rows.length-1];
- $('legend').innerHTML=last?['ema9','ema21','vwap'].filter(k=>toggles[k]).map(k=>'<span><i style="color:'+colors[k]+'">●</i> '+k.toUpperCase()+' '+usd(last[k])+'</span>').join(''):'';
-}
-function initChart(){
- if(!window.LightweightCharts){$('canvas').textContent='No se pudo cargar la gráfica de TradingView. Verifica la conexión de internet.';return false;}
- if(lwChart)return true;
- const L=window.LightweightCharts;
- lwChart=L.createChart($('canvas'),{
-  width:$('canvas').clientWidth,height:$('canvas').clientHeight,
-  layout:{background:{type:L.ColorType.Solid,color:'#06121a'},textColor:'#b9c8d9',fontFamily:'Inter,system-ui,sans-serif',fontSize:11},
-  grid:{vertLines:{color:'#142b3a'},horzLines:{color:'#142b3a'}},
-  rightPriceScale:{borderColor:'#34546c',scaleMargins:{top:.12,bottom:.17}},
-  timeScale:{borderColor:'#34546c',rightOffset:2,barSpacing:11,minBarSpacing:3,timeVisible:true,secondsVisible:false,fixLeftEdge:false,fixRightEdge:false},
-  crosshair:{mode:L.CrosshairMode.Normal,vertLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'},horzLine:{color:'#849cb7',style:L.LineStyle.Dashed,labelBackgroundColor:'#20354c'}},
-  kineticScroll:{touch:true,mouse:true},
-  handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:true},
-  handleScale:{axisPressedMouseMove:{time:true,price:true},mouseWheel:true,pinch:true,axisDoubleClickReset:true}
- });
- candleSeries=lwChart.addCandlestickSeries({...candleOptions,priceFormat:{type:'price',precision:2,minMove:.01},lastValueVisible:true,priceLineVisible:true});
- for(const k of ['ema9','ema21','vwap'])overlays[k]=lwChart.addLineSeries({color:colors[k],lineWidth:2,visible:!!toggles[k],lastValueVisible:false,priceLineVisible:false,...(k==='vwap'?{lineStyle:L.LineStyle.Dashed}:{})});
- volumeSeries=lwChart.addHistogramSeries({priceScaleId:'',visible:!!toggles.volume,priceLineVisible:false,lastValueVisible:false});
- volumeSeries.priceScale().applyOptions({scaleMargins:{top:.82,bottom:0}});
- rsiChart=L.createChart($('rsi-pane'),{
-  width:$('rsi-pane').clientWidth,height:110,
-  layout:{background:{type:L.ColorType.Solid,color:'#06121a'},textColor:'#b9c8d9',fontSize:10},
-  grid:{vertLines:{color:'#142b3a'},horzLines:{color:'#142b3a'}},
-  rightPriceScale:{borderColor:'#34546c'},timeScale:{visible:false,borderColor:'#34546c'},
-  handleScroll:false,handleScale:false,crosshair:{mode:L.CrosshairMode.Normal}
- });
- rsiSeries=rsiChart.addLineSeries({color:colors.rsi,lineWidth:2,priceLineVisible:false,lastValueVisible:true});
- // Keep RSI time aligned with the BTC chart when panning/zooming.
- lwChart.timeScale().subscribeVisibleLogicalRangeChange(range=>{
-  if(!range||syncing)return;
-  syncing=true;try{rsiChart.timeScale().setVisibleLogicalRange(range)}catch(_){}syncing=false;
-  if(!applyingData)persistView();
- });
- lwChart.subscribeCrosshairMove(param=>{
-  if(!param||!param.time||!param.seriesData){return;}
-  const r=param.seriesData.get(candleSeries);if(!r)return;
-  const date=new Date(Number(param.time)*1000).toLocaleString('en-US',{timeZone:'America/New_York'});
-  $('tooltip').textContent=date+' · O '+fmt(r.open)+' H '+fmt(r.high)+' L '+fmt(r.low)+' C '+fmt(r.close);
- });
- const resize=()=>{if(!lwChart)return;lwChart.applyOptions({width:$('canvas').clientWidth,height:$('canvas').clientHeight});rsiChart.applyOptions({width:$('rsi-pane').clientWidth,height:110})};
- if(window.ResizeObserver){new ResizeObserver(resize).observe($('canvas'));new ResizeObserver(resize).observe($('rsi-pane'))}else window.addEventListener('resize',resize);
- return true;
-}
-function persistView(){
- if(!lwChart)return;
- const range=lwChart.timeScale().getVisibleLogicalRange();
- if(!range)return;
- const n=D.rows.length;visible=Math.max(12,Math.round(range.to-range.from));offset=Math.max(0,Math.round((n-1)-range.to));persist();
-}
-function redrawData(preserve=true){
- refreshToggles();if(!initChart())return;
- applyingData=true;
- let oldRange=preserve?lwChart.timeScale().getVisibleLogicalRange():null;
- const newC=chartRows(D),newN=newC.length;
- if(!newN){candleSeries.setMarkers([]);applyingData=false;return;}
- candleSeries.setData(newC);
- candleSeries.setMarkers((D.reversal_markers||[]).map(mark => {
-  const up=mark.direction==='UP';
-  return {time:mark.time,position:up?'belowBar':'aboveBar',
-          shape:up?'arrowUp':'arrowDown',color:up?'#38eac3':'#ff7777',size:1.6,text:mark.direction};
- }));
- for(const k of ['ema9','ema21','vwap']){overlays[k].setData(seriesRows(k));overlays[k].applyOptions({visible:!!toggles[k]});}
- volumeSeries.setData((D.rows||[]).filter(r=>Number.isFinite(r.t)&&Number.isFinite(r.volume)).map(r=>({time:r.t,value:r.volume,color:r.close>=r.open?'#00dfb573':'#e64b4b73'})));
- volumeSeries.applyOptions({visible:!!toggles.volume});
- rsiSeries.setData(seriesRows('rsi'));
- $('rsi-pane').style.display=toggles.rsi?'block':'none';
- for(const l of levelLines)candleSeries.removePriceLine(l);levelLines=[];
- for(const [value,label,color] of [[D.target,'TARGET KALSHI','#f1c46b'],[D.support,'SUPPORT','#00dfb5'],[D.resistance,'RESISTANCE','#e64b4b']]){
-  if(Number.isFinite(value))levelLines.push(candleSeries.createPriceLine({price:value,color,lineWidth:1,lineStyle:LightweightCharts.LineStyle.Dashed,axisLabelVisible:true,title:label}));
- }
- try{
-  if(oldRange&&preserve){
-   // Preserve the user's camera even when a new candle arrives.
-   // Move one logical bar if old range was already anchored to the live edge.
-   lwChart.timeScale().setVisibleLogicalRange(oldRange);
-  }else if(saved.visible){
-   lwChart.timeScale().setVisibleLogicalRange({from:Math.max(0,newN-saved.visible-saved.offset),to:newN-1-saved.offset});
-  }else{
-   // Show recent candles at a readable size, with only two future candle spaces.
-   const count=Math.min(35,newN);
-   lwChart.timeScale().setVisibleLogicalRange({from:newN-count-0.5,to:newN+1.5});
-  }
- }catch(_) {lwChart.timeScale().fitContent()}
- applyingData=false;
-}
-function draw(){redrawData(true)}
-$('zoomin').onclick=()=>{if(!lwChart)return;const t=lwChart.timeScale(),r=t.getVisibleLogicalRange();if(r){const m=(r.from+r.to)/2,w=(r.to-r.from)*.72;t.setVisibleLogicalRange({from:m-w/2,to:m+w/2})}};
-$('zoomout').onclick=()=>{if(!lwChart)return;const t=lwChart.timeScale(),r=t.getVisibleLogicalRange();if(r){const m=(r.from+r.to)/2,w=(r.to-r.from)*1.35;t.setVisibleLogicalRange({from:m-w/2,to:m+w/2})}};
-$('older').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToPosition(lwChart.timeScale().scrollPosition()+10,false)};
-$('newer').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToPosition(lwChart.timeScale().scrollPosition()-10,false)};
-$('reset').onclick=()=>{if(!lwChart)return;lwChart.timeScale().scrollToRealTime();persistView()};
-// Controls call draw(), so toggles update the native series without a new chart element.
-window.addEventListener('message',function(event){
- if(!event.data||event.data.kind!=='alpha-chart-update')return;
- const next=event.data.payload;
- if(!next||!Array.isArray(next.rows))return;
- const previous=D;
- const sameTimeframe=previous.timeframe===next.timeframe;
- D=next;refreshLabels();
- if(!initChart())return;
- if(!sameTimeframe){redrawData(false);return;}
- // Native data update never rebuilds the canvas; gestures and scroll are preserved.
- redrawData(true);
-});
-draw();
-</script></html>'''
-
-
-@st.cache_data(ttl=1)
-def get_recent_coinbase_trades():
-    response = requests.get(
-        "https://api.exchange.coinbase.com/products/BTC-USD/trades",
-        params={"limit": 100},
-        timeout=3,
-    )
-    response.raise_for_status()
-    trades = {}
-    if not isinstance(response.json(), list):
-        raise ValueError("Operaciones BTC no disponibles.")
-    for row in response.json():
         try:
-            trade_id = int(row["trade_id"])
-            timestamp = pd.Timestamp(row["time"]).timestamp()
-            price = float(row["price"])
-            size = float(row["size"])
-            # Coinbase reports the resting maker side, opposite the aggressor.
-            side = {"sell": "UP", "buy": "DOWN"}[row["side"]]
-        except (KeyError, ValueError, TypeError, OverflowError):
-            continue
-        if np.isfinite([timestamp, price, price * size]).all() and price > 0 and size > 0:
-            trades[trade_id] = (timestamp, price, price * size, side)
-    return trades
-
-
-def update_aggressor_flow(tape, trades, now):
-    tape.update(trades)
-    for trade_id, trade in list(tape.items()):
-        if trade[0] < now - 5:
-            del tape[trade_id]
-    recent = [trade for trade in tape.values() if now - 5 <= trade[0] <= now]
-    if not recent:
-        return None, None
-    latest = max(recent)
-    if now - latest[0] > 3:
-        return None, None
-    if len(recent) < 8:
-        return latest[1], None
-    buy = sum(trade[2] for trade in recent if trade[3] == "UP")
-    sell = sum(trade[2] for trade in recent if trade[3] == "DOWN")
-    imbalance = (buy - sell) / (buy + sell)
-    side = "UP" if imbalance >= 0.25 else "DOWN" if imbalance <= -0.25 else None
-    return latest[1], side
-
-
-@st.cache_resource
-def confirmed_chart_signals():
-    # Share signals observed by this server across browser sessions.
-    return threading.Lock(), {}
-
-
-def confirm_round_marker(payload, saved, market, flow_side):
-    now = payload["observed"]
-    minute = now // 60 * 60
-    rows = payload["rows"]
-    for ticker, marker in list(saved.items()):
-        # Versiones anteriores guardaban {minuto: "UP" o "DOWN"}.
-        if isinstance(ticker, int) and isinstance(marker, str) and marker in ("UP", "DOWN"):
-            marker = saved[ticker] = {"time": ticker, "direction": marker}
-        if (not isinstance(marker, dict)
-                or not isinstance(marker.get("time"), int)
-                or marker.get("direction") not in ("UP", "DOWN")
-                or marker["time"] < now - 4 * 3600):
-            del saved[ticker]
-    active = market and _KalshiPublicReads._is_current(
-        market, datetime.fromtimestamp(now, timezone.utc))
-    ticker = market["ticker"] if active else None
-    side = payload["ut_side"]
-    if ticker and rows and rows[-1]["t"] == minute and side in ("UP", "DOWN") and side == flow_side:
-        saved.setdefault(ticker, {"time": minute, "direction": side})
-        saved.pop(saved[ticker]["time"], None)
-    visible = {row["t"] for row in rows}
-    payload["reversal_markers"] = sorted(
-        (marker for marker in saved.values() if marker["time"] in visible),
-        key=lambda marker: marker["time"],
-    )
-    return saved.get(ticker)
-
-
-class _KalshiPublicReads:
-    """Una consulta por recurso para todas las sesiones e hilos del proceso."""
-    def __init__(self):
-        self.lock = threading.RLock()
-        self.cache = {}
-        self.failures = {}
-        self.retry_at = 0.0
-        self.rate_failures = 0
-        self.current_round = None
-
-    @staticmethod
-    def _is_current(market, now=None):
-        if not isinstance(market, dict) or not str(market.get("ticker", "")).startswith("KXBTC15M-"):
-            return False
-        if market.get("status") not in (None, "open", "active"):
-            return False
-        now = now or datetime.now(timezone.utc)
-        try:
-            close = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
-            # Nunca seleccionar la ronda futura ni conservar la anterior.
-            if close.tzinfo is None or not 0 < (close - now).total_seconds() <= 900:
-                return False
-            if market.get("open_time"):
-                opened = datetime.fromisoformat(str(market["open_time"]).replace("Z", "+00:00"))
-                if opened.tzinfo is None or opened > now:
-                    return False
-            return True
+            stamp, value = float(point["t"]), float(point["v"])
         except (KeyError, TypeError, ValueError):
-            return False
-
-    @staticmethod
-    def _has_target(market):
-        return any(_KalshiPublicReads._valid_strike(market.get(key))
-                   for key in ("floor_strike", "cap_strike"))
-
-    @staticmethod
-    def _valid_strike(value):
+            continue
+        if np.isfinite(stamp) and stamp > 0 and np.isfinite(value) and 10000 < value < 1000000:
+            # La serie puede devolver epoch en segundos o milisegundos.
+            stamp = stamp / 1000 if stamp > 100_000_000_000 else stamp
+            timed_points.append((stamp, index, value))
+    if timed_points:
+        stamp, _, value = max(timed_points)
         try:
-            return np.isfinite(float(value)) and float(value) > 1000
-        except (TypeError, ValueError):
-            return False
+            price = _valid_live_observation(value, pd.to_datetime(stamp, unit="s", utc=True), "KALSHI LIVE")
+            _PRICE_OBSERVATIONS.kalshi_points = [(t, p) for t, _, p in timed_points if stamp - 90 <= t <= stamp]
+            _PRICE_OBSERVATIONS.chart_points = [(t, p) for t, _, p in timed_points if stamp - 900 <= t <= stamp]
+            return price
+        except (ValueError, TypeError, OverflowError):
+            return None
+    # Un precio sin fecha verificable no se anuncia como live.
+    return None
 
-    def _round_metadata(self):
-        # El target y el cierre verificados siguen siendo válidos para ESTE ticker.
-        # Las cotizaciones no: no reutilizar bids/asks ni precios de contrato antiguos.
-        keys = ("ticker", "event_ticker", "open_time", "close_time", "status",
-                "floor_strike", "cap_strike")
-        return {key: copy.deepcopy(self.current_round[key]) for key in keys
-                if key in self.current_round}
+def _indicator_frame(df):
+    x = df.copy().sort_values("time").reset_index(drop=True)
+    close, high, low = x["close"], x["high"], x["low"]
+    x["ema9"] = close.ewm(span=9, adjust=False).mean()
+    x["ema21"] = close.ewm(span=21, adjust=False).mean()
+    delta = close.diff(); gain = delta.clip(lower=0); loss = -delta.clip(upper=0)
+    ag = gain.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    al = loss.ewm(alpha=1/14, adjust=False, min_periods=14).mean()
+    rs = ag / al.replace(0, np.nan)
+    rsi = 100 - 100 / (1 + rs)
+    rsi = rsi.mask((al == 0) & (ag > 0), 100.0)
+    rsi = rsi.mask((ag == 0) & (al > 0), 0.0)
+    x["rsi"] = rsi.fillna(50.0)
+    e12=close.ewm(span=12,adjust=False).mean(); e26=close.ewm(span=26,adjust=False).mean()
+    x["macd"]=e12-e26; x["macd_signal"]=x["macd"].ewm(span=9,adjust=False).mean(); x["macd_hist"]=x["macd"]-x["macd_signal"]
+    prev=close.shift(1); tr=pd.concat([(high-low),(high-prev).abs(),(low-prev).abs()],axis=1).max(axis=1)
+    x["atr"]=tr.ewm(alpha=1/14,adjust=False,min_periods=14).mean()
+    up=high.diff(); dn=-low.diff(); plus=up.where((up>dn)&(up>0),0.0); minus=dn.where((dn>up)&(dn>0),0.0)
+    atr=x["atr"].replace(0,np.nan); pdi=100*plus.ewm(alpha=1/14,adjust=False).mean()/atr; mdi=100*minus.ewm(alpha=1/14,adjust=False).mean()/atr
+    dx=100*(pdi-mdi).abs()/(pdi+mdi).replace(0,np.nan)
+    x["plus_di"]=pdi; x["minus_di"]=mdi; x["adx"]=dx.ewm(alpha=1/14,adjust=False).mean()
+    typical=(high+low+close)/3; vol=x["volume"].fillna(0); x["vwap"]=(typical*vol).rolling(60,min_periods=1).sum()/vol.rolling(60,min_periods=1).sum().replace(0,np.nan)
+    x["vol_ratio"]=vol/vol.rolling(20).mean().replace(0,np.nan)
+    return x
 
-    def current_market(self):
-        with self.lock:
-            if not self._is_current(self.current_round):
-                self.current_round = None
-            try:
-                if self.current_round:
-                    ticker = self.current_round["ticker"]
-                    market = self.get("/markets/" + ticker, ttl=2.0, timeout=6).get("market")
-                    if not isinstance(market, dict) or market.get("ticker") != ticker:
-                        raise ValueError("Kalshi devolvió una respuesta incompleta para la ronda actual.")
-                    market = copy.deepcopy(market)
-                    for key in ("open_time", "close_time", "event_ticker"):
-                        if not market.get(key) and key in self.current_round:
-                            market[key] = self.current_round[key]
-                    if not self._is_current(market):
-                        self.current_round = None
-                        return None
-                    market = copy.deepcopy(market)
-                    # Un detalle parcial no borra un strike ya verificado del mismo ticker.
-                    if not self._has_target(market):
-                        for key in ("floor_strike", "cap_strike"):
-                            if key in self.current_round:
-                                market[key] = self.current_round[key]
-                else:
-                    # El filtro status=open puede omitir una ronda que figura como active.
-                    # Acotar por cierre y validar estado/horario localmente.
-                    minute = int(datetime.now(timezone.utc).timestamp()) // 60 * 60
-                    data = self.get("/markets", params={"limit": 100,
-                                    "series_ticker": "KXBTC15M",
-                                    "min_close_ts": minute,
-                                    "max_close_ts": minute + 960}, ttl=2.0, timeout=10)
-                    markets = [m for m in data.get("markets", []) if self._is_current(m)]
-                    if not markets:
-                        return None
-                    markets.sort(key=lambda m: str(m["close_time"]))
-                    market = copy.deepcopy(markets[0])
-                    if not self._has_target(market):
-                        ticker = market["ticker"]
-                        detail = self.get("/markets/" + ticker, ttl=2.0, timeout=6).get("market")
-                        if not isinstance(detail, dict) or detail.get("ticker") != ticker:
-                            raise ValueError("Kalshi no entregó el detalle de la ronda actual.")
-                        market = detail
-                if not self._is_current(market):
-                    self.current_round = None
-                    return None
-                if not self._has_target(market):
-                    raise ValueError("La ronda actual todavía no entregó un target verificable.")
-                self.current_round = copy.deepcopy(market)
-                return copy.deepcopy(market)
-            except (requests.RequestException, ValueError, TypeError) as exc:
-                status = getattr(getattr(exc, "response", None), "status_code", None)
-                if status in (404, 410) or not self._is_current(self.current_round):
-                    self.current_round = None
-                    raise
-                # El reloj se calcula desde close_time, nunca desde un contador guardado.
-                result = self._round_metadata()
-                result["_round_refresh_error"] = str(exc)
-                return result
+def _resample_indicators(df, minutes):
+    if minutes == 1: return _indicator_frame(df)
+    x=df.set_index("time").resample(f"{minutes}min").agg({"open":"first","high":"max","low":"min","close":"last","volume":"sum"}).dropna().reset_index()
+    return _indicator_frame(x)
 
-    def get(self, path, params=None, ttl=2.0, timeout=6):
-        params = dict(params or {})
-        key = (path, json.dumps(params, sort_keys=True))
-        with self.lock:
-            now = time.monotonic()
-            cached = self.cache.get(key)
-            if cached and now < cached[0]:
-                return copy.deepcopy(cached[1])
-            if now < self.retry_at:
-                raise requests.HTTPError(
-                    "Kalshi 429: límite temporal; reintento en "
-                    + str(max(1, int(self.retry_at - now + 0.999))) + " s.")
-            failed = self.failures.get(key)
-            if failed and now < failed[0]:
-                raise requests.RequestException(failed[1])
-            try:
-                response = requests.get(
-                    "https://external-api.kalshi.com/trade-api/v2" + path,
-                    params=params,
-                    headers={"User-Agent": "MacalyAlphaBot/4.6.1", "Cache-Control": "no-cache"},
-                    timeout=timeout,
-                )
-                if response.status_code == 429:
-                    self.rate_failures = min(self.rate_failures + 1, 5)
-                    delay = min(30.0, 2.0 ** self.rate_failures) + random.uniform(0, 0.5)
-                    retry_after = response.headers.get("Retry-After")
-                    if retry_after:
-                        try:
-                            requested_delay = float(retry_after)
-                        except (TypeError, ValueError):
-                            try:
-                                stamp = parsedate_to_datetime(retry_after)
-                                if stamp.tzinfo is None:
-                                    stamp = stamp.replace(tzinfo=timezone.utc)
-                                requested_delay = (stamp - datetime.now(timezone.utc)).total_seconds()
-                            except (TypeError, ValueError, OverflowError):
-                                requested_delay = 0.0
-                        if np.isfinite(requested_delay):
-                            delay = max(delay, requested_delay)
-                    self.retry_at = time.monotonic() + delay
-                response.raise_for_status()
-                payload = response.json()
-                if not isinstance(payload, dict):
-                    raise ValueError("Kalshi devolvió una respuesta incompleta.")
-            except (requests.RequestException, ValueError) as exc:
-                # Los errores tampoco se vuelven a consultar por cada sesión.
-                if len(self.failures) >= 256:
-                    self.failures.pop(next(iter(self.failures)))
-                self.failures[key] = (time.monotonic() + 2.0, str(exc))
-                raise
-            self.rate_failures = 0
-            self.retry_at = 0.0
-            self.failures.pop(key, None)
-            if len(self.cache) >= 256:
-                self.cache.pop(next(iter(self.cache)))
-            effective_ttl = float(ttl)
-            if path == "/markets":
-                # No reutilizar el listado de la ronda cerrada en el cambio de ronda.
-                for market in payload.get("markets", []):
-                    try:
-                        close = datetime.fromisoformat(str(market["close_time"]).replace("Z", "+00:00"))
-                        remaining = (close - datetime.now(timezone.utc)).total_seconds()
-                        if remaining > 0:
-                            effective_ttl = min(effective_ttl, remaining)
-                    except (KeyError, TypeError, ValueError):
-                        pass
-            self.cache[key] = (time.monotonic() + effective_ttl, copy.deepcopy(payload))
-            return payload
-
-
-@st.cache_resource(validate=lambda reader: callable(getattr(reader, "current_market", None)) and hasattr(reader, "current_round"))
-def _kalshi_public_reads():
-    # Cambiar el cuerpo también invalida el recurso de versiones anteriores.
-    reader = _KalshiPublicReads()
-    return reader
-
+def add_indicators(df):
+    x=_indicator_frame(df)
+    x["mom3"]=x["close"].pct_change(3)*100; x["mom5"]=x["close"].pct_change(5)*100; x["mom15"]=x["close"].pct_change(15)*100
+    return x
 
 def get_target_from_market(market):
     if not market:
@@ -767,111 +267,2849 @@ def get_target_from_market(market):
                 pass
     return None
 
-
-@st.cache_resource
-def kalshi_target_executor():
-    return ThreadPoolExecutor(max_workers=1, thread_name_prefix="kalshi-target")
-
-
-def current_chart_market(state, reader):
-    future = state.get("kalshi_target_future")
-    if future is not None and future.done():
-        try:
-            state["kalshi_target_market"] = future.result()
-        except (requests.RequestException, ValueError, TypeError):
-            pass
-        future = None
-    if future is None:
-        state["kalshi_target_future"] = kalshi_target_executor().submit(reader.current_market)
-    market = state.get("kalshi_target_market")
-    return market if reader._is_current(market) else None
-
-
-@st.fragment(run_every="2s")
-def live_chart():
+def get_seconds_remaining(market):
+    if not market or not market.get("close_time"):
+        return None
     try:
-        candles = get_btc_data()
-        price = float(candles.iloc[-1]["close"])
-        error = None
-    except (ValueError, requests.RequestException) as exc:
-        candles = pd.DataFrame(columns=["time", "open", "high", "low", "close", "volume"])
-        price = None
-        error = str(exc)
+        close_dt = datetime.fromisoformat(
+            str(market["close_time"]).replace("Z", "+00:00")
+        )
+        seconds = int(
+            (close_dt - datetime.now(timezone.utc)).total_seconds()
+        )
+        return max(0, seconds)
+    except Exception:
+        return None
 
-    flow_side = None
-    flow_status = "Flujo de Coinbase no disponible"
-    if candles.attrs.get("candle_source") == "COINBASE":
+def numeric_kalshi_price(dollar_value, cent_value):
+    if dollar_value not in [None, ""]:
         try:
-            trades = get_recent_coinbase_trades()
-            tape = st.session_state.setdefault("aggressor_tape", {})
-            trade_price, flow_side = update_aggressor_flow(tape, trades, datetime.now(timezone.utc).timestamp())
-            if trade_price is None:
-                flow_status = "Sin operaciones recientes"
-            else:
-                price = trade_price
-                flow_status = "Flujo sin presión suficiente" if flow_side is None else f"Flujo {flow_side}"
-        except (ValueError, requests.RequestException):
-            flow_status = "Error al consultar el flujo de Coinbase"
+            return float(dollar_value)
+        except Exception:
+            pass
+    if cent_value not in [None, ""]:
+        try:
+            return float(cent_value) / 100
+        except Exception:
+            pass
+    return None
 
-    market = current_chart_market(st.session_state, _kalshi_public_reads())
-    target = get_target_from_market(market) if market else None
-    payload = _neon_payload(candles, price, target, None, "1m", {}, None)
-    lock, saved = confirmed_chart_signals()
-    payload["round_close_ms"] = int(pd.Timestamp(market["close_time"]).timestamp()*1000) if market else None
-    with lock:
-        confirmed = confirm_round_marker(payload, saved, market, flow_side)
-    if confirmed:
-        status = f"Señal de la ronda · {confirmed['direction']}"
-    elif not market:
-        status = "Esperando ronda Kalshi"
-    else:
-        status = f"Esperando coincidencia UT y flujo · {flow_status}"
-    payload["signal_status"] = status
-    safe_payload = json.dumps(payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
-    st.session_state["_alpha_chart_html_initial"] = _NEON_HTML.replace("__PAYLOAD__", safe_payload)
-    st.html(
-        "<script>window.__alphaNextChart=" + safe_payload + ";"
-        "if(window.__alphaPushChart)window.__alphaPushChart(window.__alphaNextChart);</script>",
-        unsafe_allow_javascript=True,
+def get_yes_ask(market):
+    if not market:
+        return None
+    return numeric_kalshi_price(
+        market.get("yes_ask_dollars"), market.get("yes_ask")
     )
-    if error:
-        st.warning("Velas BTC no disponibles. Reintentando.")
+
+def get_no_ask(market):
+    if not market:
+        return None
+
+    direct = numeric_kalshi_price(
+        market.get("no_ask_dollars"), market.get("no_ask")
+    )
+    if direct is not None:
+        return direct
+
+    yes_bid = numeric_kalshi_price(
+        market.get("yes_bid_dollars"), market.get("yes_bid")
+    )
+    if yes_bid is not None:
+        return max(0.0, min(1.0, 1.0 - yes_bid))
+    return None
+
+def _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol):
+    """Directional persistence / exhaustion in comparable ATR units.
+
+    Informational internally; never imposes a permanent UP/DOWN lock.
+    Percent momentum is converted to dollars before ATR normalization.
+    Uses completed/current candle history, not fabricated price targets.
+    """
+    if not np.isfinite(price) or price <= 0 or not np.isfinite(atr) or atr <= 0:
+        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
+                "exhaust_down": False, "reliable": False}
+    close = one["close"].astype(float).tail(9).to_numpy()
+    if len(close) < 7 or not np.all(np.isfinite(close)):
+        return {"up": 0.0, "down": 0.0, "exhaust_up": False,
+                "exhaust_down": False, "reliable": False}
+    changes = np.diff(close)
+    # Directional efficiency: net movement divided by total absolute movement.
+    travel = float(np.sum(np.abs(changes[-5:])))
+    efficiency = abs(float(close[-1] - close[-6])) / max(travel, 1e-8)
+    recent = float(np.sum(changes[-2:])) / atr
+    previous = float(np.sum(changes[-5:-2])) / atr
+    m3 = float(np.clip(price * mom3 / 100.0 / atr, -3, 3))
+    m5 = float(np.clip(price * mom5 / 100.0 / atr, -3, 3))
+    m15 = float(np.clip(price * mom15 / 100.0 / atr, -3, 3))
+    volume = float(np.clip(rvol, 0, 3)) if np.isfinite(rvol) else 1.0
+    # No invented dollar target: these are dimensionless internal strengths.
+    trend = .48 * m3 + .32 * m5 + .20 * m15
+    strength = float(np.clip(trend * (.75 + .25 * efficiency) *
+                             (.90 + .10 * min(volume, 1.5)), -3, 3))
+    exhaust_up = (previous > .35 and recent < -.10) or (m5 > .35 and m3 < -.12)
+    exhaust_down = (previous < -.35 and recent > .10) or (m5 < -.35 and m3 > .12)
+    return {"up": max(0., strength), "down": max(0., -strength),
+            "exhaust_up": bool(exhaust_up), "exhaust_down": bool(exhaust_down),
+            "reliable": True, "efficiency": round(float(efficiency), 3),
+            "recent_atr": round(recent, 3)}
+
+def _ut_bot_events(df, minutes, now):
+    """UT Bot sobre cierres OHLC, sensibilidad 1 y ATR Wilder de 10 velas."""
+    interval = pd.Timedelta(minutes=minutes)
+    received = pd.to_datetime(df.attrs.get("received_at"), utc=True, errors="coerce")
+    if pd.isna(received):
+        received = now
+    current = now.floor(f"{minutes}min")
+    bars = (df.loc[df["time"] <= now.floor("min")].set_index("time")
+            .resample(f"{minutes}min").agg(high=("high", "max"), low=("low", "min"),
+                                           close=("close", "last"), count=("close", "size")))
+    bars = bars.loc[(bars["count"] == minutes) | ((bars.index == current) & (bars["count"] > 0))]
+    provisional = confirmed = confirmed_at = prior_side = closed_move = None
+    atr = stop = previous = previous_stamp = None
+    seed = []
+    for stamp, bar in bars.iterrows():
+        end = stamp + interval
+        if stamp != current and end > received:
+            continue
+        if stamp == current and previous_stamp != stamp - interval:
+            break
+        close = float(bar.close)
+        true_range = float(bar.high - bar.low)
+        if previous is not None:
+            true_range = max(true_range, abs(bar.high - previous), abs(bar.low - previous))
+        if atr is None:
+            seed.append(true_range)
+            if len(seed) < 10:
+                previous = close
+                previous_stamp = stamp
+                continue
+            atr = sum(seed) / 10
+        else:
+            atr = (9 * atr + true_range) / 10
+        if stop is None:
+            stop = close - atr
+        else:
+            if close > stop and previous > stop:
+                next_stop = max(stop, close - atr)
+            elif close < stop and previous < stop:
+                next_stop = min(stop, close + atr)
+            else:
+                next_stop = close - atr if close > stop else close + atr
+            side = ("UP" if previous <= stop and close > next_stop else
+                    "DOWN" if previous >= stop and close < next_stop else None)
+            if stamp == current:
+                provisional = side
+            else:
+                if previous_stamp == stamp - interval:
+                    closed_move = close - previous
+                else:
+                    closed_move = None
+                if side is not None and side != confirmed:
+                    prior_side, confirmed = confirmed, side
+                    confirmed_at = end
+            stop = next_stop
+        previous = close
+        previous_stamp = stamp
+    return provisional, confirmed, confirmed_at, prior_side, closed_move
+
+def _market_window_evidence(a):
+    """Measure activity without requiring a directional trend.
+
+    Only explicit compression of both price travel and candle ranges counts as
+    slow evidence. Direction changes and volume alone never close the gate.
+    Thresholds are relative to the observed volatility, not a fixed BTC distance.
+    """
+    if not np.all(np.isfinite(a)):
+        return None
+    atr = float(np.median(a[-6:-1, 5]))
+    if atr <= 0:
+        return None
+    moves = np.diff(a[:, 3])
+    recent = moves[-3:]
+    net = float(recent.sum())
+    ranges = a[:, 1] - a[:, 2]
+    # A price-relative floor prevents hours of tiny candles from becoming
+    # "active" merely because the rolling ATR has also shrunk to nearly zero.
+    reference = max(atr, float(np.median(ranges[:-6])),
+                    float(np.median(a[:, 3])) * .00005, 1e-12)
+    # Six completed minutes describe the regime; single candles do not toggle it.
+    travel = float(np.abs(moves[-6:]).sum()) / reference
+    mean_range = float(np.mean(ranges[-6:])) / reference
+    span = float(np.max(a[-6:, 1]) - np.min(a[-6:, 2])) / reference
+    slow = travel <= .90 and mean_range <= .40 and span <= .85
+    active = travel >= 1.80 and mean_range >= .55 and span >= 1.10
+    efficiency3 = abs(net) / max(float(np.abs(recent).sum()), 1e-12)
+    efficiency5 = abs(float(moves[-5:].sum())) / max(float(np.abs(moves[-5:]).sum()), 1e-12)
+    base_volume = float(np.mean(a[:-6, 4]))
+    volume = float(np.mean(a[-6:, 4])) / base_volume if base_volume > 0 else 0.0
+    return {"strong_entry": bool(active), "continuing": bool(not slow),
+            "slow_evidence": bool(slow),
+            "direction": "UP" if net >= 0 else "DOWN", "net": net,
+            "atr": atr, "strength_atr": abs(net)/atr,
+            "efficiency3": efficiency3, "efficiency5": efficiency5,
+            "pace": travel/6, "volume_ratio": volume,
+            "body_ratio": float(np.mean(np.abs(a[-6:, 3]-a[-6:, 0]) /
+                                         np.maximum(ranges[-6:], 1e-12))),
+            "activity_travel": travel, "activity_range": mean_range,
+            "activity_span": span}
+
+def _strong_market_context(one, live_price, now=None):
+    """Replay observed closed candles, independent of refreshes and round changes.
+
+    Sustained activity activates the gate. Three consecutive completed one-minute
+    evaluations with explicit slow compression deactivate. Repeated ticks never count as
+    additional weak candles. Re-entry always needs strong evidence again.
+    This is a market-regime heuristic, not a calibrated forecast.
+    """
+    blocked = {"allowed": False, "direction": None, "reason": "SIN DATOS ACTUALES"}
+    try:
+        now = pd.Timestamp.now(tz="UTC") if now is None else pd.Timestamp(now)
+        now = now.tz_localize("UTC") if now.tzinfo is None else now.tz_convert("UTC")
+        x = one.copy()
+        x["time"] = pd.to_datetime(x["time"], utc=True, errors="coerce")
+        x = x.sort_values("time")
+        x = x[x["time"] + pd.Timedelta(minutes=1) <= now]
+        if len(x) < 26:
+            return blocked
+        latest = x.tail(26)
+        if (not latest["time"].diff().iloc[1:].eq(pd.Timedelta(minutes=1)).all() or
+                (now-(x["time"].iloc[-1]+pd.Timedelta(minutes=1))).total_seconds() > 90):
+            return blocked
+        a = x[["open", "high", "low", "close", "volume", "atr"]].astype(float).to_numpy()
+        valid = (np.all(np.isfinite(a), axis=1) & np.all(a[:, :4] > 0, axis=1) &
+                 (a[:, 4] >= 0) & (a[:, 1] >= a[:, 2]) &
+                 (a[:, 1] >= np.maximum(a[:, 0], a[:, 3])) &
+                 (a[:, 2] <= np.minimum(a[:, 0], a[:, 3])))
+        price = float(live_price)
+        if not valid[-26:].all() or not np.isfinite(price) or price <= 0:
+            return blocked
+        active = False; weak = 0; side = None; evidence = None
+        stamps = x["time"].reset_index(drop=True)
+        for end in range(26, len(a)+1):
+            start = end-26
+            contiguous = stamps.iloc[start:end].diff().iloc[1:].eq(pd.Timedelta(minutes=1)).all()
+            evidence = _market_window_evidence(a[start:end]) if valid[start:end].all() and contiguous else None
+            if evidence is None:
+                active = False; weak = 0; side = None
+                continue
+            if evidence["strong_entry"]:
+                active = True; weak = 0
+            elif active:
+                weak = weak+1 if evidence["slow_evidence"] else 0
+                if weak >= 3:
+                    active = False; side = None
+            if active and evidence["net"] != 0:
+                side = evidence["direction"]
+        if evidence is None:
+            return blocked
+        allowed = bool(active)
+        # Live retracements can defer a specific entry, but never blink the
+        # market-regime banner between closed-candle evaluations.
+        live_ok = bool(side and (1 if side == "UP" else -1)*(price-a[-1, 3]) >= -.15*evidence["atr"])
+        return {**evidence, "allowed": allowed, "direction": side if allowed else None,
+                "reason": ("IMPULSO FUERTE" if evidence["strong_entry"] else "MERCADO ACTIVO")
+                          if allowed else "MERCADO LENTO",
+                "evaluated_at": now.timestamp(), "live_entry_ok": live_ok,
+                "weak_closed_evaluations": weak, "last_closed_price": float(a[-1, 3]),
+                "last_closed_at": stamps.iloc[-1].isoformat()}
+    except (KeyError, TypeError, ValueError, IndexError, OverflowError):
+        return blocked
+
+def _market_entry_allowed(signal, side, now=None):
+    """Activity gate only; UT decides direction. Absent/stale evidence blocks entries."""
+    signal = signal or {}
+    gate = signal.get("market_entry_gate") or {}
+    stamp = _plan_number(gate.get("evaluated_at"))
+    current = pd.Timestamp.now(tz="UTC").timestamp() if now is None else pd.Timestamp(now).timestamp()
+    return (signal.get("data_valid") is not False and side in ("UP", "DOWN") and
+            gate.get("allowed") is True and
+            stamp is not None and 0 <= current-stamp <= SIGNAL_CONFIRM_MAX_GAP)
+
+def _pause_market_signal(state, reason):
+    # Preserve the first real signal and its outcome; pause only the live arrow.
+    state.update(active_direction=None, active_since=None, pending_direction=None,
+                 pending_count=0, pending_since=None, pending_last_at=None,
+                 pending_price_source=None, opening_market_samples=[],
+                 market_wait_reason=reason, opening_conflict=reason)
+
+def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
+    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
+    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
+    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
+    def direction(row):
+        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
+        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
+    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
+    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
+    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
+    target_atr=(distance/atr) if distance is not None else 0.0
+    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
+    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
+    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
+    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
+    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
+    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
+    market_gate = _strong_market_context(one, price)
+    # Evaluate all routes for both directions before choosing any candidate.
+    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
+    flow_context = {"direction":flow_side, "valid":False}
+    if isinstance(whale,dict):
+        flow_context["valid"] = (flow_side in ("UP","DOWN") and
+            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
+            float(whale.get("flow_strength") or 0)>=.20)
+    now = pd.Timestamp.now(tz="UTC")
+    ut_open, ut_closed, ut_closed_at, prior_side, closed_move = _ut_bot_events(df, 2, now)
+    ut_short, _, _, _, _ = _ut_bot_events(df, 1, now)
+    ut = {"direction": ut_closed, "ut_short": ut_short, "prior_side": prior_side,
+          "open_side": ut_open, "received_at": df.attrs.get("received_at"),
+          "closed_move": closed_move,
+          "closed_at": ut_closed_at.isoformat() if ut_closed_at is not None else None}
+    candidate = None
+    quality = "SIN CONFIRMACIÓN"
+    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
+                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
+    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
+    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
+    # Closing support adapts continuously; it is NOT a calibrated win probability.
+    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
+        weight = .35 + .35 * (180 - seconds_left) / 180
+        evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
+    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
+    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
+    return {"market_entry_gate":market_gate,"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"ut_signal":ut,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+
+def _reset_withdrawal(state):
+    state.update(withdraw_direction=None, withdraw_source=None, withdraw_count=0,
+                 withdraw_since=None, withdraw_last_at=None, retention_warning=None)
+
+def _round_opening_crosscheck(state, candidate, signal, now, market):
+    """Confirm the first signal with distinct live observations of this round.
+
+    The rolling window is evidence, not a timer that automatically releases a
+    signal. Source timestamps prevent cached prices from counting twice.
+    """
+    def wait(reason):
+        state["opening_conflict"] = reason
+        return None
+    start = pd.to_datetime(market.get("open_time"), utc=True, errors="coerce")
+    end = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+    if pd.isna(start) and not pd.isna(end):
+        start = end - pd.Timedelta(minutes=15)
+    source = signal.get("price_source")
+    target = _plan_number(get_target_from_market(market))
+    key = [str(start), str(end), source, target, candidate]
+    if state.get("opening_market_key") != key:
+        state.update(opening_market_key=key, opening_market_samples=[])
+    price = _plan_number(signal.get("price"))
+    observed = getattr(_PRICE_OBSERVATIONS, "values", {}).get(source)
+    stamp = pd.Timestamp(now).timestamp()
+    if (pd.isna(start) or pd.isna(end) or target is None or price is None
+            or price <= 0 or candidate not in ("UP", "DOWN")
+            or signal.get("data_valid") is False or observed is None):
+        state["opening_market_samples"] = []
+        return wait("Esperando lecturas nuevas del mercado")
+    observed = float(observed)
+    if not np.isfinite(observed) or not start.timestamp() <= observed <= stamp:
+        state["opening_market_samples"] = []
+        return wait("Esperando precio de esta ronda")
+    if stamp-observed > SIGNAL_CONFIRM_MAX_GAP:
+        state["opening_market_samples"] = []
+        return wait("Esperando precio actualizado")
+    tape = state.get("opening_market_samples") or []
+    if tape and (observed < tape[-1][0] or observed-tape[-1][0] > SIGNAL_CONFIRM_MAX_GAP):
+        tape = []
+    tape = [x for x in tape if 0 <= stamp-x[0] <= 16]
+    if not tape or observed-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
+        tape = tape + [[observed, price]]
+    state["opening_market_samples"] = tape
+    if len(tape) < 4 or tape[-1][0]-tape[0][0] < 6:
+        return wait("Analizando lecturas nuevas de esta ronda")
+    prices = [x[1] for x in tape]
+    sign = 1 if candidate == "UP" else -1
+    steps = [sign*(b-a) for a,b in zip(prices, prices[1:])]
+    travel = sum(abs(x) for x in steps)
+    net = sum(steps)
+    split = len(tape)//2
+    recent = sign*(prices[-1]-prices[split])
+    if (travel <= 0 or net/travel < .60 or recent <= 0
+            or sum(x > 0 for x in steps)/len(steps) < .60 or steps[-1] < 0):
+        return wait("Movimiento sin respaldo suficiente para " + candidate)
+    # Repeated target crossings indicate indecision rather than confirmation.
+    sides = [1 if p > target else -1 for p in prices if p != target]
+    if sum(a != b for a,b in zip(sides, sides[1:])) > 1:
+        return wait("Precio indeciso alrededor del target")
+    gap = sign*(target-price)
+    velocity = min(net/(tape[-1][0]-tape[0][0]),
+                   recent/(tape[-1][0]-tape[split][0]))
+    remaining = end.timestamp()-stamp
+    if gap > 0 and velocity*remaining < gap:
+        return wait("Movimiento insuficiente frente al target")
+    state["opening_conflict"] = None
+    return candidate
+
+def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
+    """Publica la dirección vigente del indicador en una ronda válida."""
+    state["opening_conflict"] = None
+    market = market or {}
+    now_ts = pd.Timestamp(now)
+    end = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+    round_open = pd.to_datetime(market.get("open_time"), utc=True, errors="coerce")
+    if pd.isna(round_open) and not pd.isna(end):
+        round_open = end - pd.Timedelta(minutes=15)
+
+    _reset_withdrawal(state)
+    state.update(pending_direction=None, pending_count=0, pending_since=None,
+                 pending_last_at=None, pending_price_source=None)
+    if not pd.isna(round_open):
+        if state.get("ut_round_policy") != 1:
+            state.update(active_direction=None, active_since=None, exit_plan=None, ut_round_policy=1)
+
+    signal = signal or {}
+    gate = signal.get("market_entry_gate") or {}
+    gate_side = gate.get("direction")
+    if not _market_entry_allowed(signal, gate_side, now):
+        _pause_market_signal(state, gate.get("reason") or "SIN DATOS ACTUALES")
+        return
+    observed = getattr(_PRICE_OBSERVATIONS, "values", {}).get(signal.get("price_source"))
+    if (signal.get("price_source") not in ("COINBASE", "KALSHI LIVE") or observed is None or
+            not np.isfinite(observed) or not 0 <= now_ts.timestamp()-observed <= SIGNAL_CONFIRM_MAX_GAP):
+        _pause_market_signal(state, "SIN PRECIO EN VIVO ACTUAL")
+        return
+    state["market_wait_reason"] = None
+    if (pd.isna(round_open) or pd.isna(end) or not round_open <= now_ts < end
+            or signal.get("data_valid") is False):
+        _pause_market_signal(state, "SIN RONDA O DATOS ACTUALES")
+        return
+    seconds_left = (end - now_ts).total_seconds()
+
+    # Keep the last confirmed UT flip separate from the displayed Kalshi side.
+    ut = signal.get("ut_signal") or {}
+    event_at = pd.to_datetime(ut.get("closed_at"), utc=True, errors="coerce")
+    saved_at = pd.to_datetime(state.get("ut_flip_at"), utc=True, errors="coerce")
+    if (candidate in ("UP", "DOWN") and not pd.isna(event_at) and event_at <= now_ts
+            and (pd.isna(saved_at) or event_at > saved_at)):
+        state.update(ut_flip_at=event_at.isoformat(), ut_side=candidate,
+                     ut_prior_side=ut.get("prior_side") or state.get("ut_side"),
+                     ut_flip_fallback=state.get("active_direction"))
+        saved_at = event_at
+    side = state.get("ut_side")
+    if side not in ("UP", "DOWN") or pd.isna(saved_at) or saved_at > now_ts:
+        _pause_market_signal(state, "SIN DIRECCIÓN CONFIRMADA")
+        return
+
+    active = state.get("active_direction")
+    if state.get("first_direction") is None:
+        confirmed = _round_opening_crosscheck(state, candidate, signal, now, market)
+        if confirmed != side:
+            state.update(active_direction=None, active_since=None)
+            return
+        received_at = pd.to_datetime(ut.get("received_at"), utc=True, errors="coerce")
+        if (now_ts < round_open + pd.Timedelta(seconds=NEW_ROUND_WAIT)
+                or pd.isna(received_at) or not round_open <= received_at <= now_ts
+                or candidate != side or event_at != saved_at):
+            return
+        # An opposite open candle pauses the first signal until the UT resolves it.
+        if ut.get("open_side") in ("UP", "DOWN") and ut["open_side"] != side:
+            return
+        active = side
+    elif saved_at <= round_open:
+        active = side
+    else:
+        fallback = state.get("ut_flip_fallback") or state.get("ut_prior_side")
+        price = _plan_number(signal.get("price"))
+        target = _plan_number(get_target_from_market(market))
+        if price is not None and target is not None:
+            sign = 1 if side == "UP" else -1
+            gap = sign * (target - price)
+            # Use the latest closed two-minute move, scaled to the remaining time.
+            move = _plan_number(ut.get("closed_move"))
+            if gap <= 0 or (move is not None and sign * move * seconds_left / 120 >= gap):
+                active = side
+            elif fallback in ("UP", "DOWN"):
+                active = fallback
+        elif active is None:
+            active = fallback
+
+    if not _market_entry_allowed(signal, active, now):
+        _pause_market_signal(state, "DIRECCIÓN SIN IMPULSO FUERTE")
+        return
+    if state.get("active_direction") != active:
+        # Fresh observations are mandatory for re-entry and reversal as well.
+        if _round_opening_crosscheck(state, active, signal, now, market) != active:
+            # A prospective reversal must not erase the confirmed live signal.
+            # A blocked regime or invalid data still pauses it above.
+            return
+    if state.get("active_direction") != active:
+        state.update(active_direction=active, active_since=now)
+    if state.get("first_direction") is None:
+        state.update(first_direction=active, first_signal_time=now,
+                     first_signal_seconds=seconds_left,
+                     first_signal_price=get_yes_ask(market) if active == "UP" else get_no_ask(market))
 
 
-st.markdown(
-    '<style>.stApp{background:#06121a}[data-testid="stHeader"]{display:none}.block-container{max-width:none;padding:.25rem .35rem 0}#alpha-chart-stable-host.expanded{position:fixed;inset:0;z-index:2147483647;height:100dvh;background:#06121a;overflow:hidden}#alpha-chart-stable-host.expanded iframe{height:100%!important}</style>',
-    unsafe_allow_html=True,
-)
-live_chart()
-initial_html = st.session_state["_alpha_chart_html_initial"]
-safe_html = json.dumps(initial_html, ensure_ascii=False).replace("<", "\\u003c")
-st.html(
-    '<div id="alpha-chart-stable-host" style="width:100%;min-height:0"></div>'
-    '<script>(function(){'
-    'const host=document.getElementById("alpha-chart-stable-host");'
-    'if(!host)return;'
-    'let frame=host.querySelector("iframe");'
-    'if(!frame){frame=document.createElement("iframe");'
-    'frame.setAttribute("title","Gráfica BTC interactiva");'
-    'frame.style.cssText="width:100%;height:600px;border:0;display:block;background:#06121a";'
-    'frame.setAttribute("scrolling","yes");'
-    'frame.srcdoc=' + safe_html + ';host.appendChild(frame);}'
-    'window.__alphaPushChart=function(payload){'
-    'window.__alphaNextChart=payload;'
-    'if(frame.contentWindow)frame.contentWindow.postMessage({kind:"alpha-chart-update",payload:payload},"*");'
-    '};'
-    'function fitChartHeight(){try{'
-    'const panel=frame.contentDocument&&frame.contentDocument.querySelector(".panel");'
-    'if(!panel)return;const pixels=Math.max(360,Math.ceil(panel.getBoundingClientRect().bottom+8));'
-    'if(frame.style.height!==pixels+"px")frame.style.height=pixels+"px";'
-    '}catch(e){}}'
-    'window.addEventListener("resize",fitChartHeight);'
-    'frame.addEventListener("load",function(){'
-    'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
-    'fitChartHeight();try{const panel=frame.contentDocument.querySelector(".panel");'
-    'if(panel)new ResizeObserver(fitChartHeight).observe(panel);}catch(e){}'
-    '});'
-    'if(window.__alphaNextChart)window.__alphaPushChart(window.__alphaNextChart);'
-    '})();</script>',
-    unsafe_allow_javascript=True,
-)
+def _execution_signal(df, target, seconds_left, live_price, source):
+    # Same candidacy rules as app 58 build_signal; no tracing/UI side effects.
+    sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
+    sig.update(price_source=source, data_valid=True, engine_revision=SIGNAL_ENGINE_REVISION)
+    side = sig['ut_signal']['direction']
+    if seconds_left is not None and 0 < seconds_left <= 900 and target is not None and _market_entry_allowed(sig, side):
+        sig['candidate'] = side
+        sig['quality'] = sig['entry_route_internal'] = 'SEÑAL DIRECTA'
+    if not _market_entry_allowed(sig, side):
+        sig['candidate'] = None
+        sig['quality'] = sig['entry_route_internal'] = 'ESPERANDO · ' + sig['market_entry_gate']['reason']
+    return sig
+
+def _entry_route_checks(signal, seconds_left):
+    # Execution adapter: old indicator routes must not override the UT brain.
+    side = (signal or {}).get('candidate')
+    valid = seconds_left is not None and 0 < seconds_left <= 900 and _market_entry_allowed(signal, side)
+    return {'valid': bool(valid), 'sides': {s: [{'complete': bool(valid and side == s), 'name': 'UT APP 58'}] for s in ('UP','DOWN')}}
+
+
+
+# --- APP 84 STRUCTURAL SIGNAL BRAIN ---
+def _entry_route_checks(sig, seconds_left):
+    """Evaluate both sides from the same evidence; shared by engine and UI."""
+    required = ("rsi", "rsi3", "rsi5", "adx", "vwap_atr", "macd1", "macd3",
+                "vol_ratio", "mom3", "mom5", "target_atr", "price_ema9_atr")
+    if sig.get("data_valid") is False or any(_plan_number(sig.get(k)) is None for k in required):
+        return {"valid":False, "sides":{}, "noise_ok":False}
+    r1,r3,r5,adx,vw,m1,m3,vol,mom,mom5,cushion,live_ema = (float(sig[k]) for k in required)
+    d3,d5 = sig.get("trend3"), sig.get("trend5")
+    impulse = sig.get("impulse_internal") or {}
+    noise_ok = not (abs(vw)<.18 and (sig.get("distance") is None or abs(cushion)<.22) and adx<20)
+    sides = {}
+    for side,sign,other in (("UP",1,"DOWN"),("DOWN",-1,"UP")):
+        up = sign == 1
+        exhausted = bool(impulse.get("exhaust_up" if up else "exhaust_down"))
+        strength = float(impulse.get("up" if up else "down", 0))
+        reliable = bool(impulse.get("reliable"))
+        current = [
+            ("EMA de 1 minuto y precio actual a favor", sig.get("ema") == ("BULL" if up else "BEAR") and live_ema*sign>0),
+            ("RSI y momentum actuales a favor", (r1>=53 if up else r1<=47) and mom*sign>=.025),
+            ("MACD de 1 minuto y VWAP a favor", m1*sign>0 and vw*sign>=.03),
+            ("Impulso actual sin agotamiento detectado", not exhausted),
+        ]
+        early_five = d5 != other or (reliable and strength>=.75 and mom*sign>.04 and vol>=.9)
+        rsi_vwap = (r1>=52 and vw>=.05) if up else (r1<=48 and vw<=-.05)
+        routes = [
+            ("IMPULSO ACTUAL", current),
+            ("TENDENCIA ALINEADA", [
+                ("Tendencias de 3 y 5 minutos a favor", d3==side and d5==side),
+                ("Fuerza de tendencia o RSI suficientes", adx>=20 or ((r3>=52 and r5>=50) if up else (r3<=48 and r5<=50))),
+                ("VWAP y momentum actual respaldan la tendencia", (vw>-.15 if up else vw<.15) and mom*sign>=.012),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("TEMPRANA", [
+                ("MACD de 3 minutos a favor", m3*sign>0),
+                ("RSI de 1 minuto y VWAP a favor", rsi_vwap),
+                ("Momentum de 3 minutos a favor", mom*sign>.015),
+                ("Contexto de 5 minutos respaldado o superado por fuerza actual", early_five),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("TEMPRANA ACELERADA", [
+                ("MACD y momentum a favor", m3*sign>0 and mom*sign>.015),
+                ("Contexto de 5 minutos no contrario", d5!=other),
+                ("Impulso fuerte con volumen y ADX", reliable and strength>=.65 and adx>=20 and vol>=.8),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+            ("GIRO TEMPRANO", [
+                ("MACD y momentum respaldan el giro", m3*sign>0 and mom*sign>.04),
+                ("RSI de 1 y 3 minutos respaldan el giro", (r1>=54 and r3>=50) if up else (r1<=46 and r3<=50)),
+                ("VWAP y distancia suficientes", vw*sign>=.08 and abs(cushion)>=.30),
+                ("Impulso y volumen suficientes", reliable and strength>=.70 and vol>=.9),
+                ("Sin agotamiento detectado", not exhausted),
+            ]),
+        ]
+        flow = sig.get("flow_context_internal") or {}
+        flow_ok = flow.get("direction")==side and flow.get("valid",False)
+        routes.append(("FLUJO + IMPULSO", [
+            ("Flujo agresor significativo a favor", flow_ok),
+            ("RSI, MACD y precio actuales a favor", (r1>=50 if up else r1<=50) and m1*sign>0 and live_ema*sign>0),
+            ("Momentum y VWAP a favor", mom*sign>=.012 and vw*sign>=-.04),
+            ("Contexto contrario corroborado por momentum", d5!=other or (mom5*sign>=.025 and abs(mom)>=.025)),
+            ("Impulso fiable sin agotamiento", reliable and not exhausted),
+        ]))
+        target_ok = True
+        if sig.get("distance") is not None and seconds_left is not None:
+            remaining = float(np.clip(seconds_left,0,900))
+            weight = .12+.88*(1-remaining/900)**1.6
+            tolerance = 1.8-1.4*weight
+            if -sign*cushion>tolerance:
+                target_ok = (reliable and strength>=.75 and mom*sign>.04 and not exhausted
+                             and (all(ok for _,ok in current) or d3==side or d5==side))
+        sides[side] = []
+        for name,checks in routes:
+            checks = checks+[("Fuera de la zona de ruido",noise_ok),
+                            ("Distancia al target y tiempo respaldan la dirección",target_ok)]
+            sides[side].append({"name":name,"checks":checks,"met":sum(bool(ok) for _,ok in checks),
+                                "total":len(checks),"complete":all(bool(ok) for _,ok in checks)})
+    return {"valid":True,"sides":sides,"noise_ok":noise_ok}
+
+def _structure_context(df, price, atr, rvol):
+    """Same previous-20-candle levels used by the chart; no look-ahead.
+
+    Distinguish confirmed breaks from rejection, rather than treating every
+    touch of a level as a reversal. ATR scales the comparison to volatility.
+    """
+    candles = df.tail(22)
+    if len(candles) < 21:
+        return {"available": False, "support": None, "resistance": None,
+                "up_blocked": False, "down_blocked": False, "event": "INSUFFICIENT_DATA"}
+    prior = candles.iloc[-21:-1]
+    last = candles.iloc[-1]
+    support = float(prior["low"].min())
+    resistance = float(prior["high"].max())
+    op, hi, lo, close = (float(last[k]) for k in ("open", "high", "low", "close"))
+    span = max(hi-lo, 1e-9)
+    body = abs(close-op)
+    upper_wick = hi-max(op, close)
+    lower_wick = min(op, close)-lo
+    # Rejection requires a level test and a meaningful counter-direction candle.
+    rejection_up = (hi >= resistance and close < resistance and close < op
+                    and upper_wick >= body * 0.7 and upper_wick/span >= .25)
+    rejection_down = (lo <= support and close > support and close > op
+                      and lower_wick >= body * 0.7 and lower_wick/span >= .25)
+    # Confirmed continuation requires closing beyond the level with a body
+    # in the breakout direction and volume or a meaningful ATR-sized body.
+    break_up = (close > resistance and close > op and
+                (rvol >= 1.15 or body >= atr*.45))
+    break_down = (close < support and close < op and
+                  (rvol >= 1.15 or body >= atr*.45))
+    # Near a boundary without breakout confirmation, do not chase into it
+    # when the last candle is already turning against the proposed entry.
+    near_resistance = 0 <= resistance-price <= atr*.45
+    near_support = 0 <= price-support <= atr*.45
+    up_blocked = bool(rejection_up or (near_resistance and close < op and not break_up))
+    down_blocked = bool(rejection_down or (near_support and close > op and not break_down))
+    event = ("RESISTANCE_REJECTION" if rejection_up else
+             "SUPPORT_REJECTION" if rejection_down else
+             "BREAKOUT_UP" if break_up else "BREAKOUT_DOWN" if break_down else
+             "NEAR_RESISTANCE" if near_resistance else
+             "NEAR_SUPPORT" if near_support else "NONE")
+    return {"available": True, "support": support, "resistance": resistance,
+            "up_blocked": up_blocked, "down_blocked": down_blocked,
+            "break_up": bool(break_up), "break_down": bool(break_down),
+            "event": event}
+
+def _level_decision_context(df, price, atr, seconds_left, target, mom3, rsi, rvol, whale):
+    """Unified price-structure decision for the OFFICIAL signal only.
+
+    Look for repeatedly tested zones, current rejection/continuation, and the
+    remaining time relative to target distance. No fixed BTC dollar limits.
+    """
+    ctx = {"event":"NONE", "veto":None, "reversal":None,
+           "support":None, "resistance":None, "breakout":None}
+    if len(df) < 26 or not np.isfinite(atr) or atr <= 0:
+        return ctx
+    past = df.iloc[-65:-3]
+    recent = df.iloc[-3:]
+    if len(past) < 20:
+        return ctx
+    support = float(past["low"].min())
+    resistance = float(past["high"].max())
+    tol = float(atr) * .40
+    upper_tests = int((past["high"] >= resistance-tol).sum())
+    lower_tests = int((past["low"] <= support+tol).sum())
+    latest = recent.iloc[-1]
+    previous = recent.iloc[-2]
+    close = float(latest["close"])
+    prev_close = float(previous["close"])
+    op = float(latest["open"])
+    hi = float(latest["high"])
+    lo = float(latest["low"])
+    volume_ok = bool(rvol >= 1.05)
+    whale = whale if isinstance(whale,dict) else {}
+    buy = float(whale.get("buy30") or 0)
+    sell = float(whale.get("sell30") or 0)
+    bearish_pressure = mom3 < 0 and (rsi < 52 or sell > buy)
+    bullish_pressure = mom3 > 0 and (rsi > 48 or buy > sell)
+    # Breakout confirmation uses direction, continuation and volume/impulse.
+    breakout_up = (close > resistance+tol and prev_close > resistance
+                   and close >= prev_close and (volume_ok or mom3 > .04))
+    breakout_down = (close < support-tol and prev_close < support
+                     and close <= prev_close and (volume_ok or mom3 < -.04))
+    ctx.update(support=support,resistance=resistance,
+               resistance_tests=upper_tests,support_tests=lower_tests)
+    if breakout_up:
+        ctx.update(event="BREAKOUT_UP",breakout="UP")
+        return ctx
+    if breakout_down:
+        ctx.update(event="BREAKOUT_DOWN",breakout="DOWN")
+        return ctx
+    # A rejection may begin with a wick, but requires a counter-move.
+    rejected_resistance = (upper_tests >= 2
+        and float(recent["high"].max()) >= resistance-tol
+        and close < resistance and close < prev_close and bearish_pressure)
+    rejected_support = (lower_tests >= 2
+        and float(recent["low"].min()) <= support+tol
+        and close > support and close > prev_close and bullish_pressure)
+    if rejected_resistance:
+        ctx.update(event="RESISTANCE_REJECTION",veto="UP",reversal="DOWN")
+    elif rejected_support:
+        ctx.update(event="SUPPORT_REJECTION",veto="DOWN",reversal="UP")
+    else:
+        # At an established boundary, don't chase an old trend into a new
+        # counter-direction candle; no automatic opposite signal.
+        if upper_tests >= 2 and resistance-tol <= price <= resistance+tol and close < op:
+            ctx.update(event="RESISTANCE_WARNING",veto="UP")
+        elif lower_tests >= 2 and support-tol <= price <= support+tol and close > op:
+            ctx.update(event="SUPPORT_WARNING",veto="DOWN")
+    # Close to settlement, countertrend calls need plausible target crossing.
+    # Use observed recent volatility, not a fixed dollar or seconds cutoff.
+    if ctx["reversal"] and seconds_left is not None and target is not None:
+        seconds = max(0.,float(seconds_left))
+        recent_speed = float(recent["close"].diff().abs().dropna().mean()) / 60.
+        travel = max(recent_speed, float(atr)/60.*.35) * seconds
+        distance = float(price)-float(target)
+        required = max(0.,distance) if ctx["reversal"]=="DOWN" else max(0.,-distance)
+        if seconds <= 0 or required > travel:
+            ctx["reversal"] = None
+            ctx["event"] += "_TARGET_UNREACHABLE"
+    return ctx
+
+def _opening_level_gate(df, price, atr, rvol, target=None):
+    """Opening protection based on the SAME previous 20 candles as the chart.
+
+    Block chasing a boundary, not a confirmed counter-direction rejection.
+    A verified break can authorize continuation. This is an opening-entry
+    gate, not a prohibition throughout the entire round.
+    """
+    result = {"blocked": ["UP", "DOWN"], "reason": "LEVEL_DATA_INSUFFICIENT",
+              "support": None, "resistance": None,
+              "break_up": False, "break_down": False}
+    if (df is None or len(df) < 21 or price is None or target is None
+            or not np.isfinite(float(price)) or not np.isfinite(float(target))
+            or not np.isfinite(float(atr)) or float(atr) <= 0):
+        return result
+    ctx = _structure_context(df, float(price), float(atr), rvol)
+    if not ctx.get("available"):
+        return result
+    support, resistance = ctx["support"], ctx["resistance"]
+    width = float(atr) * .65
+    near_support = abs(float(target)-support) <= width
+    near_resistance = abs(float(target)-resistance) <= width
+    blocked = []
+    if near_resistance and not ctx["break_up"]:
+        blocked.append("UP")
+    if near_support and not ctx["break_down"]:
+        blocked.append("DOWN")
+    # When the target is clear, a live approach to the boundary also requires
+    # rejection/breakout evidence before chasing through the level.
+    if abs(float(price)-resistance) <= width and not ctx["break_up"]:
+        blocked.append("UP")
+    if abs(float(price)-support) <= width and not ctx["break_down"]:
+        blocked.append("DOWN")
+    result.update(blocked=list(dict.fromkeys(blocked)),
+                  reason="OPENING_LEVEL_CAUTION" if blocked else "NONE",
+                  support=support, resistance=resistance,
+                  break_up=ctx["break_up"], break_down=ctx["break_down"])
+    return result
+
+def _signal_engine_without_trace(df, target, seconds_left, live_price=None, whale=None):
+    one=add_indicators(df); three=_resample_indicators(df,3); five=_resample_indicators(df,5)
+    l1,l3,l5=one.iloc[-1],three.iloc[-1],five.iloc[-1]
+    candle_price=float(l1["close"]); price=float(live_price) if live_price is not None else candle_price
+    def direction(row):
+        bull=(row["ema9"]>row["ema21"] and row["macd_hist"]>=0 and row["plus_di"]>=row["minus_di"])
+        bear=(row["ema9"]<row["ema21"] and row["macd_hist"]<=0 and row["minus_di"]>=row["plus_di"])
+        return "UP" if bull else "DOWN" if bear else "NEUTRAL"
+    d3,d5=direction(l3),direction(l5); aligned=d3 if d3==d5 and d3!="NEUTRAL" else "NEUTRAL"
+    atr=float(l1["atr"]) if pd.notna(l1["atr"]) and l1["atr"]>0 else max(price*.0005,1)
+    distance=(price-target) if target is not None else None; distance_pct=(distance/target*100) if target else None
+    target_atr=(distance/atr) if distance is not None else 0.0
+    vwap=float(l1["vwap"]) if pd.notna(l1["vwap"]) else price; vwap_atr=(price-vwap)/atr
+    adx5=float(l5["adx"]) if pd.notna(l5["adx"]) else 0.0; rsi1=float(l1["rsi"]); rsi3=float(l3["rsi"]); rsi5=float(l5["rsi"])
+    rvol=float(l1["vol_ratio"]) if pd.notna(l1["vol_ratio"]) else 1.0
+    mom3=float(l1["mom3"]) if pd.notna(l1["mom3"]) else 0.0; mom5=float(l1["mom5"]) if pd.notna(l1["mom5"]) else 0.0; mom15=float(l1["mom15"]) if pd.notna(l1["mom15"]) else 0.0
+    trend_strong=adx5>=20; near_noise=abs(vwap_atr)<0.18 and (distance is None or abs(target_atr)<0.22)
+    impulse = _internal_impulse_context(one, price, atr, mom3, mom5, mom15, rvol)
+    # Evaluate all routes for both directions before choosing any candidate.
+    flow_side = (whale or {}).get("flow_direction") if isinstance(whale,dict) else None
+    flow_context = {"direction":flow_side, "valid":False}
+    if isinstance(whale,dict):
+        flow_context["valid"] = (flow_side in ("UP","DOWN") and
+            float(whale.get("buy30") or 0)+float(whale.get("sell30") or 0)>=500_000 and
+            float(whale.get("flow_strength") or 0)>=.20)
+    route_input = {"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"adx":adx5,"vwap_atr":vwap_atr,
+        "macd1":float(l1["macd_hist"]),"macd3":float(l3["macd_hist"]),"vol_ratio":rvol,
+        "mom3":mom3,"mom5":mom5,"target_atr":target_atr,"distance":distance,
+        "price_ema9_atr":(price-float(l1["ema9"]))/atr,
+        "ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR",
+        "trend3":d3,"trend5":d5,"impulse_internal":impulse,"flow_context_internal":flow_context}
+    route_view = _entry_route_checks(route_input, seconds_left)
+    eligible = {side:[route for route in route_view["sides"].get(side,[]) if route["complete"]]
+                for side in ("UP","DOWN")}
+    # One coherent structure evaluation, shared by all official entry routes.
+    # PRESEÑAL is computed separately and is not modified.
+    structure = _structure_context(df, price, atr, rvol)
+    levels = _level_decision_context(
+        df, price, atr, seconds_left, target, mom3, rsi1, rvol, whale)
+    structure["level_decision"] = levels
+    if levels["veto"] in ("UP", "DOWN"):
+        eligible[levels["veto"]] = []
+    if levels["reversal"] in ("UP", "DOWN"):
+        side = levels["reversal"]
+        opposite = "DOWN" if side == "UP" else "UP"
+        if not eligible[opposite]:
+            eligible[side].append({
+                "name": "RECHAZO ESTRUCTURAL CONFIRMADO",
+                "checks": [("Nivel probado previamente", True),
+                           ("Rechazo y presión actual", True),
+                           ("Tiempo y distancia al target compatibles", True)],
+                "met": 3, "total": 3, "complete": True})
+    # Preserve chart-level protection; confirmed breakouts may pass it.
+    if structure["up_blocked"] and levels["breakout"] != "UP":
+        eligible["UP"] = []
+    if structure["down_blocked"] and levels["breakout"] != "DOWN":
+        eligible["DOWN"] = []
+    # Mandatory boundary gate on the OFFICIAL entry candidate, independent
+    # of route scoring or EMA momentum. Presignal is untouched.
+    opening_levels = _opening_level_gate(df, price, atr, rvol, target)
+    structure["opening_level_gate"] = opening_levels
+    for blocked_side in opening_levels["blocked"]:
+        eligible[blocked_side] = []
+    choices = [side for side in ("UP","DOWN") if eligible[side]]
+    candidate = choices[0] if len(choices)==1 else None
+    quality = eligible[candidate][0]["name"] if candidate else "SIN CONFIRMACIÓN" if not choices else "EVIDENCIA CONTRADICTORIA"
+    flow_support = {"used":quality=="FLUJO + IMPULSO", "direction":flow_side if flow_context["valid"] else None,
+                    "reason":"FLUJO CORROBORADO" if quality=="FLUJO + IMPULSO" else "CONTEXTO"}
+    # Compatibility score: descriptive evidence for existing UI/closing reader; no longer gates entries at +/-4.
+    evidence=(1 if d3=="UP" else -1 if d3=="DOWN" else 0)+(1.5 if d5=="UP" else -1.5 if d5=="DOWN" else 0)+(0.75 if l3["macd_hist"]>0 else -0.75)+(0.75 if l5["plus_di"]>l5["minus_di"] else -0.75)+float(np.clip(target_atr,-2,2))
+    # Closing support adapts continuously; it is NOT a calibrated win probability.
+    if seconds_left is not None and 0 < seconds_left <= 180 and distance is not None:
+        weight = .35 + .35 * (180 - seconds_left) / 180
+        evidence = (1-weight)*evidence + weight*float(np.clip(target_atr, -2, 2))*3
+    up_probability=float(np.clip(50+evidence*7,5,95)); down_probability=100-up_probability
+    momentum="ALCISTA" if aligned=="UP" else "BAJISTA" if aligned=="DOWN" else "NEUTRAL"
+    return {"price":price,"candle_price":candle_price,"rsi":rsi1,"rsi3":rsi3,"rsi5":rsi5,"mom3":mom3,"mom5":mom5,"mom15":mom15,"vol_ratio":rvol,"ema":"BULL" if l1["ema9"]>l1["ema21"] else "BEAR","technical_score":evidence,"target_score":target_atr,"final_score":evidence,"distance":distance,"distance_pct":distance_pct,"momentum":momentum,"up_probability":round(up_probability),"down_probability":round(down_probability),"candidate":candidate,"quality":quality,"trend3":d3,"trend5":d5,"adx":adx5,"plus_di":float(l5["plus_di"]),"minus_di":float(l5["minus_di"]),"macd3":float(l3["macd_hist"]),"macd5":float(l5["macd_hist"]),"atr":atr,"vwap":vwap,"vwap_atr":vwap_atr,"target_atr":target_atr,"impulse_internal":impulse,"entry_route_internal":quality,"flow_support_internal":flow_support,"flow_context_internal":flow_context,"structure_internal":structure,"macd1":float(l1["macd_hist"]),"price_ema9_atr":(price-float(l1["ema9"]))/atr}
+
+def _execution_signal(df, target, seconds_left, live_price, source):
+    # App 84 structure/level brain, no UT Bot and no fixed opening-minute delay.
+    sig = _signal_engine_without_trace(df, target, seconds_left, live_price)
+    sig.update(price_source=source, data_valid=True, engine_revision="app84_structure_hybrid_v1")
+    return sig
+
+def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
+    # No 60-second hold. Preserve fresh-price and structural confirmations.
+    market = market or {}
+    end = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+    current = pd.Timestamp(now)
+    if current.tzinfo is None:
+        current = current.tz_localize("UTC")
+    if pd.isna(end) or current >= end or signal is None or signal.get("data_valid") is False:
+        state.update(active_direction=None, pending_direction=None, pending_count=0)
+        return
+    if candidate not in ("UP", "DOWN"):
+        state.update(pending_direction=None, pending_count=0)
+        return
+    if (state.get("first_direction") is None and
+            candidate in ((signal.get("structure_internal") or {}).get("opening_level_gate") or {}).get("blocked", [])):
+        state.update(pending_direction=None, pending_count=0)
+        return
+    # Require live price evidence; no fixed 60-second observation.
+    confirmed = _round_opening_crosscheck(state, candidate, signal, current, market)
+    if confirmed != candidate:
+        return
+    if state.get("active_direction") != candidate:
+        state.update(active_direction=candidate, active_since=current.isoformat())
+    if state.get("first_direction") is None:
+        state.update(first_direction=candidate, first_signal_time=current.isoformat(),
+                     first_signal_seconds=(end-current).total_seconds(),
+                     first_signal_price=get_yes_ask(market) if candidate == "UP" else get_no_ask(market))
+
+
+engine=types.SimpleNamespace(**{n:globals()[n] for n in ['_confirmation_without_trace', '_entry_route_checks', '_execution_signal', '_fetch_btc_candle_source', '_fetch_current_btc_candles', '_indicator_frame', '_internal_impulse_context', '_market_entry_allowed', '_market_window_evidence', '_pause_market_signal', '_plan_number', '_resample_indicators', '_reset_withdrawal', '_round_opening_crosscheck', '_signal_engine_without_trace', '_structure_context', '_level_decision_context', '_opening_level_gate', '_strong_market_context', '_valid_live_observation', '_validate_btc_candle_frame', 'add_indicators', 'extract_kalshi_btc_price', 'get_event_ticker_from_market', 'get_no_ask', 'get_seconds_remaining', 'get_target_from_market', 'get_yes_ask', 'new_round_state', 'numeric_kalshi_price']})
+import csv
+import hashlib
+import hmac
+import io
+import json
+import math
+import os
+from pathlib import Path
+import secrets
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit, quote
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parent
+API = 'https://external-api.kalshi.com/trade-api/v2'
+DEFAULTS = dict(contracts=1, max_entry_cents=60,
+                take_profit_pct=90, stop_loss_pct=10,
+                max_entries_round=1, daily_goal_dollars=50,
+                max_trade_dollars=10, starting_balance=50,
+                fee_cents_per_contract=2, close_on_reverse=True, risk_pct=10,
+                martingale_enabled=False, martingale_levels=4, martingale_initial=0.50)
+MARTINGALE_SETTINGS = ('martingale_enabled', 'martingale_levels', 'martingale_initial')
+
+def utcnow():
+    return datetime.now(timezone.utc)
+
+def stamp():
+    return utcnow().isoformat()
+
+def clean_json(value):
+    if isinstance(value, dict):
+        return {str(k): clean_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [clean_json(v) for v in value]
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if hasattr(value, 'item'):
+        return clean_json(value.item())
+    return value
+
+def dumps(value):
+    return json.dumps(clean_json(value), ensure_ascii=False, allow_nan=False)
+
+def valid_settings(raw):
+    if not isinstance(raw, dict) or set(raw) != set(DEFAULTS):
+        raise ValueError('Envía todos los ajustes; hay campos desconocidos o ausentes.')
+    bounds = {'contracts':(1,1000), 'max_entry_cents':(2,99),
+              'take_profit_pct':(0,100), 'stop_loss_pct':(0,100),
+              'max_entries_round':(1,100),
+              'daily_goal_dollars':(0,100000),
+              'max_trade_dollars':(1,100000), 'starting_balance':(1,1000000),
+              'fee_cents_per_contract':(0,20), 'risk_pct':(1,100),
+              'martingale_levels':(1,12), 'martingale_initial':(0.01,100000)}
+    out = {}
+    for key, (low, high) in bounds.items():
+        v = raw[key]
+        money_setting = key in ('max_trade_dollars', 'martingale_initial')
+        if isinstance(v, bool) or not isinstance(v, (int,float)) or not math.isfinite(v) or (not money_setting and int(v) != v) or not low <= v <= high:
+            raise ValueError(f'Valor inválido para {key}: {low}–{high}.')
+        out[key] = round(float(v), 2) if money_setting else int(v)
+    for key in ('close_on_reverse', 'martingale_enabled'):
+        if not isinstance(raw[key], bool):
+            raise ValueError(f'El ajuste {key} debe ser sí o no.')
+        out[key] = raw[key]
+    return out
+
+def round_price_chart(market, signal, previous):
+    """Keep the timestamped Kalshi price series isolated from the trading signal."""
+    ticker = market.get('ticker')
+    close = pd.to_datetime(market.get('close_time'), utc=True, errors='coerce')
+    if not ticker or pd.isna(close):
+        return None
+    start = close.timestamp() - 900
+    end = close.timestamp()
+    points = dict(previous['points']) if previous and previous['ticker'] == ticker else {}
+    if signal.get('price_source') == 'KALSHI LIVE':
+        for observed_at, price in getattr(_PRICE_OBSERVATIONS, 'chart_points', ()):
+            if start <= observed_at < end:
+                points[observed_at] = price
+    return {'ticker':ticker, 'start':start, 'end':end, 'points':sorted(points.items())}
+
+
+class MarketData:
+    def __init__(self):
+        self.candles = None
+        self.candle_at = 0
+        self.market = None
+        self.retry_at = 0
+
+    def get(self, path, params=None):
+        if time.monotonic() < self.retry_at:
+            raise ValueError('Kalshi en espera tras límite de consultas.')
+        try:
+            result = requests.get(API+path, params=params, timeout=7).json()
+        except Exception as e:
+            if getattr(e, 'code', None) == 429:
+                self.retry_at = time.monotonic()+15
+            raise
+        if not isinstance(result, dict):
+            raise ValueError('Respuesta Kalshi incompleta.')
+        return result
+
+    def current(self):
+        now = utcnow()
+        def eligible(m):
+            try:
+                end = datetime.fromisoformat(m['close_time'].replace('Z','+00:00'))
+                start = datetime.fromisoformat(m['open_time'].replace('Z','+00:00'))
+                return (str(m['ticker']).startswith('KXBTC15M-') and
+                        m.get('status') in ('active','open') and start <= now < end and
+                        0 < (end-now).total_seconds() <= 900)
+            except (KeyError,ValueError,TypeError):
+                return False
+        if self.market and eligible(self.market):
+            m = self.get('/markets/'+quote(self.market['ticker'],safe=''))['market']
+        else:
+            data = self.get('/markets', {'series_ticker':'KXBTC15M','limit':100,
+                       'min_close_ts':int(now.timestamp()),'max_close_ts':int(now.timestamp())+901})
+            options = sorted([x for x in data.get('markets',[]) if eligible(x)], key=lambda x:x['close_time'])
+            if not options:
+                raise ValueError('No hay ronda BTC 15 min abierta y verificable.')
+            m = self.get('/markets/'+quote(options[0]['ticker'],safe=''))['market']
+        if not eligible(m) or engine.get_target_from_market(m) is None:
+            self.market = None
+            raise ValueError('Ronda sin horario o target verificable; esperando.')
+        self.market = m
+        return m
+
+    def signal(self, market):
+        source = 'KALSHI LIVE'
+        try:
+            event = engine.get_event_ticker_from_market(market)
+            live = self.get('/live_data/events/'+quote(event,safe=''), {'range':'15min'})
+            price = engine.extract_kalshi_btc_price(live)
+            if price is None:
+                raise ValueError('Sin precio fechado.')
+        except Exception:
+            source = 'COINBASE'
+            tick = requests.get('https://api.exchange.coinbase.com/products/BTC-USD/ticker',
+                                params={'_':int(time.time())}, timeout=6).json()
+            price = engine._valid_live_observation(tick.get('price'),tick.get('time'),'COINBASE')
+        if self.candles is None or time.monotonic()-self.candle_at >= 5:
+            self.candles = engine._fetch_current_btc_candles()
+            self.candle_at = time.monotonic()
+        age = (utcnow()-self.candles.iloc[-1]['time'].to_pydatetime()).total_seconds()
+        if not -5 <= age <= 120:
+            raise ValueError('Velas atrasadas: esperando actualización.')
+        remaining = engine.get_seconds_remaining(market)
+        sig = engine._execution_signal(self.candles,engine.get_target_from_market(market),remaining,price,source)
+        return sig
+
+    def book(self, ticker):
+        data = self.get('/markets/'+quote(ticker,safe='')+'/orderbook',{'depth':0})
+        if 'orderbook_fp' in data:
+            b = data['orderbook_fp']
+            yes = self._levels(b.get('yes_dollars'), dollar=True)
+            no = self._levels(b.get('no_dollars'), dollar=True)
+        elif 'orderbook' in data:
+            b = data['orderbook']
+            yes = self._levels(b.get('yes'), dollar=False)
+            no = self._levels(b.get('no'), dollar=False)
+        else:
+            raise ValueError('Libro de órdenes no reconocido.')
+        return {'UP':{'bids':yes,'asks':sorted([(100-p,q) for p,q in no])},
+                'DOWN':{'bids':no,'asks':sorted([(100-p,q) for p,q in yes])},
+                'at':time.monotonic(), 'ticker':ticker}
+
+    @staticmethod
+    def _levels(levels, dollar):
+        if levels is None:
+            return []
+        out = []
+        for price, qty in levels:
+            p = float(Decimal(str(price))*(100 if dollar else 1))
+            q = float(qty)
+            if not math.isfinite(p) or not math.isfinite(q) or not 0 <= p <= 100 or q < 0:
+                raise ValueError('Profundidad inválida.')
+            if q:
+                out.append((p,q))
+        return sorted(out, reverse=True)
+
+def fill_book(levels, quantity, limit=None):
+    left = quantity
+    total = 0.0
+    for price, size in levels:
+        if limit is not None and price > limit:
+            continue
+        take = min(left,size)
+        total += take*price
+        left -= take
+        if left <= 1e-9:
+            return total/quantity
+    return None
+
+def size_for_budget(levels, dollars, fee_cents, limit):
+    remaining = Decimal(str(dollars)) * 100
+    fee = Decimal(str(fee_cents))
+    quantity = 0
+    value = Decimal('0')
+    last_unit = None
+    for raw_price, raw_size in sorted(levels):
+        price = Decimal(str(raw_price))
+        if price > Decimal(str(limit)):
+            continue
+        unit = price + fee
+        if unit <= 0:
+            continue
+        available = int(Decimal(str(raw_size)))
+        if available <= 0:
+            continue
+        affordable = int(remaining // unit)
+        if affordable == 0:
+            break
+        take = min(available, affordable)
+        quantity += take
+        value += price * take
+        remaining -= unit * take
+        last_unit = unit
+        if take < available:
+            break
+    else:
+        if last_unit is not None and remaining >= last_unit:
+            return None
+    if quantity == 0:
+        return None
+    return quantity, float(value / quantity)
+
+class Bot:
+    def __init__(self, db_path=None, feed=None):
+        self.lock = threading.RLock()
+        self.stop_event = threading.Event()
+        self.feed = feed or MarketData()
+        self.db = sqlite3.connect(str(db_path or os.environ.get('ALPHA_DB',ROOT/'data'/'alpha.sqlite3')), check_same_thread=False)
+        self.db.row_factory = sqlite3.Row
+        self.db.execute('PRAGMA journal_mode=WAL')
+        self.db.executescript('''
+            CREATE TABLE IF NOT EXISTS kv(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS rounds(ticker TEXT PRIMARY KEY,state TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS trades(
+              id INTEGER PRIMARY KEY, ticker TEXT NOT NULL, side TEXT NOT NULL, quantity INTEGER NOT NULL,
+              entry REAL NOT NULL, entry_fee REAL NOT NULL, opened TEXT NOT NULL,
+              exit REAL, exit_fee REAL, closed TEXT, reason TEXT, pnl REAL,
+              tp INTEGER, sl INTEGER, exit_seconds INTEGER, reverse INTEGER);
+            CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY,at TEXT,kind TEXT,message TEXT);
+        ''')
+        columns={r[1] for r in self.db.execute('PRAGMA table_info(trades)')}
+        for column in ('tp_pct','sl_pct','entry_evidence'):
+            if column not in columns:
+                self.db.execute('ALTER TABLE trades ADD COLUMN '+column+(' TEXT' if column=='entry_evidence' else ' REAL'))
+        if 'tp_triggered' not in columns:
+            self.db.execute('ALTER TABLE trades ADD COLUMN tp_triggered INTEGER NOT NULL DEFAULT 0')
+        saved=self.kv('settings') or {}
+        self.settings={key:saved.get(key,value) for key,value in DEFAULTS.items()}
+        self.put('settings',self.settings)
+        self.db.commit()
+        self.running = False
+        self.close_requested = False
+        self.snapshot = {'status':'INICIANDO','message':'Esperando la primera lectura verificada.', 'mode':'REAL', 'signal':None}
+        self.thread = None
+        self.event('SISTEMA','Servidor iniciado. Nuevas entradas pausadas; salidas siguen vigiladas.')
+
+    def kv(self,key):
+        r=self.db.execute('SELECT value FROM kv WHERE key=?',(key,)).fetchone()
+        return json.loads(r[0]) if r else None
+
+    def put(self,key,value):
+        self.db.execute('INSERT OR REPLACE INTO kv VALUES (?,?)',(key,dumps(value)))
+
+    def event(self,kind,message):
+        self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',(stamp(),kind,message))
+        self.db.commit()
+
+    def save_settings(self,raw):
+        with self.lock:
+            # Conservar los ajustes no editables; no confiar en campos ocultos antiguos.
+            merged = dict(self.settings)
+            merged.update(raw)
+            settings = valid_settings(merged)
+            reset_progression = isinstance(self,PaperBot) and any(
+                settings[key] != self.settings[key] for key in (*MARTINGALE_SETTINGS, 'starting_balance')
+            )
+            if reset_progression and self.positions():
+                raise ValueError('Espera al cierre de la posición virtual antes de cambiar la martingala.')
+            account_message=''
+            if settings['starting_balance'] != self.settings['starting_balance']:
+                if self.running or self.positions():
+                    raise ValueError('Para empezar con otro capital, pausa las entradas y espera a que no haya posición abierta. No se borrará el historial.')
+                previous=self.totals()
+                baseline=self.db.execute('SELECT COALESCE(MAX(id),0) FROM trades').fetchone()[0]
+                self.put('account_start_id',baseline)
+                account_message=f"Nueva prueba con ${settings['starting_balance']:.2f}; historial anterior conservado, saldo anterior ${previous['cash']:.2f}. "
+            self.settings=settings
+            self.put('settings',settings)
+            if reset_progression:
+                self.reset_martingale()
+            self.db.execute('UPDATE trades SET tp_pct=? WHERE closed IS NULL',
+                            (settings['take_profit_pct'],))
+            self.event('AJUSTES',account_message+'Ajustes guardados. Meta de ganancia acumulada; Take Profit aplicado también a posiciones abiertas; las demás salidas conservan su plan.')
+
+    def command(self,name):
+        with self.lock:
+            if name=='start':
+                self.running=True
+                self.close_requested=False
+            elif name=='pause':
+                self.running=False
+            elif name=='close':
+                self.running=False
+                self.close_requested=True
+            else:
+                raise ValueError('Comando desconocido.')
+            self.snapshot.update(status='ACTIVO' if self.running else 'PAUSADO')
+            self.event('CONTROL',{'start':'Operación automática activada en el modo seleccionado.','pause':'Entradas pausadas. Gestión de salidas activa.',
+                                 'close':'Cierre solicitado; esperando liquidez actual. Entradas pausadas.'}[name])
+
+    def positions(self):
+        if not isinstance(self,(ConnectedBot,PaperBot)):return []
+        return [dict(r) for r in self.db.execute('SELECT * FROM trades WHERE closed IS NULL')]
+
+    def totals(self):
+        baseline=int(self.kv('account_start_id') or 0)
+        rows=[dict(r) for r in self.db.execute('SELECT * FROM trades WHERE id>?',(baseline,))]
+        realized=sum(r['pnl'] or 0 for r in rows)
+        cash=self.settings['starting_balance']+sum((r['exit']*r['quantity']/100-(r['exit_fee'] or 0)) if r['closed'] else 0 for r in rows)-sum(r['entry']*r['quantity']/100+r['entry_fee'] for r in rows)
+        day=utcnow().astimezone(ZoneInfo('America/New_York')).date()
+        daily=sum(r['pnl'] or 0 for r in rows if r['closed'] and datetime.fromisoformat(r['closed']).astimezone(ZoneInfo('America/New_York')).date()==day)
+        open_fee=sum(r['entry_fee'] for r in rows if not r['closed'] and datetime.fromisoformat(r['opened']).astimezone(ZoneInfo('America/New_York')).date()==day)
+        daily-=open_fee
+        return dict(cash=round(cash,4), realized=round(realized,4), daily=round(daily,4),
+                    accumulated=round(realized-sum(r['entry_fee'] for r in rows if not r['closed']),4),
+                    account_start_id=baseline, target_balance=round(self.settings['starting_balance']+self.settings['daily_goal_dollars'],4),
+                    completed=sum(bool(r['closed']) for r in rows), wins=sum((r['pnl'] or 0)>0 for r in rows),
+                    open_cost=round(sum(r['entry']*r['quantity']/100 for r in rows if not r['closed']),4))
+
+    def _close(self, *args, **kwargs):
+        raise ValueError("Conecta la cuenta REAL de Kalshi antes de operar.")
+
+    def settle(self):
+        with self.lock:
+            positions=self.positions()
+        for p in positions:
+            try:
+                m=self.feed.get('/markets/'+quote(p['ticker'],safe=''))['market']
+                if m.get('status')=='finalized' and m.get('result') in ('yes','no') and not m.get('is_provisional',False):
+                    won=(p['side']=='UP')==(m['result']=='yes')
+                    with self.lock:
+                        self._close(p,100 if won else 0,'LIQUIDACIÓN OFICIAL',True)
+            except Exception:
+                continue
+
+    def _arm_take_profit(self, p, market, book=None):
+        """Dispara automáticamente el Take Profit en cuanto el porcentaje en Kalshi alcanza el objetivo."""
+        if not market or market.get('ticker') != p['ticker']:
+            return
+        target = p.get('tp_pct')
+        if target is None:
+            target = self.settings['take_profit_pct']
+        if target is None or not 0 < float(target) <= 100:
+            return
+        quote = get_yes_ask(market) if p['side'] == 'UP' else get_no_ask(market)
+        pct = 100 * quote if quote is not None and math.isfinite(quote) and 0 <= quote <= 1 else None
+        
+        if pct is not None and pct >= float(target) - 1e-9:
+            cur = self.db.execute('UPDATE trades SET tp_triggered=1 WHERE id=? AND closed IS NULL AND tp_triggered=0', (p['id'],))
+            if cur.rowcount:
+                self.event('TAKE PROFIT AUTOMÁTICO', f"#{p['id']} {p['side']} · Kalshi tocó {pct:.2f}% · Meta era {float(target):.2f}%")
+            p['tp_triggered'] = 1
+
+    def manage(self,p,book,signal,remaining):
+        if book.get('ticker') != p['ticker'] or time.monotonic()-book.get('at',0)>5:
+            return
+        try:
+            bids=book.get(p['side'],{}).get('bids',[])
+            price=fill_book(bids,p['quantity']) if bids else None
+        except (ValueError,TypeError,KeyError,ZeroDivisionError):
+            return
+        # No registrar ventas sin liquidez suficiente para toda la posición.
+        if price is None or not math.isfinite(price):
+            return
+        reason=None
+        if self.close_requested:
+            reason='CIERRE MANUAL'
+        elif p.get('tp_triggered'):
+            reason='TAKE PROFIT AUTOMÁTICO'
+        else:
+            entry_cost=p['entry']*p['quantity']/100+p['entry_fee']
+            exit_fee=self.settings['fee_cents_per_contract']*p['quantity']/100
+            net_pct=(((price-p['entry'])*p['quantity']/100-p['entry_fee']-exit_fee)
+                     /entry_cost*100) if entry_cost>0 else 0
+            if p.get('sl_pct') is not None and p['sl_pct'] and net_pct<=-p['sl_pct']+1e-9:
+                reason='STOP LOSS'
+            elif p.get('sl_pct') is None and p.get('sl') and price<=p['entry']-p['sl']:
+                reason='STOP LOSS'
+            elif p['reverse'] and signal in ('UP','DOWN'):
+                reference=p['side']
+                if isinstance(self,PaperBot):
+                    evidence=json.loads(p.get('entry_evidence') or '{}')
+                    # Honor the original signal for a position already opened with a legacy rule.
+                    if evidence.get('direction_rule') in ('invert','UP','DOWN'):
+                        reference=evidence.get('signal_side') or reference
+                if signal!=reference:
+                    reason='CAMBIO DE SEÑAL'
+        if reason:
+            self._close(p,price,reason)
+
+    def enter(self,market,book,side,remaining,signal=None):
+        if not isinstance(self,(ConnectedBot,PaperBot)):
+            return 'Lectura activa · conecta una cuenta solo para operar en real.'
+        s=self.settings
+        if not self.running or self.close_requested or self.positions() or side not in ('UP','DOWN'):
+            return 'Entradas pausadas o posición en gestión.'
+        if not signal or signal.get('data_valid') is not True:
+            return 'Esperando datos válidos del mercado.'
+        # La dirección de compra es la primera señal registrada de la ronda.
+        # El cerebro puede cambiar su señal activa sin cambiar ni bloquear esta entrada.
+        # Se conservan los controles de datos, precio, liquidez, presupuesto y ronda.
+        routes = None
+        if book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
+            return 'Libro atrasado; esperando datos actuales.'
+        actual=engine.get_seconds_remaining(market)
+        if actual is None or actual<=0:return 'Fuera de ventana de entrada.'
+        total=self.totals()
+        if s['daily_goal_dollars'] and total['accumulated']>=s['daily_goal_dollars']:
+            return 'Meta de ganancia acumulada alcanzada.'
+        count=self.db.execute('SELECT COUNT(*) FROM trades WHERE ticker=?',(market['ticker'],)).fetchone()[0]
+        if count>=s['max_entries_round']:return 'Máximo de entradas de esta ronda alcanzado.'
+        progression = self.martingale_plan() if isinstance(self,PaperBot) else None
+        if progression and progression['enabled']:
+            budget = progression['budget']
+            if budget <= 0:
+                return 'El monto inicial calculado es menor de 1¢.'
+            if budget > total['cash']:
+                return f"Saldo virtual insuficiente para el nivel {progression['level']}."
+        else:
+            budget=float((Decimal(str(max(0.0,total['cash'])))*Decimal(str(s['risk_pct']))/Decimal('100')).quantize(Decimal('0.0001'),rounding='ROUND_DOWN'))
+        if budget<=0:return 'Saldo disponible agotado.'
+        sized=size_for_budget(book[side]['asks'],budget,s['fee_cents_per_contract'],s['max_entry_cents'])
+        if sized is None:return 'Sin liquidez suficiente para el importe configurado dentro del precio máximo.'
+        quantity,price=sized
+        fee=quantity*s['fee_cents_per_contract']/100
+        cost=price*quantity/100+fee
+        if cost>budget+1e-8 or cost>total['cash']+1e-8:return 'La compra supera el importe o el saldo disponible.'
+        return self._execute_entry(market,book,side,quantity,price,fee,cost,signal,routes)
+
+    def _execute_entry(self, *args, **kwargs):
+        raise ValueError("Conecta la cuenta REAL de Kalshi antes de operar.")
+
+    def step(self):
+        self.settle()
+        with self.lock:
+            old_positions=self.positions()
+        for p in old_positions:
+            try:
+                m=self.feed.get('/markets/'+quote(p['ticker'],safe=''))['market']
+                rem=engine.get_seconds_remaining(m)
+                if m.get('status') in ('active','open') and rem is not None and rem>0:
+                    with self.lock:
+                        b=self.feed.book(p['ticker'])
+                    with self.lock:
+                        self._arm_take_profit(p,m,b)
+                        self.manage(p,b,None,engine.get_seconds_remaining(m))
+            except Exception as exc:
+                with self.lock:
+                    self.event('ERROR DE SALIDA', f"#{p['id']} {p['side']} · {type(exc).__name__}: {exc}")
+        market=self.feed.current()
+        sig=self.feed.signal(market)
+        signal_at=time.monotonic()
+        book=self.feed.book(market['ticker'])
+        remaining=engine.get_seconds_remaining(market)
+        if remaining is None or remaining<=0 or time.monotonic()-signal_at>5:
+            raise ValueError('Lectura vencida durante la consulta; esperando ronda actual.')
+        with self.lock:
+            row=self.db.execute('SELECT state FROM rounds WHERE ticker=?',(market['ticker'],)).fetchone()
+            state=json.loads(row[0]) if row else engine.new_round_state(market['ticker'],remaining)
+            if state.get('engine_revision') != SIGNAL_ENGINE_REVISION:
+                # Old strategy confirmations cannot authorize a new-strategy
+                # purchase. Trade counts, open positions and their exits stay intact.
+                state = engine.new_round_state(market['ticker'], remaining)
+                state['engine_revision'] = SIGNAL_ENGINE_REVISION
+            engine._confirmation_without_trace(state,sig.get('candidate'),market,remaining,utcnow(),sig)
+            self.db.execute('INSERT OR REPLACE INTO rounds VALUES (?,?)',(market['ticker'],dumps(state)))
+            self.db.commit()
+            active=state.get('active_direction')
+            had_position=bool(self.positions())
+            for p in self.positions():
+                if p['ticker']==market['ticker']:
+                    self._arm_take_profit(p,market,book)
+                    self.manage(p,book,active,remaining)
+            buy_side=state.get('first_direction')
+            message=self.enter(market,book,buy_side,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
+            if not self.positions() and self.close_requested:
+                self.close_requested=False
+            if buy_side is None and not had_position:
+                message=state.get('opening_conflict') or 'Esperando primera señal confirmada de la ronda.'
+            self.snapshot={'status':'ACTIVO' if self.running else 'PAUSADO','message':message,
+                           'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
+                           'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
+                           'price':sig['price'],'source':sig['price_source'],'quality':sig['quality'],
+                           'rsi':sig['rsi'],'ema':sig['ema'],'metrics':clean_json(sig),'updated':stamp(),
+                           'book':book,'target':engine.get_target_from_market(market),
+                           'price_chart':round_price_chart(market,sig,self.snapshot.get('price_chart')),
+                           'retention':state.get('retention_warning')}
+
+    def loop(self):
+        while not self.stop_event.is_set():
+            try:
+                self.step()
+            except Exception as e:
+                with self.lock:
+                    self.snapshot.update(status='SIN DATOS',message=f'{type(e).__name__}: {e}',signal=None)
+            self.stop_event.wait(2)
+
+    def start_worker(self):
+        # Reruns and concurrent sessions must share one worker per ledger.
+        with self.lock:
+            if self.thread is not None and self.thread.is_alive():
+                return
+            if self.stop_event.is_set():
+                return
+            self.thread=threading.Thread(target=self.loop,name='alpha-real-worker',daemon=True)
+            self.thread.start()
+
+    def view(self):
+        with self.lock:
+            result=dict(self.snapshot)
+            result.update(running=self.running,close_requested=self.close_requested,settings=self.settings.copy(),
+                          positions=self.positions(),totals=self.totals(),
+                          trades=[dict(r) for r in self.db.execute('SELECT * FROM trades ORDER BY id DESC LIMIT 200')],
+                          events=[dict(r) for r in self.db.execute('SELECT * FROM events ORDER BY id DESC LIMIT 60')])
+            result['account_note']='Capital inicial configurable con entradas pausadas y sin posición. Operaciones anteriores conservadas en el historial.'
+            result['rounds']=[{'ticker':r['ticker'],**json.loads(r['state'])} for r in self.db.execute('SELECT * FROM rounds ORDER BY rowid DESC LIMIT 50')]
+            return clean_json(result)
+
+
+class KalshiAPIError(ValueError):
+    def __init__(self, code):
+        self.code=code
+        super().__init__('Kalshi limita las consultas (HTTP 429). Se esperará antes de reintentar; no necesitas generar otra clave por este error.' if code==429 else f'Kalshi respondió HTTP {code}. Revisa permisos, entorno y disponibilidad de la API.')
+
+
+class KalshiAccount:
+    BASES={'live':'https://external-api.kalshi.com/trade-api/v2'}
+    def __init__(self,environment,key_id,pem,transport=None):
+        try:
+            from cryptography.hazmat.primitives import serialization
+            from cryptography.hazmat.primitives.asymmetric import rsa,ed25519
+        except ImportError:
+            raise ValueError('Falta la dependencia cryptography en el servidor. Añade cryptography>=43,<47 a requirements.txt y vuelve a desplegar la app.') from None
+        if environment not in self.BASES:raise ValueError('Selecciona REAL para conectar tu cuenta de Kalshi.')
+        if not isinstance(key_id,str) or not key_id.strip() or len(key_id)>200:raise ValueError('API Key ID inválido.')
+        if not isinstance(pem,str) or not pem.strip() or len(pem)>16000:raise ValueError('Clave PEM inválida.')
+        try:self._key=serialization.load_pem_private_key(pem.strip().encode(),password=None)
+        except Exception:raise ValueError('La clave privada no es un PEM válido sin contraseña.') from None
+        if not isinstance(self._key,(rsa.RSAPrivateKey,ed25519.Ed25519PrivateKey)):raise ValueError('La API requiere RSA o Ed25519.')
+        self.environment=environment;self._key_id=key_id.strip();self._transport=transport
+        self._balance_lock=threading.RLock();self._request_lock=threading.RLock()
+        self._balance_value=None;self._balance_time=0;self.retry_at=0
+        self.identity=hashlib.sha256((environment+':'+self._key_id).encode()).hexdigest()[:24]
+    def request(self,method,path,params=None,body=None):
+        with self._request_lock:
+            if time.monotonic()<self.retry_at:
+                raise ValueError(f'Kalshi limita las consultas (HTTP 429). Espera {math.ceil(self.retry_at-time.monotonic())} segundos antes de reintentar.')
+            try:
+                return self._request_once(method,path,params,body)
+            except KalshiAPIError as exc:
+                if exc.code==429:self.retry_at=time.monotonic()+max(30,getattr(exc,'retry_after',30))
+                raise
+    def _request_once(self,method,path,params=None,body=None):
+        import base64
+        from urllib.error import HTTPError
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding,ed25519
+        if not path.startswith('/') or '..' in path or '?' in path:raise ValueError('Ruta de API inválida.')
+        timestamp=str(int(time.time()*1000));signed='/trade-api/v2'+path
+        message=(timestamp+method+signed).encode()
+        signature=(self._key.sign(message) if isinstance(self._key,ed25519.Ed25519PrivateKey) else
+                   self._key.sign(message,padding.PSS(mgf=padding.MGF1(hashes.SHA256()),salt_length=hashes.SHA256().digest_size),hashes.SHA256()))
+        headers={'KALSHI-ACCESS-KEY':self._key_id,'KALSHI-ACCESS-TIMESTAMP':timestamp,
+                 'KALSHI-ACCESS-SIGNATURE':base64.b64encode(signature).decode(),
+                 'Content-Type':'application/json','User-Agent':'JCAlphaEdge/connected'}
+        if self._transport:return self._transport(method,path,params,body,headers)
+        url=self.BASES[self.environment]+path
+        if params:url+='?'+urlencode(params)
+        data=None if body is None else dumps(body).encode()
+        try:
+            with urlopen(Request(url,headers=headers,data=data,method=method),timeout=8) as response:
+                result=json.load(response)
+        except HTTPError as exc:
+            error=KalshiAPIError(exc.code)
+            try:error.retry_after=float(exc.headers.get('Retry-After',30))
+            except (ValueError,TypeError,AttributeError):error.retry_after=30
+            raise error from None
+        except Exception:raise ValueError('Sin respuesta verificable de Kalshi; se comprobará la orden antes de continuar.') from None
+        if not isinstance(result,dict):raise ValueError('Respuesta de API inválida.')
+        return result
+    def pages(self,path,key,params=None):
+        params=dict(params or {});params['limit']=200;items=[]
+        for _ in range(50):
+            data=self.request('GET',path,params)
+            if not isinstance(data.get(key),list):raise ValueError('Respuesta incompleta de Kalshi.')
+            items.extend(data[key]);cursor=data.get('cursor')
+            if not cursor:return items
+            params['cursor']=cursor
+        raise ValueError('Consulta demasiado extensa; no se supone un resultado incompleto.')
+    def balance(self):
+        with self._balance_lock:
+            if self._balance_value is not None and time.monotonic()-self._balance_time<5:
+                return self._balance_value
+            value=_plan_number(self.request('GET','/portfolio/balance').get('balance'))
+            if value is None or value<0:raise ValueError('Saldo de Kalshi no verificable.')
+            self._balance_value=value/100;self._balance_time=time.monotonic()
+            return self._balance_value
+    def order(self,intent):
+        if intent['order_id']:
+            return self.request('GET','/portfolio/orders/'+quote(intent['order_id'],safe=''))['order']
+        for order in self.pages('/portfolio/orders','orders',{'ticker':intent['ticker']}):
+            if order.get('client_order_id')==intent['client_id']:return order
+        return None
+
+
+class AccountMarketData(MarketData):
+    def __init__(self,account):
+        super().__init__();self.account=account
+    def get(self,path,params=None):
+        return self.account.request('GET',path,params)
+
+
+class ConnectedBot(Bot):
+    def __init__(self, *args, **kwargs):
+        raise ValueError("Versión de simulación: dinero real desactivado.")
+    """Separate account ledger. Only confirmed exchange fills create/close trades."""
+    def __init__(self,db_path,account):
+        self.account=account;self.account_cash=account.balance();self.balance_at=time.monotonic()
+        super().__init__(db_path,AccountMarketData(account))
+        self.db.execute('''CREATE TABLE IF NOT EXISTS account_orders(
+            client_id TEXT PRIMARY KEY, ticker TEXT NOT NULL, action TEXT NOT NULL,
+            side TEXT NOT NULL, order_id TEXT, status TEXT NOT NULL, plan TEXT NOT NULL,
+            created TEXT NOT NULL)''')
+        self.db.commit()
+    def pending_orders(self):
+        return [dict(r) for r in self.db.execute("SELECT * FROM account_orders WHERE status='pending' ORDER BY rowid")]
+    def totals(self):
+        result=super().totals()
+        result['allocated_cash']=result['cash'];result['account_cash']=self.account_cash
+        result['cash']=max(0,min(result['cash'],self.account_cash))
+        return result
+    def save_settings(self,raw):
+        if self.pending_orders():raise ValueError('Primero se debe confirmar la orden pendiente de Kalshi.')
+        super().save_settings(raw)
+    def command(self,name):
+        if name=='start':
+            self.reconcile_orders()
+            if self.pending_orders():raise ValueError('Hay una orden sin confirmar. El bot la comprobará automáticamente antes de iniciar.')
+            self.account_cash=self.account.balance();self.balance_at=time.monotonic()
+            if self.account_cash<=0:raise ValueError('La cuenta seleccionada no tiene saldo disponible.')
+        super().command(name)
+    def _position_check(self,ticker,expected):
+        rows=self.account.pages('/portfolio/positions','market_positions',{'ticker':ticker})
+        actual=sum(float(r.get('position_fp',r.get('position',0))) for r in rows if r.get('ticker')==ticker)
+        if abs(actual-expected)>1e-6:
+            self.running=False
+            raise ValueError('La posición de Kalshi difiere de la del bot. Entradas pausadas; revisa operaciones manuales en este mercado.')
+        resting=self.account.pages('/portfolio/orders','orders',{'ticker':ticker,'status':'resting'})
+        if resting:raise ValueError('Hay órdenes abiertas en ese mercado; no se mezclan con las órdenes de JC.')
+    def _intent(self,action,side,ticker,count,limit,plan):
+        import uuid
+        if self.pending_orders():raise ValueError('Esperando confirmación de la orden anterior.')
+        client_id=str(uuid.uuid4());yes_price=limit if side=='UP' else 100-limit
+        book_side=('bid' if side=='UP' else 'ask') if action=='buy' else ('ask' if side=='UP' else 'bid')
+        body={'ticker':ticker,'client_order_id':client_id,'side':book_side,
+              'count':format(Decimal(str(count)),'.2f'),'price':format(Decimal(str(yes_price))/100,'.4f'),
+              'time_in_force':'fill_or_kill' if action=='buy' else 'immediate_or_cancel',
+              'self_trade_prevention_type':'taker_at_cross','reduce_only':action=='sell',
+              'cancel_order_on_pause':True}
+        plan={**plan,'body':body}
+        self.db.execute('INSERT INTO account_orders VALUES (?,?,?,?,?,?,?,?)',
+                        (client_id,ticker,action,side,None,'pending',dumps(plan),stamp()))
+        self.db.commit() # Journal BEFORE the only POST: an ambiguous response is never resubmitted.
+        try:
+            reply=self.account.request('POST','/portfolio/events/orders',body=body)
+            oid=reply.get('order_id') or (reply.get('order') or {}).get('order_id')
+            if oid:
+                self.db.execute('UPDATE account_orders SET order_id=? WHERE client_id=?',(oid,client_id));self.db.commit()
+        except KalshiAPIError as exc:
+            if exc.code in (400,401,403,404,422,429):
+                self.db.execute("UPDATE account_orders SET status='rejected' WHERE client_id=?",(client_id,));self.db.commit()
+            raise
+        self.reconcile_orders()
+    def reconcile_orders(self):
+        with self.lock:
+            return self._reconcile_orders_locked()
+    def _reconcile_orders_locked(self):
+        for intent in self.pending_orders():
+            order=self.account.order(intent)
+            if order is None:continue # Unknown is not zero fills. Never issue another order.
+            oid=order.get('order_id')
+            if oid:
+                self.db.execute('UPDATE account_orders SET order_id=? WHERE client_id=?',(oid,intent['client_id']));self.db.commit()
+            if order.get('status') not in ('executed','canceled','cancelled'):continue
+            count=_plan_number(order.get('fill_count_fp',order.get('fill_count')))
+            if count is None or count<0:raise ValueError('Cantidad ejecutada no verificable.')
+            fills=self.account.pages('/portfolio/fills','fills',{'order_id':oid}) if count else []
+            units=Decimal('0');value=Decimal('0');fees=Decimal('0');seen=set()
+            for fill in fills:
+                if fill.get('order_id')!=oid:continue
+                fid=fill.get('fill_id') or fill.get('trade_id')
+                if not fid or fid in seen:continue
+                seen.add(fid)
+                q=Decimal(str(fill.get('count_fp',fill.get('count'))))
+                yes=Decimal(str(fill['yes_price_dollars']))
+                fee=Decimal(str(fill['fee_cost']))
+                if not q.is_finite() or q<=0 or not yes.is_finite() or not 0<=yes<=1 or not fee.is_finite() or fee<0:
+                    raise ValueError('Detalle de ejecución inválido.')
+                units+=q;value+=q*(yes if intent['side']=='UP' else 1-yes);fees+=fee
+            if abs(float(units)-count)>1e-6:continue # Wait for all fills, including partial IOC fills.
+            plan=json.loads(intent['plan'])
+            with self.lock:
+                try:
+                    if count:
+                        price=float(value/units*100)
+                        if intent['action']=='buy':
+                            cur=self.db.execute('''INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp,sl,exit_seconds,reverse,tp_pct,sl_pct,entry_evidence)
+                                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                                (intent['ticker'],intent['side'],count,price,float(fees),intent['created'],0,0,0,
+                                 plan['reverse'],plan['tp_pct'],plan['sl_pct'],dumps({'order_id':oid,'client_order_id':intent['client_id'],'mode':self.account.environment})))
+                        else:
+                            p=self.db.execute('SELECT * FROM trades WHERE id=? AND closed IS NULL',(plan['trade_id'],)).fetchone()
+                            if p is None or count>p['quantity']+1e-6:raise ValueError('Salida no coincide con la posición registrada.')
+                            portion=count/p['quantity'];entry_fee=p['entry_fee']*portion
+                            pnl=float(value)-(p['entry']*count/100)-entry_fee-float(fees)
+                            if count<p['quantity']-1e-6:
+                                cols=[r[1] for r in self.db.execute('PRAGMA table_info(trades)') if r[1]!='id']
+                                rest=dict(p);rest.update(quantity=p['quantity']-count,entry_fee=p['entry_fee']-entry_fee)
+                                self.db.execute('INSERT INTO trades('+','.join(cols)+') VALUES ('+','.join('?' for _ in cols)+')',[rest[k] for k in cols])
+                            self.db.execute('UPDATE trades SET quantity=?,entry_fee=?,exit=?,exit_fee=?,closed=?,reason=?,pnl=? WHERE id=?',
+                                            (count,entry_fee,price,float(fees),stamp(),plan['reason'],pnl,p['id']))
+                        self.db.execute('INSERT INTO events(at,kind,message) VALUES (?,?,?)',
+                                        (stamp(),'KALSHI',f"{intent['action'].upper()} {intent['side']} · {count:g} contrato(s) · {price:.2f}¢ · ejecución confirmada"))
+                    self.db.execute("UPDATE account_orders SET status='confirmed' WHERE client_id=?",(intent['client_id'],))
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback();raise
+    def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
+        if self.pending_orders():return 'Esperando confirmación de Kalshi; no se repite la compra.'
+        self.account_cash=self.account.balance();self.balance_at=time.monotonic()
+        budget=min(self.totals()['cash'],self.account_cash)*self.settings['risk_pct']/100
+        series=self.feed.get('/series/KXBTC15M')['series']
+        event=self.feed.get('/events/'+quote(market['event_ticker'],safe=''))['event']
+        fee_type=event.get('fee_type_override') or series.get('fee_type')
+        mult=event.get('fee_multiplier_override')
+        mult=_plan_number(series.get('fee_multiplier') if mult is None else mult)
+        if fee_type not in ('quadratic','quadratic_with_maker_fees') or mult is None or mult<0:
+            return 'Comisión de este mercado no verificable; no se envía la compra.'
+        limit=int(self.settings['max_entry_cents'])
+        # Conservative fee reserve in addition to the maximum contract price.
+        reserve=.07*mult+.01
+        qty=min(quantity,int(max(0,budget-.01)/(limit/100+reserve)))
+        if qty<1:return 'El porcentaje asignado no alcanza para un contrato y sus comisiones.'
+        self._position_check(market['ticker'],0)
+        fresh=self.feed.book(market['ticker'])
+        if engine.get_seconds_remaining(market)<=0 or time.monotonic()-fresh['at']>5:return 'Ronda o libro vencido.'
+        if fill_book([x for x in fresh[side]['asks'] if x[0]<=limit],qty) is None:return 'Sin liquidez actual dentro del precio máximo.'
+        plan={'reverse':self.settings['close_on_reverse'],'tp_pct':self.settings['take_profit_pct'],
+              'sl_pct':self.settings['stop_loss_pct'],'budget':budget}
+        self._intent('buy',side,market['ticker'],qty,limit,plan)
+        return 'Compra enviada a Kalshi; se registra únicamente lo ejecutado.'
+    def _close(self,p,price,reason,settlement=False):
+        if self.pending_orders():return
+        if settlement:
+            records=self.account.pages('/portfolio/settlements','settlements',{'ticker':p['ticker']})
+            if not any(r.get('ticker')==p['ticker'] for r in records):return
+            # Parent called this only after nonprovisional official yes/no result.
+            pnl=(price-p['entry'])*p['quantity']/100-p['entry_fee']
+            self.db.execute('UPDATE trades SET exit=?,exit_fee=0,closed=?,reason=?,pnl=? WHERE id=? AND closed IS NULL',
+                            (price,stamp(),reason,pnl,p['id']));self.db.commit();return
+        expected=p['quantity']*(1 if p['side']=='UP' else -1)
+        self._position_check(p['ticker'],expected)
+        limit=max(.01,min(99.99,math.floor(price*100)/100))
+        self._intent('sell',p['side'],p['ticker'],p['quantity'],limit,{'trade_id':p['id'],'reason':reason})
+    def step(self):
+        with self.lock:
+            self.reconcile_orders()
+            self.account_cash=self.account.balance();self.balance_at=time.monotonic()
+        super().step()
+    def view(self):
+        result=super().view()
+        if self.pending_orders():result['message']='Orden de Kalshi pendiente de confirmar; no se enviará otra hasta resolverla.'
+        result.update(mode='REAL',
+                      execution_mode=self.account.environment,pending_orders=len(self.pending_orders()),
+                      account_balance=self.account_cash,account_balance_age=max(0,time.monotonic()-self.balance_at))
+        return result
+
+
+
+class PaperBot(Bot):
+    """Virtual ledger and public GET-only feed; never owns an account client."""
+    execution_mode = "paper"
+    def __init__(self, db_path=None, feed=None):
+        super().__init__(db_path, feed or MarketData())
+        self.snapshot['mode'] = 'SIMULACIÓN'
+
+    def martingale_plan(self):
+        enabled = self.settings['martingale_enabled']
+        maximum = self.settings['martingale_levels']
+        level = min(maximum, max(1, int(self.kv('martingale_level') or 1))) if enabled else 1
+        initial = Decimal(str(self.settings['martingale_initial']))
+        return {'enabled':enabled, 'level':level, 'maximum':maximum,
+                'initial':float(initial), 'budget':float(initial * 2 ** (level-1))}
+
+    def reset_martingale(self):
+        self.put('martingale_level',1)
+
+    def _execute_entry(self,market,book,side,quantity,price,fee,cost,signal,current_routes):
+        # step() supplies the radar's confirmed direction for this round.
+        plan = self.martingale_plan()
+        evidence = {'mode':'paper','brain':SIGNAL_ENGINE_REVISION,
+                    'martingale_level':plan['level'] if plan['enabled'] else None}
+        self.db.execute('INSERT INTO trades(ticker,side,quantity,entry,entry_fee,opened,tp_pct,sl_pct,reverse,entry_evidence) VALUES (?,?,?,?,?,?,?,?,?,?)',
+            (market['ticker'],side,quantity,price,fee,stamp(),self.settings['take_profit_pct'],self.settings['stop_loss_pct'],int(self.settings['close_on_reverse']),dumps(evidence)))
+        note = f" · Nivel {plan['level']} · presupuesto USD {plan['budget']:.2f}" if plan['enabled'] else ''
+        self.event('ENTRADA VIRTUAL',f'{side} · {quantity} contrato(s) · {price:.2f}¢ · saldo virtual'+note)
+        return 'Compra virtual registrada; no se envió ninguna orden.'
+
+    def _close(self,p,price,reason,settlement=False):
+        fee=0 if settlement else self.settings['fee_cents_per_contract']*p['quantity']/100
+        pnl=(price-p['entry'])*p['quantity']/100-p['entry_fee']-fee
+        cur=self.db.execute('UPDATE trades SET exit=?,exit_fee=?,closed=?,reason=?,pnl=? WHERE id=? AND closed IS NULL',
+            (price,fee,stamp(),reason,pnl,p['id']))
+        if cur.rowcount:
+            note = self.advance_martingale(p,pnl)
+            self.event('SALIDA VIRTUAL',f"#{p['id']} · {reason} · neto virtual ${pnl:.2f}"+note)
+        self.db.commit()
+
+    def advance_martingale(self,p,pnl):
+        opened_level = json.loads(p.get('entry_evidence') or '{}').get('martingale_level')
+        plan = self.martingale_plan()
+        if not plan['enabled'] or not opened_level or abs(pnl) < 1e-8:
+            return ''
+        if pnl > 0:
+            self.reset_martingale()
+            return ' · Martingala vuelve al nivel 1.'
+        if opened_level >= plan['maximum']:
+            self.reset_martingale()
+            self.running=False
+            return ' · Último nivel perdido. Entradas pausadas; próximo inicio en nivel 1.'
+        self.put('martingale_level',opened_level+1)
+        return f' · Martingala sube al nivel {opened_level+1}.'
+
+    def view(self):
+        with self.lock:
+            result=super().view()
+            result.update(mode='SIMULACIÓN',execution_mode='paper',pending_orders=0,account_balance=None,
+                          martingale=self.martingale_plan())
+            return result
+
+
+def _connect_kalshi(controller,payload):
+    raise ValueError("Versión de simulación: conexión para operar con dinero real desactivada.")
+
+def _connect_kalshi_disabled_original(controller,payload):
+    if time.monotonic()<getattr(controller,'connect_retry_at',0):
+        raise ValueError(f'Espera {math.ceil(controller.connect_retry_at-time.monotonic())} segundos antes de volver a conectar (HTTP 429).')
+    controller.connection_stage='validar el modo y el estado del bot'
+    if isinstance(controller.bot,ConnectedBot) and (controller.bot.running or controller.bot.positions()):
+        raise ValueError('Pausa las entradas y espera a no tener posiciones antes de cambiar de modo.')
+    if isinstance(controller.bot,ConnectedBot) and controller.bot.pending_orders():raise ValueError('Hay órdenes pendientes; espera a la comprobación automática.')
+    env=payload.get('environment')
+    if env=='live' and payload.get('accept_real') is not True:raise ValueError('Marca la casilla de cuenta real para conectar ese entorno.')
+    controller.connection_stage='cargar las dependencias y la clave privada'
+    client=KalshiAccount(env,payload.get('key_id'),payload.get('pem'))
+    controller.connection_stage='firmar la solicitud y consultar el saldo en Kalshi'
+    try:
+        cash=client.balance() # Read only: connecting never submits an order.
+    except KalshiAPIError as exc:
+        if exc.code==429:controller.connect_retry_at=client.retry_at
+        raise
+    if isinstance(controller.bot,ConnectedBot) and controller.bot.account.identity!=client.identity:
+        raise ValueError('Esta sesión ya administra otra cuenta REAL.')
+    root=getattr(controller,'connection_root',controller.bot)
+    controller.connection_root=root
+    controller.connection_stage='preparar el historial de la cuenta'
+    with root.lock:
+        registry=getattr(root,'connected_accounts',None)
+        if registry is None:registry={};root.connected_accounts=registry
+        linked=registry.get(client.identity)
+        if linked is None:
+            base=Path(root.db.execute('PRAGMA database_list').fetchone()[2] or ROOT/'data'/'alpha.sqlite3')
+            path=base.with_name(base.stem+'.kalshi-'+client.identity+'.sqlite3');path.parent.mkdir(parents=True,exist_ok=True)
+            process_lock=open(str(path)+'.lock','a+')
+            try:
+                if os.name=='nt':
+                    import msvcrt
+                    process_lock.write('0');process_lock.flush();process_lock.seek(0);msvcrt.locking(process_lock.fileno(),msvcrt.LK_NBLCK,1)
+                else:
+                    import fcntl
+                    fcntl.flock(process_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except OSError:
+                process_lock.close();raise ValueError('Otra instancia ya administra esta cuenta.') from None
+            linked=None
+            try:
+                linked=ConnectedBot(path,client);linked._process_lock=process_lock
+                # New account ledger inherits allocation/settings but never paper trades.
+                if not linked.kv('account_configured'):
+                    linked.settings=dict(root.settings);linked.put('settings',linked.settings);linked.put('account_configured',True);linked.db.commit()
+                controller.connection_stage='iniciar la vigilancia de la cuenta'
+                linked.start_worker()
+                registry[client.identity]=linked
+            except Exception:
+                if linked is not None:
+                    linked.stop_event.set()
+                    if linked.thread is not None:linked.thread.join(timeout=10)
+                    if linked.thread is None or not linked.thread.is_alive():linked.db.close()
+                process_lock.close()
+                raise
+        elif linked.running:raise ValueError('Esta cuenta ya está operando. Paúsala antes de reconectar.')
+        else:linked.account=client;linked.feed.account=client
+        controller.bot=linked
+    return {'message':'Cuenta REAL'+f' conectada · saldo ${cash:.2f}. Entradas pausadas; pulsa INICIAR cuando quieras operar.',
+            'verified_at':stamp(),'environment':env,'balance':cash}
+
+
+
+
+_TERMINAL_HTML = r"""
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alpha Edge · Terminal</title>
+<style>
+:root{--bg:#080e22;--panel:#101b3d;--blue:#193c89;--gold:#efc864;--text:#edf3ff;--muted:#a6b8df;--line:#687aa8;--green:#45edbe}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(ellipse at 45% 5%,#243e83 0,#101b3e 38%,#070c1c 100%);color:var(--text);font:13px Arial,sans-serif}
+button,input,select{font:inherit}
+button{cursor:pointer;color:var(--text);border:1px solid #7790c8;background:linear-gradient(#294c94,#142958);border-radius:5px;padding:10px 14px}
+button:hover{filter:brightness(1.25)}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+.app{max-width:1600px;margin:auto;display:grid;grid-template-columns:190px minmax(0,1fr);min-height:100vh;padding:12px;gap:14px}
+.sidebar{border:1px solid #6176a6;background:linear-gradient(135deg,#142753,#080e23);padding:18px 10px;display:flex;flex-direction:column;gap:8px;box-shadow:inset 0 0 20px #263d6f}
+.brand{text-align:center;color:var(--gold);font-size:23px;font-weight:900;letter-spacing:1px}
+.jc-brand-logo{display:block;width:156px;max-width:100%;height:auto;margin:0 auto;object-fit:contain}
+@media(max-width:600px){.jc-brand-logo{width:112px}}
+.brand small{display:block;color:var(--muted);font-size:9px;letter-spacing:3px;margin-top:5px}
+.tag{display:inline-block;font-size:10px;color:var(--green);border:1px solid #2a9e87;padding:5px 8px;border-radius:3px}
+.side-state{display:flex;justify-content:space-between;margin:18px 0 10px;font-size:10px}
+.nav{display:flex;flex-direction:column;gap:7px}
+.nav button{text-align:left;text-transform:uppercase;font-weight:700;font-size:11px;padding:12px 10px}
+.nav button.active{color:var(--gold);border-color:var(--gold);background:linear-gradient(100deg,#5a492a,#1e2540)}
+.nav button span{color:#90a9da;display:inline-block;width:24px}
+.mini-radar{width:110px;height:110px;border:2px solid var(--gold);border-radius:50%;margin:30px auto 10px;display:grid;place-content:center;background:repeating-radial-gradient(circle,#15295a 0 20px,#476899 21px 22px);box-shadow:0 0 30px #183a7e}
+.mini-radar strong{color:var(--gold);font-size:25px;text-align:center}
+.mini-radar small{text-align:center;font-size:9px}
+.sidebar footer{margin-top:auto;border-top:1px solid #354975;padding-top:18px;color:var(--muted);font-size:10px;line-height:1.8}
+.topbar{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid var(--gold);background:linear-gradient(100deg,#234483,#131e3d);padding:13px 18px;gap:14px;border-radius:5px;box-shadow:0 4px 15px #020612}
+.topbar small,.label{font-size:9px;letter-spacing:1px;color:var(--muted);display:block;margin-bottom:6px}
+.topbar strong{font-size:12px}
+.demo{margin:12px 0;color:#f9db8e;background:#45391f80;border:1px solid #8d7741;padding:9px 13px;border-radius:4px;font-size:11px}
+.section-title{background:linear-gradient(100deg,#254c9b,#131d3d);padding:12px 15px;border:1px solid #788bc0;margin:14px 0 12px;border-radius:5px;font-weight:bold;text-transform:uppercase;letter-spacing:1px}
+.section-title b{color:var(--gold);margin-right:15px}
+.panel{border:1px solid var(--line);border-left:3px solid var(--gold);background:linear-gradient(145deg,#1a3472aa,#0b132c 70%);border-radius:8px;box-shadow:inset 0 0 24px #112452,0 4px 12px #0005;overflow:hidden}
+.panel h2{margin:0;padding:12px 16px;font-size:11px;text-transform:uppercase;letter-spacing:1.2px;color:var(--gold);border-bottom:1px solid #3b5487}
+.body{padding:17px}
+.summary{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:12px}
+.radar-panel{text-align:center;position:relative}
+.radar-sub{font-size:10px;color:var(--muted);margin:10px}
+.radar{position:relative;margin:25px auto;width:min(340px,76%);aspect-ratio:1;border-radius:50%;border:2px solid var(--gold);background:repeating-radial-gradient(circle,transparent 0 17%,#6985b3 17.4% 17.8%,transparent 18.2% 23%),conic-gradient(from 275deg,#1ca4bd77,transparent 60deg),radial-gradient(circle,#18316b,#08172e);box-shadow:0 0 0 6px #09142b,0 0 0 7px #5b78ab,0 0 30px #0e6abc66}
+.radar:before,.radar:after{content:'';position:absolute;background:#708bb565}
+.radar:before{width:1px;height:100%;left:50%}
+.radar:after{height:1px;width:100%;top:50%;left:0}
+.sweep{position:absolute;inset:0;border-radius:50%;background:conic-gradient(from 0deg,transparent 290deg,#34d7cd22 330deg,#9fffea99 359deg,transparent 360deg);animation:sweep 12s linear infinite}
+.radar.paused .sweep{animation-play-state:paused}
+@keyframes sweep{to{transform:rotate(360deg)}}
+.radar-core{position:absolute;inset:35%;border:1px solid var(--gold);border-radius:50%;background:radial-gradient(#1a335c,#080d1e);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2;box-shadow:0 0 25px #071327}
+.radar-core b{font-size:clamp(14px,2.3vw,25px);color:var(--gold);letter-spacing:1px}
+.radar-core small{font-size:9px;letter-spacing:2px}
+.rnum{position:absolute;color:#dbe5ff;font-size:10px;z-index:3}
+.n{top:8px;left:48%}
+.s{bottom:8px;left:48%}
+.e{right:8px;top:48%}
+.w{left:8px;top:48%}
+.radar-meta{display:flex;justify-content:space-between;gap:8px;padding:0 16px 15px}
+.chip{border:1px solid #6889bf;padding:8px 12px;background:#102b55;font-size:10px;border-radius:3px}
+.chip b{display:block;margin-top:5px;color:var(--green)}
+.position{text-align:center;display:flex;flex-direction:column;justify-content:center;min-height:340px}
+.position-money{display:grid;grid-template-columns:1fr 1fr;gap:12px;align-items:start}.position-money>div{min-width:0}.position .position-money .amount{font-size:clamp(20px,3vw,32px);overflow-wrap:anywhere}.position .amount{font-size:42px;font-weight:bold;margin:30px 0 4px}
+.muted{color:var(--muted)}
+.position hr{border:0;border-top:1px solid #354d79;width:80%;margin:22px auto}
+.position strong{font-size:12px}
+.performance{margin-top:12px}
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+.metrics strong{font-size:24px}
+.gold{color:var(--gold)}
+.green{color:var(--green)}
+.controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:13px 0}
+.controls button{padding:14px;font-weight:bold}
+.danger{background:linear-gradient(#c34a55,#78212b);border-color:#fc8490}
+.primary{background:linear-gradient(#ddbc6a,#8a682a);color:#101a30;border-color:#ffe29a}
+.settings-grid{display:grid;grid-template-columns:1.15fr 1fr;gap:12px}
+.field{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:11px 0;border-bottom:1px solid #314369}
+.field label{font-size:11px;color:#e2eaff}
+.field small{display:block;color:var(--muted);font-size:10px;margin-top:4px}
+input[type=number],input[type=text],input[type=password],select{width:110px;background:#090f23;border:1px solid #a58d52;color:#fff;padding:9px;border-radius:4px}
+input[type=checkbox]{accent-color:#43e7b3;width:19px;height:19px}
+input[type=range]{accent-color:var(--gold);width:100%}
+.wide{width:100%!important}
+.save{width:100%;margin-top:15px}
+.table-wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:11px;white-space:nowrap}
+th,td{text-align:left;padding:14px 12px;border-bottom:1px solid #2c4068}
+th{color:var(--muted);font-size:9px;text-transform:uppercase}
+.empty{text-align:center;color:var(--muted);padding:50px 20px}
+.hidden{display:none!important}
+.notice{padding:16px;border:1px solid #4a638d;margin-top:12px;line-height:1.6;color:var(--muted);font-size:11px;border-radius:5px}
+.toast{position:fixed;right:20px;bottom:20px;background:#163f3b;color:#b9ffe6;border:1px solid #4ce4b6;padding:15px 25px;border-radius:6px;z-index:10;box-shadow:0 6px 30px #0008}
+.strength{height:8px;border-radius:5px;background:#0b1630;margin:15px 0;overflow:hidden}
+.strength i{display:block;height:100%;width:0;background:var(--gold)}
+.top-controls{display:flex;align-items:center;justify-content:space-between}
+@media(max-width:850px){.app{grid-template-columns:145px minmax(0,1fr);gap:9px;padding:8px}
+.brand{font-size:18px}
+.summary{grid-template-columns:1fr 180px}
+.position .amount{font-size:30px}
+.settings-grid{grid-template-columns:1fr}
+.metrics{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:600px){.app{display:block;padding:8px}
+.sidebar{padding:10px;margin-bottom:10px}
+.brand{font-size:19px}
+.side-state,.mini-radar,.sidebar footer{display:none}
+.nav{flex-direction:row;overflow-x:auto;margin-top:12px;gap:6px}
+.nav button{flex-shrink:0;padding:10px;font-size:10px}
+.nav button span{width:18px}
+.topbar{grid-template-columns:1fr 1fr;padding:12px;gap:15px}
+.summary{grid-template-columns:1fr}
+.position{min-height:190px}
+.position .amount{margin-top:18px}
+.position hr{margin:14px auto}
+.radar{width:240px;max-width:78%;margin:22px auto}
+.controls{gap:6px}
+.controls button{font-size:10px;padding:13px 5px}
+.metrics strong{font-size:22px}
+.radar-meta{padding:0 10px 14px}
+.chip{padding:8px;font-size:9px}}
+@media(prefers-reduced-motion:reduce){.sweep{animation:none}}
+.martingale-levels{display:grid;gap:4px;padding:8px 0 12px;border-bottom:1px solid #314369}
+.martingale-row{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:5px 0;color:#e2eaff;font-size:11px}
+.martingale-row strong{color:var(--gold);font-variant-numeric:tabular-nums}
+.price-chart{margin-top:12px}
+.price-chart h2{display:flex;justify-content:space-between;gap:10px;align-items:center}
+.price-chart h2 span{color:var(--muted);text-transform:none;letter-spacing:0;font-weight:500}
+.chart-quotes{display:flex;gap:10px 16px;margin:0 0 10px;flex-wrap:wrap}
+.chart-quotes small{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}
+.chart-quotes strong{font-size:clamp(16px,3vw,25px);font-variant-numeric:tabular-nums}
+.chart-round-clock{margin-left:auto;text-align:right;flex:none}
+.chart-round-clock strong{color:var(--gold)}
+#chartTarget{color:var(--gold)}
+#chartDistance{font-size:11px;margin-left:7px;white-space:nowrap;font-weight:700}
+#roundPriceCanvas{display:block;width:100%;height:clamp(290px,48vw,450px)}
+</style>
+</head>
+<body>
+<div class="app">
+<aside class="sidebar">
+<div class="brand"><img class="jc-brand-logo" src="data:image/webp;base64,UklGRoyfAABXRUJQVlA4WAoAAAAQAAAAfwEAfwEAQUxQSKAcAAABDEiS5MaNUPX/X6MB0J7lHBETUP9iyd/TG/CGsapcDuCDcxoB3nHc8Eo3ZrDhE2af8oCuAA8ATgIq+4V6Igp6g8ChQBVwTiCIwMorWSWaN8VLl8gFQA1Glm4XY+DgsehVxewy9Qkqm8HVGsB+GUGypG0CGgTFTENFYVNV7S32prIjoGzF+VSqvFzkhbmpg8wPKkWWOnBwDergwwOfHGorqDaXg/MGzOSkBrhVoTg2tlMtAWUho5l8+LC9irEKMD8ibVUI6hOgjn6+7hBIdIEG8AR8DdRLAAFuQO2JVSwDS+uDCcEe6qOmpdbnD/WdjvWP5IP+sP83bbf+v+drvGaSKkZt27Zt2zi2q9N3cZQe27Zt265SBbWRNV7jNebzj53u7D0m1n47IiaAciNJkiSJf/6WmZ4Zkz3yCM8Iz8h9RsQE+JYkyZIkybb+/2/rNdyJ+qaiqiKiaub9GBETgB4rIpjgF/zfQOW//P1fpEUkBFXVqqoqfeYQRGRiS0JQVQ2C8RStKtUgMrEkElQVo5w8e93Ndzzg+DPOveQll1/x6pe/4FkXnH3KcYftscXas1fEKINqkAkgCVoFLHv6ersfc8k17/78D/668IHHB1x+f+L+RTf97DNve9VFx+y4xjQsU1SDTNxIqBQjq7X3Ofc/PvPLOx7NfOY6J7O4bDOzlDxzlPbggl9/+vITtpqJkUE1TLxIUAGAlTY66Hkf+O0Dmct0i3Fgltw95+zuefTunpKNdC7z6du//6azd5qNkaoycSJBAwDM2+/5H//bwxyZ4iBa8lyse0oWU02Sdtc3XnPkJpMAiKpMgIgqAMzY+/LvL8wk6xSjJR+Zy3e3aE6Sj/3hDQfNBYCgYUJDNABYYceXfvkOkkyDaIl5lk0WrSa58FtX7T8LQFCZoBANANY8/b1/SyTdzD275xgX92ROknd+4XmbAwiV9CbpDFEFMO+4j9xLMpt5bmG36CSf+PzJawJQlV4k6EYJCmDmGZ9cSNJi8tzebrEm7/ni2XMAaOhB3SgKYOqh71xA0szzsuu6DRjLOXs0kne8bb8pgKgMf0GBSfu87WaSFlMeZSsoyjmnaCT/fO02AFSGOtEArPfiP5N089y+dTlnt0wOvnfudEDD0CYKYOf3P0i6pdzBKdbkrVeuA4QwlIUK0GO+PiBjyl3tZuQD794ZEJVhKyiw0tm/JNMg5U5PkRx8ai8AKq0mfUMU2OA1/yQtJvduy9mj0799UgVoC8jY9cygwKbvfZi0lLN3X85umfz9OYqgjevHosB61z1EWso90hL5i0MACUOPKLDemx5gHT33zGTk144ANAw3Cqx+3YNk9Ny6rJZzSuS3dwRUhpcAzLxqCRk9tzCWy9mMT924MaBDSggIF9zKf3/wyj3ox38/cuPqCGEIEQX2+jEZ8dJdyF/NO08AVIYNBTb5mDGmfO8u1CP5rjUBHSpCwJRXPMgUPfdiM9714pURZGiQCjji92T03FeNeBqQ/zga0E6TRkSx/idI89xbMZBzTka+YzZUOqxFFbj4Pprl/up0JOeUeMtJgPa+ELDaJ8iBe59Jgq2cI/mxuaik3ylw0gLG5L3mSCqT8Z97AqHHSYV1P0VGd8/tCvcpjxxcNxXa2wJw2GJayu0LXMHlIzll/nVvqPQzxeQrI2Pur1ceyR759CVA6GGi2Ogn9JT77Qw5W+b8SdDeFYATF3PguRcp4E524/c3gvYrqbDK20jL/XeOnCPvPwsh9CipsO3vmVJuMsAhUAAKcEA28hpAe5MEnPUIf7L4OtbECeKpnIyfnI2qJynwRtYxG1qBgVLjTXtDpQ8ppn6clnyTggxSlSOXXgqRrpMCFNv+kdE9F7Ilw45VOWXeKAgdV2CFEx/mII8pvJ0TCjyT3fiZVaC9RhQvqOvoyyexBfUuy3KO/NXa0O6S8QuCK5nM83K73p4kT+XIBTug6i2Kye+gJc9jkiR7lKr6GbLxoUNRdZOIyDgp5n2PMWFK9lmZCz+0C6DSSRCMr2K9vzC6v70g55wZMGW+DCrdIyLjpFj3X4x5jPfqpuNh3BOvQZDOwXgpNvgnLY9ZXpHnyG6cDwmdM86K7W+j5U4HbpODmuyR71WEPqHY/wFa7nLiA4Alco782lTR/lDhoMdpuWNhgdU6I5yTI7+9Ygh9ocKuj9NyxxIPjAYqPESO/Iyq9IMKWyxiyi/FRAXHJWBv/6REvh9B+oBih7toeczRHaGLAaiEVeU1OfKNUOk+xS73MuZxMZkZY4GT6UoYGMBR1ZHzUUnXBWy1hDG3yr/66ILZ18uR16LquIB5NzHmNnVBXNF0CW7kxpeh6rSAFb7HQW5N5DryCoYAAdzBSXbjeag6TKT6LKO3x21u4YRw4BI4ySktPRjaWaLh44ye2wyYwRmiMle9TU71Y7tAu0rxFg68PSKAM8Y1gEs4yy/etQ5CN1V4IaN7emc8jFVH8DKJ/N0MkS5S7OvJc9svKF7ilrdy5NdUpXsUWyzKKbf/yrE7XCO4ygPeiKpB0hDFqv+m5bGE2TyjNwlv4ipHXoqqY6Sa8k3GPJZOp+Kx49E75Z6npbtBG9PQCm9g9LEgyMzaIM8FB/szRU68fR2ELlEcX0fPY5IkdcAzETvYnrBm1PjLFUW6I2DD+/LX7sRb/TN3HZrRIEd+Kqh0hYQpP6fZnWdidY0msECDHHkltCsUb6HlU3xL0M/T0u2h3aA4jZbLZWLgMv0R6xGAaqOc+NuVNXRBwHr35VQM4cxNeQ1SKGJBB3sa34mqA0RX/BktFwkskdA/ocQ7li91Nj4H2n6Kt9BykYQqsMcbEKoCtg9o524HIrSdYt+UfHQ85syz9ESeHRjLxn9ODdJuEmb89ffv3GWG+N6CLLXIBCaVcxjzAa+FtpvifX//yk2nsyzexZQWWSSlp3ZGaDPFOfzJSOp7WbKIHvbLOfIvM0Jor4CNH8y/70BOqUgJPKUPTQO8YlGOfD+qFgvfYkwJVFS684c0zXAV2EmpW300tK0UZzL6rUunEzmpb0XAJLhBeaoXzAnSThJW/FdtuSizNsE8JnkTCnLk+6DtpLiO0ZvlNKubas6GYDo84J6anPKhCG2k2NNSGqu8SiWKYKtyYAi68c9TgrRQqH5K8zHxPTKKEI1XZeNF0PZRnMfonpfbMXPlnaBTChSWmJWnfNeqQdpGMOu2bHn5HXNN2Xt3ykXZaBj5NmjbBPkwLfcxAE8nnsotHgRtF8XhtDymB1eHwktybuPfpwdplRB+NGzARCJ298iXQttEcXD23OIAr+ZAd8sL54q0h4RJP+X3Zt5MTG5O+Pv35dD2qHARzYeG1Ri4ADTTr/etIaEtRFa5qW4fmnALOI0D/PAt0LZQPIsxt6QXD8IdaIc/sbmEdhCZdkttZbSmyw2JbwDNNH4YLaF4Di0PHbOf4f7UlghtIDLnzjq1DuBDEvtEOfJj0DZQvIyW28cbO1Z4Ddt78qU7IDRPZMV/1mlsLNVzknhHcAGP/GAbKI5nyv148Ew6nOkpP7KBhMaJ/pg2Jj4DYZqHAGo88ipo0xRHZvOx8VKoO/gMpkVW3zlLpGEBX2PMY+S1LAV1sFTPYkl2Nz4L2qwg2zzlqW9kAwgVrE71n1cUaZRiPmMeUkli7GFT46momhRk7t11GlZWE+Am35XQpAqX81dGYRccWxBXIwogsKv70u0RmiOYemv9e8QnWe9Aqxw5H9ocxcFMGR4DOA/o5zxtkcbQOtV3z4U0aD5jQRrimPQ84RZuvBjaFMHUW5jGxn8PJ+RwQOSPgzSlwglMeWHMAb7NGXlABA2ye9oVoSGKz9Ea5HJXGCEFCpjQIBuvgzYjYL2Ham9eZoBnMkIPjkj8bSXNUDyLlhuXObIFrt7G82A7hEYEfLNZCemZFipZTlHAGGxpvB7ahIANH6+9WW2jNTZz+jsXzkZoQIWLaXnYc53whJx4IqoGBHylx3gl5v18UL8HlUwnWOvB2vsBKV7CJPoZb1pFylOcR8sdCznkpPMVr+Hu+0GnC/hm10AK49bUltAsPSjy+vIE8+6jdwrhnodZxfsYf6lSmmLf7LnFYYvpFoBdDSGJNTRgy1Oyp/rJLRAKq/ACxhYD6GNXQ0gls6gpBh7okc+BFhbwRVrLcZsMVWMd8FyP/BpCWYI5i+ltR4uQJrPKVHAMI4n3rgopSnFwneux0J7ZXGTqFoQdPNUHQ4uqcA0tt52bLygZUEnIfXePfHlZEuS7TGPSZooCvsseDgSMk+ERX0AoKWDd+/5FA+AUAZUNX8ekjFa5e+KCaZCCKhzPjz04JQbW3nkbz2lnhKKu4V8XOEl/AFtkd498FrQgxTdKYLrHTD8h2OTTCOUIpt7Cbxl5WQne2Lwkuxv/vTKkmICtl+ZG7BUSTgCvjpqcPT+5JbQYxUk0KCK2BdNvQ13kiaiknCsZgWt4AX6AHPnaggK+UM7Yhw65DQocNpcVa74KLUWw4l9pV7HLMPG+AAMMNPjwnyuhlIBNH8sJvIgRSwAX8TrEKmOPb/3oJgiFKI6neR+nAAUKuMy0xMBJzARwHNsSWwmpPgJazGsYHfNJspkTSgRkClMRHkayxRD5woI+zejmA0qGRe4AWqfSI6EMajybZDu8txiE39DGQ5B27Ikq+FP9JEgZglmLxm1zibxzafPglZzYLfGO2ZAiArYa1J7HFRgxU4ASeLDKYbwT5InXT22OUIRif3ouwRkLJvEyvIA4DKsAeebEw6GFnEwbi5uUJJ/GGzFnWhH57GJeMBrGyKDObKhLOyCradBAXeL1hVSYz1jEelEyYRoL/RIrEg8RtkgVJZ8uRPEx2jOo8AKoVHEvA+NTAErIM/4QUkTAd0cRqZx5jKTxOJrmMowZTpf4jymQAgST/8b0TMWRSzQbc54Rwd4DhNaY71w0q5AZCxrgMTwOWAk8xSNrFxGw+iL6+HAHDVC5FbQgLhmMKLGijtsijJ8oNnyoFE5zgQhU7kEvukGatc4DoUXssLQeN4f1q3ANcxIHW8+SrU48rpD9PY83uiMc5cLo8xOnaZoNjWcUUeHI7OM1rilwipvvgm72eFYhpzEVQAo0YE1wG+CtkWbtVQWITMKlJbBuBFAGrKW+AieQMoLqkMncinx9Ia+iNSK+F6vRz4r5AEmRtbcXUeHaEswjCZW4rFyByYCJGM1GVjJA0v3ID5YQJuH1xQ0+BroizgPSbGj8RBEV3lyE2mosoqxwulxIsxDAJFsaP48wbggV3lWK3YrhBDORwmHs2uVrhXyoGHM45EBkMQosZIFTvgUpQPFRpkZxAEesT56Qx+Ipkd8p5GPleBIrz1xRSGkPj/xu6+hEbWYPbE6m2sv4nQJERlgjnKhCWbbAO9gpG79dyMfLQWLDHi5atJZ4gG5Bu+8UAFF8qCBwuQOtrN6PNHt9u5B3NYXQHe5A9v0SXyuiwpsZm8SeK8hmQidJdQOg6vMIRbyxIay5klvZTM6z38ehpXh7XFtJEloSzzIO6BH5/kKuY8yN0SB7Q2Zf0MEExap3oirilYw+TqyuCHhveV8PqOJiRFAd+VZoEZfRxoksrzYzA7COMZemLPd4QyFnNuYltmYRDYxXloAKhzHl4eG2e66NZc8tQrGzZR8fl+IlxiLsmwMlVJ1RyGaPcbzUQcCABRogWw8wELhHSeIRRQSssaQQAwM2LEWehTJvZwRkQUGu90QoYtqtTIWIe3awlg68nHWkeb10iyIEk/5UhsPiwtHEj20n4I55fHgtSAEI+C6tEJbv4YajTRIXzihD8bEyYM07Ar5EpmC2XfGHqpTXM5ax7CKc9IBAD1PAhFFtEPklBJTxXFphLr8YkLERd7TB26GFnFyWu++FeX9WvKaY/WofPugVzEaTcwsJ2Ojx2seF2BvBfdjyuixGFrrnvQsRTL+d48LMAGZwGlRZgV3vCCywLFhJ4v1rQoqAhJ/TxsObGPB63nKJjWKMf5pciuKjjN5g8aQ3XPGeSy5ZFvklBJTyakbnlHcKeFVgNkZ2uAFazLG0Epwy7vA2rrtln3OKCdjosTrVuTggLPHbyLhjOXjaCaEQwQp/pRUQuhXfii2hFfrl3XMhhSDgc4xntYstgV6RPxVBqRVew0GV64PeLBsBazR7D7Sg4xgLTPB+Gxk5gxlFecSFBQVs8nj9LcgHr8qWzBcWyzzHHRCKEZnyV34OuKzjxqjNPPHOGZByKnyWf73gUprShL2y8YciKHcSXl4U47vShBuUuGfjDdCCAnYz2hC/qkg0RI0nHoZQkGDFvzN1nFdL0ACqPdw98Z55kIIQ8CFaGUzzccgJ20R+TwQlKy4qLLWc58UngqG2zfXQogK2GdRFEKcpr35iAq6ReFxhghX+wdS4d4uYQWxEXs7Oh9aCFAXFR2jDhQJzdK0z/gCCsitcUoaeg3fBQJpxsDLyamhhAdvGugyroCxvsyydrPRU71+cyOQ/MRVjIkDZx6wyLpgOKQyKqxnLyAZ/QehT7JHvgKL0gB2je4PeszdwTzysAZBJv6WNkW/hIe6QeNs0SHmK1zCO0SbyBFxjwLejQvkB2w+yNwa4H9fwEFewfAi0AZDql7QSYItYHoSTHkaggcQF0yBNmISXMJYgJI1PAXApk4Bmke+HoomKLZ/K3qzcB96YWIm9Pfn+DZFQ/YxWwvhCxrjKcm+53Yx/nCRoRoVnNSrDh/FU9tV9wKugzYBg3pI6Fce8mTyzte7ug20RGgLFhxjbgcBE+IEifyyCxsgxTG0AQ+6rgx7ZIy+CNkYw9bY6tQNpNsJu2DTVi2ZDGgPF5Yyt1nvXIudD0VyR1ZbUafyABeYZ4QIbjRueH98coUFQzGccN8adjP5Y7hm/gIAmB9lu4D5OZOTTG0g8FlWjEOSbjEX5/4Fcp/ofK4o0S3FUncbJwTcEj5G7iZegQrNFqp/Qinqxj3E/1TetJNIwVDiZaWLACpGvhKLpIiv/q06jYUzxB4b5PD+4lkjjoHgFbTSL2j9rRL4divVFVluSkzcLX8yTP7yRhBaA4uWM7ovlUZ9lwGuhaEORmXdka9bDPkvK964u0gpQPJ+DFttk2D7ycijaUcIq/67t86V9qu+aJaEloDifEy/Gl0LRmmHyr/j7u5hiwVTfPUukPRSHZl8+fAPoyPhyKFo0yA9oy4MUcoh3WxOoSvXN00XaRHEo03IoOnW/6MCToWjVIJ+ltdeG1yV+JwS0DFa7O9tEgrXug+2hLQPFpYzL5buVG98JReuGyb+ijSYH/1OkfMfcENpHsZeZjybJVtgK42lQtLDifYzL8SZhH4zfgKKNRVa/J6cm8BhmoytPT26J0EpQvIBxXHwlHoq8Fop2lrDCbxgp6JlJskLbxr+sEqSlELDrUvtyJ9IyTcgeeop7IqC1FS/jXzugCFSArO02XoUKLa7ynX9/2lnEAj9B4u+mqLRZwKb/wABdwFqW+AE8Ld0JAa2ueD4t5+wObahD/RUir4ai3UX1R7Tsy+yxDSTpT2D81ZQgLYeA9ZfU1iICzknjLB7E/L6NEdD6ioMspmVwgsACoGu0gi6lwFU88ngoOrDC5VxaCBksMV0iiwTGLtTARSLnQ9GFUoUvM5YhNewx5qS2Kh3gFsZfTAnSCQgy5yZaj8wau4DyQpI/sgkCOlKxy9L0bQJKGADYjiWQBW/hJSPPhaIzK7yUg2IWt5hmMIMlRr1Ip5HvgKJDNXyFcQygzLjBPuArMv50cpAuEZnxN8aSzFBzmAEYAqRkJxMXrYuATlVs/WBty5VgRHB5R1NIInBAOQBac39qHyg6VrHvk8mXLwXrLKcBbLE3nYsyOMqNp0LRuRXOo41B5iEQK8ghUI9xIR4b8FpU6OAKH2YcC20x8Yyj4aHIzwWVLpKw0k8Zi6IDOyzoglHeJM8O+KMVRNDJAWv+m7EkNxiAFDYE3H2WyLPGv81FQEcr1v8rrSQVXWHMs8Rnedh4+/pQdLZizZuYRucEM0wLFOMMX4P5EztC0eEVtnu8TsuRMwcYMXDMcaP2JaTEk1Gh0xXHeUqjkKOHxDV4cZ54CSp0fIVz6emZTs3iYa/QEy9Dhc5XnGPuYxUp3bIr78ONl6FCD6xwanIfVe4UzwQ3oYYAeA3Gy1GhF1Y4j8lHdRTOGJLJ5BE3okyRR74blfQDVHguU1qeBA7dAlyGMql149sQBH2xwvOZ05hoyPtYpcgTr0AQ9McKpz3BtBxubs+RnvhCqKBHSoW9H6CNyqdx44ug6EqRIoBJ2PVBWhfwBpLz1aikb6DCTgsZR3E8ycoAb8Toz4KiOwVSCCps9hdGH8rKvBTjw0ejQi9VzPgMo48msnYN8ZNF3rIdKvTUANzI5K2S8QmQBCzmuQFv3RAVemsIuIK1jWL1GuvszSN/sy4UPVYUpz3G2BapceIju/MzU6HotxV2+DPNWyI1I/jIRn8VoOi7FaZ/lMm8h80c8OGjEAT9V4EXZ8Y34FmI/Mf2qNBIkSaILARRHPcAf15gH272hV+aDUVDACkPjQIqbPZzmncN3ZjKmF8NKDpUGoYKU95Bxo6xGczjxruPRAjoUQjAGfdw4C2F8iiW+ak1UaFni2L9b9BTWwEVzWeKfPJ5gKJ/T4K8LDK2ko+SEv+xC0JAc6W7EAIOuI2eWknsIFNG8sOzoOjrFea9O9Na6YKTpMQFJwKKZkuXQYED/siUxsrpSyETRvLtcxAEPQ6iWOUDZPTxsC3JufAEQNF4EekyQIGTbmZtY6XT0IjEBG7k+9eECvq/BMy87immNAbhNGnlvMYj+cuDAcVwqMD23yKjj82eWuJ9L6oQBMOiKHDO7aytJ3lkfu86gGKYDIK5Nz7NlErBe3kkf3kAoIIhU4Htv0taKgav5FZzyfMraMDwKQpcfAdpXkJey2o+/bY1AcVwGgSzXnobGd3Hb0I0ZJlL37s1oIKhVYHpVzxCj944x24s0T69LaCCYVYqYKMPPs1s3jM8GvmVPQANGHZFge0+aKyjNyrNeEzkDw4AQsAwHBTY+XMD0rxhadMjyR8cK9CAYTkosO2Ni8iYmtNoiuTDH94HEMUwHQKw2rUPkGYdl4xcePUGgCiG7aDAulf+nczRS9CTm5P/evWqgCqGcVFgpZN+kMlk3kFuRvJ3l6wMVAHDeqgA7PaWBWRt5uNz32Qk73rHPhWggmFeVICZZ3x7KVnH5N5+PiJFJx/76tmzAahg6A8KYIsX/PBp0gfJW849WXSSv3rBhgA0YGJQNADY9rV/MLI28xbzGDM5+OMb9lUgqGDiULQKwKSdX/ULI5mSewu5mZN86hev2r4CoAETiyKilQDY7kVfvpskkyVvEbfoJLnwK8/dHAAqFUxMBgWA2Ue+9VcPk2SK0RKnkcycJO/4+pWHzQEgGgQTmUEDAFn78Bt+9SBHphgteRM8JYvROXLRt6/ZbwYABA2YABVVAJC193/BB359b82RbtEsuXsJ7sksWqo58r7ff+LFe80FgKAqmDgVrQQAwlp7XfTm79/6OJ+xdjOLZmYppeQjk6eRZhajWfKay35iwQ/e8+y91ggAECoVTLwGrSrByGkb7H/hdR/7/t8XPxJZ4NL7b/7Jp1534SEbTcdI0UoDJmxFgqoGLHuFWWtvd9BJz7r8LR/89Nd//Os//+uORYsXL7zrzjvvvOXvf/r1j77+6fe9/qXnHb3vlquujGUHrTQIJoIlqKoKRi/VlKmz582bM3P69OkrTVbBqEVVNQgmnEUk6DJDECy3SNBlBhFMiMsyQ5BnxP+0KyL/xe///f8lAVZQOCDGggAAEDkBnQEqgAGAAT4xFIhCoiEhFjqV4CADBLM3fhksNOAMgBsPRr/ifyx7e7jnhP7/+2v+A92Otf2L+w/5X/Sf3H9zPkh/t++3qj/r+fL5j+y/8n+9f5P9p/mv/ev9j/f/8d8G/z//yP8T+8/0BfqT/zv7f/ifaz/YD3OfuN/yP7L/u/gJ/YP8l/6v9b+//zG/5v/1/4T3Xf3b/Yf+L/Nf7v5CP6R/ff+t+eHxtf//3J/3F//HuG/1f/I/9z1z//p/tP+F///o//rX+1/+X/D/4H/3+hj+g/2//u/th///+n9AH/j9QD/pf//3R/4B+93dY/1D8Xf2J+Vfxf+M/vn9//Yv+7emv4r9F/df7r/mf9H/b//n/wfkk0X9d3+5/ofVH+Rfb/8b/cf8x/uf8B+4fy3/uP8n+5X+S9Tfzb+A/3v+Q/d3/D/IL+P/zP/Df2P9sP75+4P1WfR/8H8xvMB17/Yf9L/W+wd7W/Rv8h/g/81/xP8F+83uE/5fo19n/9J91n2A/z/+of5z+7/ud/gf/5/1vwz/M/7bxdvwv/U9gL+U/1r/Qf4L/Uf+P/G////7fi5/I/8n/H/7X/6f6v//++j8z/un/E/xH+W/+v+f///4FfyX+k/5/+6f5D/v/43////H7if+X+ev0W/cH/oe57+tf++/OVIPUSHbRDz3qbAQqNpDdHqJDtojwrufQ90wipvwmwfmFjhyN+JRiZqZB+40CZRwoIqOzy/ucfDJSipvBw/zyEUUmzwXhd9AXNTa9wIXSG6PUSHbOon4OG8Dvw5WnA57/C3HcI///8vLJW/hyfitN2PnoM/bJI2DAo72vAw4X6l+GurwGJQg6P9pmIeMEqqnEL/yccBnUAdIbo9RHFPB99Vqak4RFyXpr+xfAqBF/5Oozn5yuZwXpGzNrVfTex5SPptxsdkGYMPVH/NWkaJMuba0o1Ykb/GPkeSmZfWvvmEQBOcVyzI8K7nkA21yUIcLBJnnZv0yDac9+DL5Ftlg1MTy3Zj3OZ093/88+a4VGDc2y+HarPHidsQytQabU0AomgIJ3u1hM6rw1qKKc6AG4CeOVIJx6ab1NnqS8QlA3E/xXaR+pjxBOFkrpGl4ib7sQSZTgXL7qjrR1aeIVx8vJPKmszgYiEbsb/X1l2kVFp2avEEJU7SA9urYGxtEbw620Oxr6TUCA+3gbk7Ydnprv2Oz87rekX28Xf5256zzfTLBIQOkLiYUa9Smj8MmDVE3apsx4HRsxGFanoYYylPuRHaBWYvToou17SEEn5X3dWNo5dH2NttWYNGwiOtTZ8QvoP2rDhF3hTopanXjIi6ieS2o1GMcQWdR8CpWMU0p8Nx6xvsFmeLmQV6rjjZrDClfhoDPB5ogfmY8WJHgw6csacPYq2YoV/spI48WQTM9/gOwxVxUZBjwYxXgo+dEyw62+87gbvtmCThZ4AzI8SYzockVQlJ1+qQKahJsVqNK6eYMU8Pu8MeUtHGnimWuXz4gZjGPt6G21fQADIDfWM8sqDjhWSf5sCFfMIIGa4UOObuCxvAprU3HuMlNT64B6Jue5Z3EsnTlmrCYIGGtF82XEsLxFjl3mvd3gvy0Gtrdzx0JfkUiIGPSSyef478I1ZDVQuvcp2ZRL/S8YAoe1Vzc3i5Zk7+CwQq+IMJtRrnbTJC7SVoVde05ukkWFlCOXSnaEfgALTmykuW1E+21O952DXxSJsKtyLbpbLI1J/djpTYr42T/J2bH3VNhk9oFlWT6z+88socKoJXecCVhPH4UVYuB8OuB9QXFjvsah7uA22Yi6zLTX7r4BFGbxZe+4D9q55tWfj3YxHz3nMfY+IbxJq4oYVgTeOZXud/YhoWDPdK0Zz/TcLiNZAx8pCqacr30uXbDY3YDWrxjHb93ArNNYEGkASO9h2YSXghBBB3mwf3hDOqprP8wSBmf1pfGhqSjNZ/ubZg1rXxlUToPQL/mONtyOtBf0woxqlQRrPn0YMeUSson626B3C6s+p2Tz3+XmsNHyFJSaN+t8wQgBMiI1DtJ5MzFgbOvqcoy6jH3aNujdhKQ8///8u20X0ijmBbSm1R3kY3YTxqocVUb+/FVUKC8B5TMFvcOMuvK7mphrOFuegQBYuEw02LCWpeAeIgKh2HMaSvAx0a6bVmN8G3YEQDCavjIcQS+Hs6HlRg27nY+zad70BBzXIB3O7rgYNkJo/zkHtY6ATI1i5HRsixmnJ4/tRv76+7gjxGN4LbC6UMWI73LrCf+cuoXtsvgZqP4rHb55UYa4UZ3viRTeCHwRbDgZmAmpsdkuLHqVKVncbCFjeytcABV/mlM+RA8RbJmbQdtjPXbhYDlkRZUj9Lh7UbTmAKSIRg+1gaHhUsztZxU3JZrZvAD/3yWTq1wmb392+HVT7rY0U1DNB7lAhE+iZmVIhlZg5pevHyPHxumLS1Waxn04KpxBlM1jVpCqrQnJ4x6lB8B9DBfzz1ZU8doqYlWpbfzyCgiXYzux//gEfWFpo2RqwQBIF4qgp7+g0uwERSVvZhUNB6Vs4Rh3HKw+zesxuUPzt2Tv7hmY7i9edLaVe4XBm5cP/McK48OFIhNh8Q8eE2R5lhE5eafDoGaamXma8qNVf6A9G6+082S8csnQnuLhxjGSrMfRxPiCpgK3e+Pqtow11mkjeeJsS053Za9mt9S8T1enEbSgF0kLxYufxjHVmwkKUXgx77NZhcmeDo6T+WH9xxtJ2+f580ev2oiohkenRuu0Q9nLi9fV4r0sIpEsPRK42FpEVfcz276QSc2SMQOrCQvV6ez1A8BoHyQJ7xbRsKMCegmCyVsNKChjcbOL22+LnP5D2TCZp3aV2OxN3ZWdiyEW0mLTkSUrYq5wARUgs9MXVOgJ/9lxTn6u3+GMhZ0LCmBl6JlyO7V8avt8LUuQTWWAgv33ohSio6l0dNnxPMMkn7ryS1kFks2Ru1hq/SIJDtnmfU3TAQ6fGSSLwja+UErbQCPi75S/kS2fKgzwi8D55zbbEI+0WL+K79l+njQu9FmuSWi4WlNMnNx7SRvOGl+f5+TiSDvW/fBwp46m4LsluHNiq+LIBQNhHCkUr30A94K1d2NQPgV9cWrvkV7M2v//9IVrVvto/96K+wVRwbXdyw3ady0jtwiNP8woblukRSk49c2LZRiG02/IQkdPc6QwxnnD3W1uA+1ew0nsFtcxCpZjHcwKR3Pvp48gOA7k6jYkbH17GDsE7/uohXXDnN2UPUSHbRHhaJUv8D33rzXR6/o4RPNF9PFy04Bf8bXYQvF+xXkiYQXqWiMFS+2NOdh/qyb338Ul9XUTR8HX0H+f5hQ3R6iQ7Utvp+ozG/zChujyQAA/vxxoFc6BDQ1ILcZZnOK5oc+llP/9nmNx6Uh953///nXxa2g87XgTaAOj7U5y7bFBRtV1GFdtr/TCK5UQAAAAr4iLhGUWiBTc/Z0yC4kdFIRbKMJdVg71tVVsnxIeG4Dr/5VVeS+qRj7zHsPn/U37eShFfaL6ayU4Wa1N1HJTz5QitIKoe1PkjHA0XU7CjIKCP/4X+fTxYFBFSa/PWJ73WnnFQFy658fZEiUTc1Pc3vCIfp+47qcbuk9qNxNFFge1aTxT38hi5j6MEbIvIQRwUU+6DmYQzCHymZYhjwpDpAI2Qem3hC0LR8FweJcu8eAq3mpTpex4D7qb6Va29wtIlccZ8sJxU4YdMtkU313GVzbXxhqYISR9+6c+ojMmoF1Ydx21mJpr3DObUulBJHRJb6hwkvSn6eNaLAKjvOIj9F80QcAiGit3gMJPqJhqJtCrYlps2tdVlaqVf8XZhlNNi1RP2w/hhfS/NYf7be4DQGna/+58ErrubB2V0VaNWp2w94dhVPg+01SjY3f+YN+NrafxeiE0DXX7lPmOduvbGGfEFh4fpak0u0EzT7cWaLjmyhPrCNo8ItqWVkOpHkAyFLso01RzO3h+iRj5a29deExMe98tGaMYqDr/0uHn276+yj7b3wcLeDUYGqCkwmYaqwXK2opNI0kXLfQBM1xbED9GpHPsH9IjvfpJsyEZEELYwbpjikzNOwAK+HFswoPfb8U9IWArF66/wf07Pn6mOW6ulY45lhWcl9gFN7MKseLZ6Y3TTnSrMze9iOH3/E+5uZvh7keoNkXaI5+JBNO4JBcCbBM0yNRjXDJ5J8VjPCSxqVF0jb2epFYc+MfVTj8i/HZmKp0wY9VjywzFaV/u2dSjTzOkq+WOZwY2lkDlWDvBr8OWE76D/3xK20Zd80tZv1o81dqgQFfqq0kgvi7RStENTrTUSKDp4KR7hlopLuJSHf0vLTFgh1Kt/AqX6dFoeYXVjKYynhE1vC1vu1UVw6LjJjfD9kOfsjclFmjYYqNCcVEXvxb716xdkhSV3j5U7DICASxFX92ALVzeyJQsRocjgmUUeT44iD1wUXrT0iLVZjKmB0lXdcMWrSmdwajgpO0U4CqhmzH5ijeN9xql85EGbuBi2CmVjKvXTYlKYUIPawuTVkiu2bNWD+hc6uy7LAkIq5lLJCX3IDZ9H0M2m0PKHd5XCkr4AxzliT4eqcwZCQiUJ6ktTVB4OEPUEBhNlvkQVwWNoF5HM6HCCBoR4hBI7Qwvk0OTn4OoIjk6DyINlCahUSwgzNOcBgRyQO8T2vR9DwIrW6jqhfjzBSqTFCjFNz3HDrWwSDLuFkws6llwmqC+z1FcgMx33upRrGFcTQAAQ6eFUIlIXwKKmfjoNsEhKdP4n+0bKQV92NR0z2U6zCU425+7S02ItTlX68zMv9aDJRtz/icNRnmcT+FpkJfGOpbxt29nWBFyTFWCE48KPYUgU4Vsmehbz+oGD0e20STj+qDuz4RyLsQjdjZCm1sm9XTHNOtjqwc+OBwfwsb+4zhQyG2IUoptyeP+rBps+Eg3CAJ/bm0XuxrQCS5Y2juC4AJDAAq+obvOoXCv3vajKgAg7g4V7e0Z1mB2/Q/L7IHlX4AiKV8fOtJEeyRMtfC1Jbv+S3QTv5NcuqI30HQuUYzSDWtctfO2zIAJDouzdlJBNvqkFVNpuzQcAVFpajbqouVlwxuHsaCe/PSw15JWcX1Y+MxtIAllh+XhQDmbQS6tO8H2Pc48O479uyxd5vvDFKxC6C6IlSFgCPSIcNR/kUuoDziHezen55j0WUMVE6G4X4XzNSEkrKy8IDL7qrSbRKUpyydN61FxqbvYgQu8G56h6ako42FSy26Mz7LiLQpDLuHmp/DvSMJ9RXKr+tzeLDWLZhaBgLVwEzp2gRBwLBfWaWo7l7/K6CQXSve8wiPebVcDS9rFi//jjdUQIFSQ61LXy0vwiohDXg1q9KVmTBetVuVYca7AgVAV3j/OQj2q+ZhALNYqxkDbAcirA8B2MjmTD1DLFIkQSBOqMkJiJIbAMXHEgrQrqEcYP+UouDNIaz0NGcZhrr3FcL1qYx5/4ZQfHmiJu9CtMjJk5CBm90Thq5QbjUn46b4b1qW/gTnWVbrxRrvyIOg8DdaDh8jytBnSNLMHSJhf9WaEmrTFPGGa4dkFqyJRNjYkJd4VEqEgebiHVcd++iWNU/b92c2LRTNrPSPtHGk673bUpeMuBa69/cUttCbqcpKoe07ovA4Lr9FAXosJHr8nzXIpKCXQ2/W9Z3R9g4QDzgj3pmLUtNU+um7dSKyyxhSJV/JETACX5iIH2Hq683BHtUv647q8Dvb/QRMT+2T20SzyH89Rn1aFRwqd7MJqZ3rN9Z3+tZf35NtioTuJBP6RZbzHIca29ooFHIcbfKx8pjvkqe3wCpbBhOGmcuNH/wYeudcxirCL34jq9ha1oFynBA/tQ60u80yyxeWcTPHmjVKwBD7ltX9i37Z2mSVzSkL3JqQXIEJAyMcDvjlRDS1RsjFyJ5/hzzDmQDKlLRNVD5ZnNIZYw7uFxxaso7zEhR1HNj3TtSxh2Fqppk8Y0O2snA1JAe1q7eJL5DQi29JEnvqrmNPJHtf6cb+VPMU4FntlywIzZE7BuYOU851KGxa0+VeGlPwZs7qHrDgk1Q42vX1ZRiILd8JJ27yn/EtHMJHhwnqbeieU2Sl7LVkhymtI3CHBVff+hnc8P27RJAyf7zwsBBGzaCdIqNWBapzQd3y8ZgrLf86QRARaH14HJoASr+DIB+x/MyfBAhCn8EXnr2agXuhTSO9MyPcWWZOKTEI8Tsvhz9+D5NC9BWEnVFVXYW7m84vtNGI8zIqiwBqxPBj4/4gDQ9Et6zFd1BHhId77b8yJRvgt/Gjdpd5LfGy4ETs6udoyYNrwAUkCMf6qYGAiTfPGJK2xZ/Uo0qtPzni/5mC0imITXOuuYPlVIk4Dpvzctnw4w24XZd0cqizzk14bjFvKfjF67VLONBZp/CH4AI+GUUx6iDfI8Q8ZbLw5Ot7Aol8kND9mNQEqugPjH9NaNcs1c4TeXKijNLjWWRHD7pogPPS6WLs4GzzEzITIK7dZY0s7rPvWKsre3PeBFQeVkqJ1TEO4zekaU+WPDT6JF/N4RFrczi4kC34+bTT2Sl58K/nNSGzK3AAObjbg5Aw1bR88uzZ8+JSHAo2yab5bWWgj4QgROjyFS+PXXF8d3Ij5WCfONMOSEZ9B2X9p053WWg3V4dvKQG/OANI5V/XJoIEh5XfXWiSv8xEP8Jd+iJV62hfIcZ9q6ed73z3jhLDe76i2OLjMGsDdLHeFxUTthAt+juGg1WqXjSdN6UwdsVDRl88P83tssUQNMmVtWXNv/daTvix7A43kdqQzYiZJzNEUWSXH/WILOgJWe0aYqvCP/VjWaQEkDvBSjk/IEdv8D4cvN4NoF1KOgRdVGrf0kYIJOuV/UHnE1V71Qc5zLdf35+yqBLSCV2TaV+irRBc6BfFmip0azrCJFO88t1n9r4avxZMBZYiQvE4AjaJzySaKDO7fuD+OwkblRo+O2geRC9vbZjV6VRNrwBMJ5VxUTPqLLS1mS549Ax22kAfmcYc/xjkwoIZVtec8TuiCO3AB4fUY8MTPveEWtsACKWXpsP74nKCuRoe2GuUBt7PRvBExDNzkYl2hjvcBrAJo39DvgkzPZirV96Hz5OuXLkXynSDVMO4jW5rnh+W+Cdgr8Wg/SHFSvWGoCuyPX9OBBxnORIOn8MHsMHjXoojsnG5QZCCW/IgJYOI3a0U+yEiscgXfidW74yyvVeaplsaa+BBSljH8MYiV9nDZTCR0axlrXRfVRBzFmaA4xQEHQyJo0ldqQEIsgw1f9c+mkZoOQSWLHDVb8vtloq5qPNbMky7o/F4AZVv9+eLzuJgKn7d2Xnny878i1TBAuRcwQipoShH+fV39/uGKP+5BEoxfx9PHESEGlm6qQojbEepaWpiiVvdkrcoLN2PeM1NdwX5uF+e13/2UONxu7yM65fWctd5mFEGLDlWStCUMPthFKSaQlky5ZQ4jEGfTw/Mt7WQy7WIO+Yur2i+Pwc42OOokXbD0XldisszPG2gEgdetg05KVI1QPn+4Dl+LeeiCvBPGoM5hQZqALZ6WHMD8VuEvK6+XQg6/KY3tIWam+FZUgAHF5Ge+YnFFGAF8xPmOZjHMhvo2si9yszrwEgucZnaqOPkf9ZjANizkKuf53B/5Foe2/GIb00KwwmPameIh+IXPQ15GEL2FAuYtuupm0euU/prqk+UFyF9sxjJI/6y980tOukr7E3VPymgzsRhxxDfJpSy6y1+iRFUbFJqiBvQepZY+TRlUA7Htnhq0co+i4mROVglet9vd+VjY2t16pj16zEKtW4FZxpnN4djFKs/DqAF6W1JbS/ve7I0dQbhljNGuOB3ECBfa0rWcFJ4DT9e/6NSppMoPdRtWfFEUtsILK7U168MeHiV4icFPqEL2e0kK6TPaOmj401t7IAyab4AQy/j4KufNmrT6qmjgm6g96E93/MTtXenQSiaiPF7kUFbtkpJrAr2aOtCjRte5mxHkf9WgxY56vutA3tLuJ+x8oQfH8in1BOM3GgbSFcXFjTD2noJSBpZaTUKJAjq8XiGE4vFRVs19CmfTKWjD+W1YEJqeiqDkO9/IS5V9TPp5/SKM6xTUSaW4OkdzWnExIkCk9W8/tbfVwjbKKkcCzAa/sS3/R7/HC/TsRcuCdQj9yjvSiBsZ20FepL+w2/JK1REbnqEuZrzUs8nu9qeZftIlwEeXvRKhbw5fy8Y/YErx0I4ubTyEUmV1hCMcHtXW/IJ/CvfqBoQhr3aU+VqhGs4diMudKqYi3Eb0U26Cw4CVrcWXg2iKZjOXlk8oZyzRxCiVLl/vTFsnheNMwYekOAU2u6phUAi4TnUhDwQViLBGi8xDjNJgp+IFsYI6oYetMpUW0lRRuVM0hwhmyIjZCp5WIIhPLYfEgH9iDt1dtHtz+EsqtQubh5DIP246SAsGbGgo7ciw4zfxxdVTTaJcA87LD4btnJckbsFXt88EL/Y2yjX6Lzk6ujMXRI+xLil2TLTu0JwW2koWKmB5w1uKu5EqOasYGX2B5zxT5H0e6iE56R4UX24KuchsvKGTtZERmMBJsHP2IoUCMB5ryKG0oeG4ozkj9uCv5aKje5n45//TRTRzDfBLo+gyvjSUzD6yN5jJwlVvGYYPOrLLOTzfKYaRsKtGOetlml7zyqbyAaj6WJPYIXsOXi/j34wK00qzbxpm3wYp7XsJrtaT22VjXKU+2yFNuwtJ+NO09fAtA76KaaeDWOGEiBNoDsy7TPL5kW/WmR1j/47Pwp/PA6bRRdTjreKCzc3nviBi5ORMKgO0wvRZ28VGpLHBz1Kq0oDYrg9m4S6HUWo4d2bNqcKnjj0TOAr7hUkgJ8rwARAcp0t9XODH1sojaZunZBwVYguMkPeFfx4AiwpC+KX9mbONO1E9Oe27a9sCjjGG+ad7gN2addmD8PWevhTmGxyPeTXuyEpmuvt9NLl4AOKMzVPnesGKLsaXnTbGGQ85jfjY+juB/wiWJY8nkMrVd4P1EgyVpPdIdrAabLhuJwlYhspP4DSS4m1T94NaBrXZWJyxb/eVMUBJ1suyG3alcccBgF8eaR5l9XhUKL3EF5JUO8014Df0YW1bKfm1Rey1hAi1/Z3EfbspBUrTtQ7rMaUhZAkFwXKYvc93D7zueWn7yN2+4U84K2X9o/J/wvZCC7zMTL2Ng0n3Sxgcq7wKMkyUuO4mC+M3A0TQ1hfRLguRaH9muiVUi8189leHZhiu/pKqXU/yOkP81+RpQBfY8I3L/1GnBfCaUqoaCM9tyeN2k+vlgiqsczL/p0V5GDof2E1a7credGF9JDeonY5s5vYDnbjc4ea7nhPjb6zYll+PcR6Nl7nsjqJW7dIZH85T2g15xFfvVj6ZsO4HtSftSast3ttzowvzPZuULMjS36TA99Z3/X4J2GR7J3N88NyWZsKyT/vaezZBGQNggf65nLSzLN+BSGT4JlgSE8lDbPIJ39ljYiVCxhSHIaiEvDyKblj+PsAxMGBfyuEXsgflcyWTZBUOe8nl2HXcscSDCZjRgQtafv27PhNfYrCp5i2U69rZBKFdPtD0cvWUNrfdD6Thdbc8F5OCGnGVnWZ11SCFV/le2DnspjpyJnLu43+UvbNqzZEhCoyXgYrMh2JpN2FSvVtU2vfMEQPHvYiYGOaaCRr52oimTIimqY/otxf26VkCoWbtQOpREkGVBaGKryvkCXXwHj9cqbzclMdYCb0ouMUj1yfY23BJ9ZTJDqTd23HrW+lquw1y1hgsaMdG4MBChK+VdhuWAoMfbkeSVKrXqJCYqD25zEfI86CCrvH3PuJHkmQtSFbfzm7lMwGWFRVnzsGVu4XWQphDGp+YEI31E2wP7SMwIdiykeOWelK9VO5bl+osYRYlXdWSmv7B+cPg9+Vvux4/cWzX8YuxfwGKkQF/vuCZg1kYBGBJJ2T0Ymxa+CeA2hWgLRjsx9UYpDdfvkKoqZ9MKadzmIarzNq3jM25no1Ii4zyWvCCiTfNcw+fFXE4qgH/qyeyR5TFmWF7PAFKcUyQJzFc9r/JV8oM2Z7bch3O7D+UrIQX5BRmQ6UYVKMrkIpWFniW4o39gT46XR3EMsicxy+CqsCBFzX/qwftaMVQNzHQoMlPF1mdTjfQQWxY5EtQoKE5rcCc8Vc5P7q18D5yFIysBjYcYHxoyvwM2uFNjBI4pIi2fCEQ8iYMKnuZbF1Q7FQLsKdHi5jk8rhv3cz0bM1kEnecb0/wn0V/xDBJxhyXf4x9AYuQwxCmjgKzHPcJPyZknLcnGfexdVNexU0hR/ge5aui7bBZNmW9EqW9F2dgBIY1fMXbM1tOky3RVJ+SLK9OUKyIIM0OwpU8jerNoUE0Tt9TBhXWgTYrv+NblA3J4oavk03TMaeU4/mJxy0d4kMoSJV5raj338Z+xPEyDUz9FZcgqU7gBQhtZ0uhNK21rKr3Wfia5eyvci9t+EyExVm9VSp0bO/qjfk896z4aoL6pw1/inLhmIk9BAeNkxBgBrQ58+UXMUgxNAlpVPtN/SEtboQbiTY/04c3zaFNzwuZVx7tQEWdGZj0XzRQzzE5BODEsygD++FO+Lbke0hU5252iBPpmpbwkfKsu6p3LwBGScqVxaaQlY3Fs9fzPRYZqXwPTbTlaODqoRCYOi4oIogh9RG7qVLACnxXFWZLZ9Qm5RTiw1BxUlivxii96Tpzh8yTNdaRIQSgBnXCv6oWtd+9yXtfZklvExJlFlTGxFgipKsZ5o8o9F5040ze1oekGly8I0xkuKPUC08u/UXc9fFKDaaDL8+sIe4pF7iqkWIAMdNZZfGgyTBs5UE4AoyFgxcc5HI4+4S6HUW5EU6brWYkK84J8alqm17WrzmpFIm6q5etbucHtooR0Qo5ZJHRhTotGj6J78unn0dzFXFxnMnMRvIvidR6r3R4JfIFr18DBu83oJtGyuRR00O9to72U8BAomzJP8ZYsIo3dOAnsHotoIiW2Zy2ZKbEGsbW/9dGm4ivuxXArP6+fNfSgUMzYZGqjQhT58nkaBP8nv2qdaTR8h0c7fy+nN/ORmqxqywWmLk6E21eZztu8yrCJSNEql4bz/ForFdMc8jEh3dRlOqAORB5p9S+hj72Ybvl893TK/ZtrWeZQhtRaGcjYYC5/4545k/fiBmVnqKGIoKL0jqEeDGq2b6FX7+S1OJyDv1Uzg2SXhGMayfmn8swFCegWFtexth/kZgr0yZrVfoBKQRjJJ9OZHq1WFUsguKN+u//1MaQu9tborfF19P2czFQ1mhbZtuC9N1N6f4MPkV3SaSHB4/BO+oWYVdMWvOYFwdJq5MK/NAYkN1uVDFcSp2i4fsbb3+Kxec/DQvgfhGp6Vc4IeQOz5qqnb5rScncqmIaC7SLx0pdSHBDjW+RLNjPHmVx2VFf09CeK1CP0J0y5Vq4KFWlIR0/zYQ4TpAA86wgbaE2z8C+daSo4c/0yCKtWbiSDnZ2Ks/MqTVCPrS1cM68w2o+OnUUlpBMqzt20wdwEdpFyYYK835zYZtsOCHP+YLwdu51yzpMEzFCGb03xnBH+yDp8o6MK/gd1CovaKct22TyijD61PUSlQmLOhxnd23MJX+o0by4gN7+qKxRAobBXa6ToCUAizr6L3X6jmkZqc/ThzBToUXRC+b+DH9g/qxBo1Zh8jCdrSCGa00lvsi56d1eSiJiDvcbndilvsxXk5njy1kvBVV+AunZqbw7xZKFTWGTBb/foCHvsvqkth3aMcU9K1N3Nl4RX02QxpDjgOATc5L26fv7T+IS+yNlZuCzunRwgOLGrZUkmoN3+2V1X01bpZh28wxovVUlUEvpxak3sorbWyg5rSb/PnMKY9NUHBTFwcwtDPGNn02tICn+pC5H/HM+edJT9mjIi/Y+4UTzjgYuaXsSzYCIuSa2d6tgl1uPb6c6QEX7wDLakVXwkrgT6nL8+EDj+YkmHEldJedKRbMLOTgXLQ5t+QIbS+IgIKToqYLMO0HTh4PRTCenrACqayIebT9ykH9X+SQ0bVhXcqmlQaBpFTzwxdCwIK1t6HI6d68hIqIXjyqUCefdEQl8p6KYg7heUDVfZMcp2PKyM2gtdyDsv190tPFwCKr7L/SSUu/SLpTYpWL3Et3GMdxecfr0e/nE+kM1p4HQIANfG+/Nxh+L/CYGGh+GzATtVYnrvlzFqbZkf0/n0TTvqD/KblBIDo2Hbzi40sbd+SXV7uKPSHNQh+Sjb5/4xwz+MIRTaGVF1sJGS7vqt4WVgsI/q4gfcYVPM2r+2NEx7LkAktEuHqM5N96W+5KHGr15DQYkg+6X7BA3ubtRoZgcn7gGXcMaqIFi+w9bXOzkPX8/CjVr56nW9N1QAtok/RjW0YbA7IP1x0E6j0uMKhxUhWsf8yg8jrm3lxNfFwEqdz+SywY2AH709AAVxf8t9iCHH1NUg7o9JuBM/GGCAjabUDxo16FQLJJhOFzTx9wQWrdosegC1EFiurNm5gKcbPVZj1tL/RcaDe9ahBdrkIL0UyNmphyoh7tlz6xGvaS5z4x80R4QjSiTq5myDDJNgNUaO/KCxqjHWUDEmwxDuBfWwyTWdC51OBjXliDULjOeqUo/Y2AXsGMnIWvWRkybzwZHzbhWsBVb9lncCMImxaCzwUM8eq7y6oHGMYFRRwfLrYlvxHXsNCftxG7ds3xGSqCx3MloQLz4r/7xRXUnnKpt+XohG4c7v1TpDq0/puPMWWdKtiJhY36rkqhTc8Cc9ryhOtEm2gVN7gAIR5+57pnfvSWF+AGqkGLTIykGaEmuhdvSulmHfKhcCiwlnsC68TzqS1bpG3qLLCy0pPzbm2toGtKVn/qKIm14RmHqnhWq7B0OVjLkglAgU6U4UD9fRDRa5mp9+DOa3HbszoQsJE25Mt75uhfrCRv90MOZjg9LDwNLuS7zuFTyvhPc4abafpdZ/xGbqvrzSb7DlGCDG1f9o35P7pTDX1tJaYlBrpGPJuKbxk1+uMvruyCk0XRjvbwks1dWw1KxX9Zahiszm7DXRk3I24gPCt8oeZf8gX6kRbuFC9MHLzrmFSLHxqAUe3zNDmDwpAVECOvwxVH02A0MldU/hlALZTDASPZbNrvYdY1c57h2aXeMnQJ2hoZkV00yyanpg9HMx1RizUkleHESbPtDRN0/8Ws7VB2pg1hj6TKC6DreG3RoAWUj4fGywIVpiZfUEriEybkRkU+7563FxvTgvfNIHP86yH1y/v9H78R3IwwT0e/djKZSlVqcswIlC+cGBQlHFTNVsBWBth5+IPaN/FQ1ep3zntdDkAcW+9ZnkPz+OZfgpFk4fidVna/AqemQdL8MZQKmbBH2QY1AKBKU7k9QWZiJH9ni/aYUJolx1Aj2BT+NZGQT99eKewopRp3k5bpblGvTQO7+PbUOdPbFTyB6NWjHI84ZGjbhoTpdNPH4+B+uab3BC0uf6j5darkrFPjJuvBEG5rofDN1GA3d1NJOAC2akxfhIXaYluLx1NXUt/aZVLAtQd5E/dsTQ9EpfvYCKAzwK/TXhnUPdfmBYIf/dIgH+NODvYU6YoR11wTD+12PU5eXGYJ/e9qaIUn1bFE/c1WnjzdEZ4Ufz9yMejPkj3iU6i1zFaYFyNpX38o74T1EfSQFebDABikpJd7gW5rGelKchMO9swHgt5j7OCYqhj7Vyk6aUbpHqNZRZw81Y1Tsm9XRiLWZ2BZxeFRXiNNpx4pum2KueTbkfvFEQBNmSAFXt7GCSmPxbYnzKHDnR1eBPP0kJMkmp+foiVXG9IToBcTdWWsDvDm8cZF72XQMacZXngZka72M8xa5W7bvcOn6XFnHtgUp0ZUcx4oiDJirLiwITm8xr5powSB9p6WI34sQLoSjJVcRuo18Z3Z4EvrzMfTxz/KxvJ+raHzGnYG66vuIiVXRxWmKG2mBlMVvHo1NhB6hXztiiODdJhcq/Je1fgIUSZ9vMws0L61zq4EHA9D64S8cZUHRq1iEPDYKy3KMTSJYOY/SBhIKfO8sa84a/Y2EXD53I0uSpVy7L9sAg0pNzJ6s48lp1v8vhrChYXNM4wCemTiOnDetEl7hEGYOEtvyKLmbB5ASxgs1Ae2npPBCeuX24MlFmYqc3HaQDBqagNi8cDI9Le+cl9EOAhYAtFb1ERTWiajQN7bkgqG3opWZQDtD5ZFVnbj/AcrxKugix+mAfAmjkyi46fyHt/GWzdCBTURZ7EcltN5P5lj7FVpJTunGbsxK3dDZ5cTi5TneC7hFwfN9FxL+w2yvXOYPcovDgTGqij7m0HhEAINWIKQDAdS/eDeIDwjYUR3WWu45URfk22mzmYxPSk5Vmn6qLmpTVK9U55J0xGx6D81PqtO42RAhWw9ZQA5WS6UgL8aIgFEKcp61ulX5i7PadDzvO1S1czpolAoHC/MUFJN+ccqmHJiDInGRJKon/hTm1QI+WPOPuaX9IxB4jEZ4Fp0a1VvLdxToOc68C59T+EWuWmxS5TVUaE9Hj5YJXe+7c7EYZci+dN9uV7buHcy7YqDCGpOh+TXm5JSGwdHO+BIdi/DSiQHJLsOLZBIFPspiGp1hDIU3wke/rjHxf1ldZ5UL/+nRokI6qdsa9jzgO/t10o+8DAW3P2KvvTOvRpRqRRmPe6WF63TQynN3jmxZXRG2IWZfgNtW7E792ZpE0OdwMq7g7Drj9GjdFpOSGiApyz4Motc3y6diLLat7tkgdmPBcgL0sW1isx7n7wSO34F4QG07dhze7pExzrXQWsRMxDPg1ytJyIGx8oNhEauOy8VHiHAAZ6cxaxp9IYoi3xKitAf40WDcnVD5tWHC5DMclBh4rI4N1KRrsKQBJuua0NO5AGx5fS7SK38YoldxDbSBuM0KwDCd8zksA+1CtnzsZ83FGvCgisz19yV5xu4KgTRStulBPJy/VhuJnunI+2gLUGtUd9ISteNqjQW/hRx1vlDmjapR9zOrJ3gUvhum/XvdNKIrbLtodWeUdjtanTY4q7sAy4kPHGue/p+pYO+HL2fK2QCQ3WTb/C3KscGZeOypA2zOOXQ+Cz1zz4QrFbT9+z2aV4IY+dvzi26kRk23ZFYtGReIMLWB2Xx8GXDHsFNG3DVtHdeChtv6HdbrXCQS4BXY/mR+dJ/5xGyz9JTm33yo/kaVbdPhIF0TxwDT0GLNK/A+/0B60+W6QZJhOkTs1Lg5ZiB8QMLPcx3uFOChWK0+6Od9H/IdjwJTMEE1neL7JNQqqYft7KZyQY8wBa6T4AxPAJOhGqVtOzvaHpVrhkud9byH6QNdhyQU63CsPXOMGQtkGKveBTjFgetAjq577VeuOtFJgHU9Slfxo1s/SRTvQYxTTIlkV7I2+/0pLDFg2p/c8cYVdLq7+7/5ThYHNZ4QjG3MXPmqwR6gJYK0tUyfup1vt0IgiJJvMx4tDEV4MTaIMHcPgWGzXE4Pys2wOnuVKr//KxlApq4n223skUbKRifor5pFxUGVpIrbIbPVkezX5UUW4lQ6Lti1GXqKSLc/vQMtSnHv+x4ll9L2dFisjonQEud4paPBJSVXwXaQfsBKMD4DtzdbEZYg6saPEGmsNC3nFPgL1stLSKZ2uMjKXIErPJR7r/6hzBSH8o4y4G9RnevD+N8TPpSbWcZMGSuICQ1ofEXbBOwE3Zj/FvqUmbUCQjRNSg3dYnWO75+3Xy1ysj0ZLFf47Ktjy5vhceZVb8bkK165U8zOEtyKRizFig9UTPyCjscF7Gsf9ct4Db3KJuEOtpE4YEkKRKJCUNhQ2cS7PhRVKFcio0JSZmnMg6+hzSCgUo183z/1Zx3033Qe5gkaWL416Hz2Ch32iBaCGklox4erlLYjp4LCOVEnIkd+EkkN5dy6GNRXZP8z0Nhfi1sLZjbjfZSQusVs4AwThrFCM8roBw1PF00s02maeaww9dVKumB15dHs4jFcx+N1v4aVFftIXPX8wMzmSH3b/9pOFuix98vQDRXOAEPD5Hy+hNmYugC1hXUgdq4KnSj3gES4HSLhnq07xX2D9z7VhuXRurYGHIvT8dWjI1JYa00CcJf26SHxxwtPYyW8jIA1bLbFPOCYHUgiFvdDdJOmG6e3sz5KXyk65dah+4iAR/ULkZnp4E2kVaRV+lLB/7II7N8la/YawnnRB9PdxXbDBbDt2uUqkfXgruDQ944bfOw8NXHPgIafPDdYIXOnY6y6SYOASavPWmSWnYUCWTwce3aFfqX9C1D3G7LR5LEl9pwZ1n96xWETZl09bayYa9YiVSKpzewgbYWecBJaiCRBBXi0PM2WXNOefWfAgb7N10rAKUBkGoPgnczZSgmnjxByXSKqjn7Iy1KCvbZRRdTHo0OTn/n+u8u1Q9yoqg4yZrYawzO9mYnlRBHibk/I/AO9BFRdXzXWzGZ3vSFeMfvJnVeWmqXJsfPKfqPaYvgYoNvcFnkVfxG9hNjmY1rYFzVK4OUuJ4U2R/dVGRRilQInulOb/4jPG9DgY5hhX8v32AOxm/MR4ahqDkFFXPTqmRXxWURVkuOamLJjGWZGt9yR2sox/yFEkUt+A9+pWjFMySTRxUbXRXlpaOuPn+e4c+72VCHRAdqSIx0Nz1jillF7A8wiNZnKbqyZkN9ZCnLX3Ezm3Ud3YBlsM0vz6gKlfoATyd6fReHboMcaZc8byr/Ka6mlZRQVGX6iGWC43vdZBd9+q5KE8ONoHvSfU2IxLUVPih0PTVoe457/E6FKOVIiOqHnfabEWcJDzxhsf3ukQGYqm33rPB7i0UxRdjfXtW4XtU+vARiZLiyyML/fNAQcyl59Ypaq6h3rUuP81Q7DvgsAHkQayO2zKHcBj/W8ErgOMuZ5PsMkGz+n0SaACb9Iaigf9z1KG67An/o12ivhawtg1MhcrOyGoRc7y6fFZA4aeLgNOWaGUXnfxmOWFrbRlUfIz0no4o3ZX1ShFlBjtXevSRut/TT4Fg+UE5gQzl3K63mnpfOdp9WqJ69fnk6IUMJ9lq+8JUAn5INKK1ArHxlb4tY/A6L1ZrTi3ChHcZN0jNBnix7C0GdYTl80lBycgTp6uItJUxQfA30S3+28o3oZlJXEO3wYk546bK5mmayfF7IpwjBwIrBGwFtwGCYaGFuOVFW8uPj4TwXnh4Cjfpx2/OSOSSE96VeuDaCaatM4FQJT+20TS4x/e1X1vBiZHgDUFMiQiM9kqUrmtUhdmXJcaEFtV/khrRR6/dQqYCU0UIUA4NT1BmCbdKXABDuhJyFbXThEeqGCmwxZs6T1d0JQf96yI+LSRrbSGCw1MBoFMPqpeecj7i2pJ2UhpbNM9e/Ba3Nr4VwU503lIWkwZaylvDMO+Yn8Y+RG62z3z2oUlbeNrd4czrsN36fron8EadeHwWwPZTrcTYU0ggtjOaKpFm3BPt1irbif7KbGKI6Zd4AU1TaEKAGnL8v7KP5BYMMUpC+4LNOAlPV9glJLhtK2zZGTK/bvNrR4vyw4Jzkc83nSoGY4IWGJemHhtc/y4rp4bwqt9W53MWib/P49NfSza5KBD4xJMnHtODwqLQGGGlnCfS/ZXV3K+ijU+NxMB0SaVoDAcZqpJyEFgdGAUPHOWgFBugflk2OVm1YgO2bH6EibKAyQ9UEdvL49npsQPiAzhCMMF4P8xnUEenyWYmaRzkIB8ytQZcb6+kvqZgVO7Hw8oT1qV0UK6fjY3InaZ/MzqnBjFBzRkpQO2tI9arMVxewJJDWrC3ckKO1cOOSSbproAtWITbVys1KEc7Ql2C+2zsGhNET+nM5tLVUtE/ZgJ9PmSiSpASrk/VKIzXBDR8tZraPYqF/+mZtP7WUZdmH2AJRX24/5zsReJXxFxDpgRiPWiDYQimP6t6dea/qTLYCelerpjmTsIl9B7PsrCXJXkvcYycElOVzV/5BhL33XefBfVJz9gXkJDgWbE26x0leV0Aqc6ZdVyoPymB/vqTb0UovJefX5VgbmxmPqVYzXaF8rkTzcFb3ZqK8Vvk/Bt2TqrPVviSb6cD79renrw/KfrK4U7VdAAPb/QpHLswB16I9D4AqrnvWGMYe4QXu+NzW8wQH5cxdvPM0EnFBGFnY12OiNIPNPL/mplSvuIV1kIC9XdaYeew2nVgnoXjMyubXRkgpdce7puYOLs1uelm5R7Yt939R+KQ30nJEpmm1aTwQyp2mtkfHyIkuHD9B3wC3OMiZygVu+Mc8PQVpvaVoBLDbPF1VT9h1SNKbKGuYUkeYWLGZvRTwxDPQ+i+CUStwy7CT4Mk7BqKriKrTYVFZPJ1Qv3IAuAzUcm4vug/FiUAftYSRTP30Gnw8uFdfx0A21ojazdNpLPr8gWXAbKjBVGpxYiBs/jJB08g9caFAwmkV5+RR4C8rwCMYWUFbnOhekKWw3ihBW/FIOfNCO5GbdP2r9j/FaKv2UAW8zdQlhL20tMHOkULsUKclFOvdji/C0wh1w8FX0OFlUjojuPGnvNFbp/I1djmsJq2vjXNBqCoBt8cbCzPM8YQ7cdCzRns3/BNso/t5UmZXv8H1VD3nhuldLyjljZqO4/H2ItUFK/I3dheanLJSFGjRusyZTHZhqqzyjrnd+hwElpZCF8WMJhCr0/FMx8llxFQ1lpnSngW2pajlyyBHyx4nqiLQ5kqcI3pW1PwqxZgz4FDDUS8lSqkAepfKLJGzcJgOI9UERrUt+EWZI8STBntLr5acSF4042RA/vi2Z6TlECBovYkpmWS5+w6cheqF9PffeW5ZMi6mI/nxC2VjIhxUtTOlVmuEAxQ4K3hjWPeVVBgyANDZDFYMTwE5PFEaP7SMty6DWII7Aocf9Vwi3+83Coq6hwOg2SMHhIRleOzrVM4Mj5n6OM5cCKOW8snJp40JkpqxYwox5SFH9t3byou4ZrfREbfB4+K9SQIf/b5R6fVYtWilgHuSD4J1ViGTjidvdnqUPFxZeOYk+Gd7NECdaMuPet3ctURquv+eM3Bqxlg8qu+95SL8sdAa8YU2trSYgQ4hmv1C9PdXung6y7X8UK4sl2wdymu/3YH0AHNP8Xif1HSwmDnrv3tu/P3Rhm024KWF7gXtCoYh9x2+Gbtq4dmk8xxDz9KLaq4TPJSlHXXCfi6GWgVJZeJU3JXEbogF7k5nbEieR0whhn5Kg7GUbda5MG4oLkTNQ2GO+Pey6ZUdmaUwj8k3FKR6gA6WALHMfF6EJz7hm+YRcu47C1eKRlaMbKnrowdis9ZGjPQbQ7jyr2SdE4ToX0DuCu8jeYspoZPUixN1jusLJXuX7y/jL5NJP/+Chwd4N31XxeQo7txFwIjg+LjLdpg/3oKco0+a7xVTlLRFTpDvOneg9n1tWx7YFgDds27xBor8Rh7+xr5rsgCfNi+QaLh6nu93wLXd2/Sk4C7hgGoYaa6CPQvzfnIJVLDV5q0y3thayu1OeLdDetUoyO9h2Iux9tXToqvWB8Q79XpRIZnojx4tiK67nQgeESPWbF8Wlfxp+qPgTd29ItBKiL8X45D+TGVVT+XghZ9RfAVI3a5Pl3y7pjjfsqBnFpseamJiAW2gOWt8VaADFKmiyWeoNM4VGX7Dx3gyzhFNciLSFlMGoZcghhgBnVVHH7bispWspUiV6jAPqsdi9M0rn5yg+/eV9RgNAzk8i07pASkwPa5NudTkenGOphrb+miCcBq0XhqdrFR0Kqsww1ExtgHSpVzu8oBrsGIYza3KC0gTvk6FZEbhhOfGqRSldP9i5/haKG8XZnXLxotlvljaFkQC2OAjeaT3/eCwJY+W1O1VwX16r3n6xhc9dStPIccqKGCH/m8I2ZpfPAFJm4RV8WYm03dgTgAZqpcvJyPtsgY/AmBeGuPtzW/N2vBySMisnHfBWoAr0mpxXf5YVt8ngA9x70lNAhrKE7pL6j2pKSAskm2/0TkQcOTFy6HFrK+AJqFqBBb0GhUdMbQHSyfvorPsRPCc2eUoU9GM2ScXlnZxwTCGWG5QFiVSitrFPW9atv0gkYr9jHqoh+keRptlcDB6Tq6qs8qmQA1DF1NBFlZ0vhGz/opf6vMramr3N4H9m8pfvmFJ6E/1UMym3NiFGhCdAdO4ASdNFGBEW2QnQDeekuIZQ/D8gUK0Lh2yMzJ8D22vi72Wzfj6JZjEPdgSpQuVjkiU4XNB7bf0EXO6mJv38uz08UAaneec5RFX3DVYKbFEPRFMfEYqVPnayvXPZjerN/EbK3KnQ0RDaddnQRFrYPPo+nVOcF5SgEpBknBqo03+2h6XDiP0EjrkWYEefGhNU/xIVg0oat3t9ESX03SFEmsfy/D65O9cckFcjGuWHffiqJQogentj1xbEmIUEJOJRgGHio44Ajsx3RPRqBZhc4Re23eirw6u20rpUqyj8FlwFgapkyBJagxQmYf3TbUPW/KbbXi9GMJvwTj4yFvyAdcogqQsUN/9RVVhKMH5ODPzLxCG4LkMmFlRUD42bCeKQwQoyApVJ6nCmCfg4jbk+XEXK+6LDBrTv+oiTA/C1PBzcXlh6L3QCRIF2sgVQN60r3Si2LqL3lfZw34fznbe1l696irl+LM7iFmYI+0N2fh+seuh0uzf2Z0TXY4g9FkKoPSqtTwl/EaA3S3AF2NoQO5xRr7UtTvkMWS+BxmuNBUtlosXrZa29P75/sahj68I033jM3Am3B+kZ2Ggfbk8Y1MwoKjqiKvjmD8bjTM7ZjbtKaO72WP9bpC0baaG+jLd1XCCIgKLxWf/vtaO/31wp1cj6o1KxcrbfTh5dehYiBWAiAC8i5OxKRKnq4Ao/SXw8kEf1QED/lx0U0mGMB5eRXVbQ3xw9jTEjI/RsoddaswVZxQjBMfZTnjzSKTQM2rM0MsXgPenXKqVFuYMS9kF26PAxD0kuHKGO1ImmDt3+ePchrbxtTOGByKie7ubtoxlgbP4go0RgcWBke/KMQgOB4ec6vMxb0wApUvc0NLm/FW7zVWAH7nPqoA51S690vs8e4+62VMCMR8w2NX3NUpB9LP7kCdbccw1gTw/TRqhVa4d6TKmkWbdrpLSYRMs0jU6xF++nI0VRA4jc87t7o+Ma4ga15Cph7gyaBX0ZpoWfNYRCITpYZ9zcG6UQCHBTD9pFYxHGTOd7757f+JUhZ0AreKWDs1VHUjNLPoQjiN2l8pRJYc5quMNt6/3+QTq7Qqi95Q/uCNR/EorK4Y1QY0sddP5m7tRJ22v/0iyITW1zhWy0Qc2oySOVzepM2PY7Cb3zAdXMonp3Qvh/Za2KcfL15Qc2R2/TM7Q80YO2PBeQ/gwuWQPMbs7dmej8oHzjITWUabZBB5fXb1B2L/GThZAblAuRCNSOD4q/z7VfgB9s6h38kDDAXBWQDlpo54ut43EeX/BPyCSEGNe4Hswgy3COcdJ7ReFe6Ug3iA9hbnBSgHobd5mYXS3G7yO/IVfwBdoWJaTkxBRycCvyAe/sUP4t+XpngbN/KroOTX6k3u76WmouMBUrdgCpWx+m0fYJQfs36UWhD6ynJp2U17i4lWXE048aDA8NaZ9977dbkQVgY+et268gbWPzgKLoKp7a5+7qfFDskWw73FTcsy3EYAyb6mFx2m44V9437iqOfZlxukoCahVja/+zIaiL87GRSiwteiZFtjcZVcN/0GuqzPaZZwPQSfnXPWkvytYAraQqk73wolOrXp49S7Na3JuKJzTzHC9H2YdEZKSppGWfhPL8ym3Hm7ntDlBR+9YSWTBxE7iqO6173RV/ii2rD/CfBGATDAKIgsN+NtSkWuw0Zg8RwJ98yam9zEu7ryvcAbX28AjdGvehZ2V/JUerMuHMuYYmGiCyumxNERQh0fGS6Qw4CE3TuHuLNtvgBc7XVytKilAns/HtheQ0LmF36G7rSbJcrxg/Mddp7QNssoZSYGKCM7npJ7/lS+m5SHZJdJuXeWxEOyxPrKwhy4ftiVRpmIcDVhF+abRuPvABKkmIBZ3GZ3Un91NmTAuD/cQkX29H6W+t9XLD+N8PwHNhcaSpbkVj2ysMXC4LaRWYv3TgCgEvbdkvQVsSNuDacsYpAKRRMLkAxj02F5CfaMczcw2l84a1Ekr0PH3pWpTMOIEHp2hLuAEJJrHxOdaZVZCCU1381f4NvAsYiP37S1qruHsPK2JJpnbjGhCCkdmWbzeIpu0H92rE/CNGezG8hI3lk2bBu09g/7jcL5TlHu8CvBisIq9cXmXg93Zgxdg39x6R17UGCO/9gXWXhcE+NFzI9jcuttuKmw3gJzEVNu1FmyV9d0rGhQO06LXPpgNFGPAfz4QrWDkUW4CghFYQxIiLjr2RArQjs9OjdyiWpUqS81Dt2WUvCY1tb/cNRT8E1FlQ5umWL9j3fUqfp7sgKJwV35AuBE24KfaIfFRuOirYxSBqaTfeMkHxYMyk/lnEDNRTtcL3GwnFUCqxEHlU54kdAWGmUhgIohp8YHXwGxuWba8avFoIPVA27GVIV2iHMiPkLoYNIbAQwlUtErHQNU5rpYfjVolV9mTfAL32WjvRnZGfsvYwZWD1S039Sq4p6NRbqzz/iYCl9dqt9ZfLjRwBtL5LquuOx7J43/3YtY5FgigrMCC+m7zP5ExnbsCqk1/2mdg77yAV/V58+tPMMy+TTaLWFtyDJ1UvhTX/wI+w/f0wWp/xMUAcEqH20/of4TVWKaV57drd1uJljOzl/UtGTvl4yo40QfPPfBdqRvRTrJ2lWesN788rWUhDujel4EHpHAmturi1bRSiXRGdrUxjJLtaEwKUUyHPgiPpP5qWvyLFA129KbbB4faI7lbmEhWvLoHGZtYWU2LYXq0EMn/Ieug6hRlav1Q1ueDimtRNANHivld50PCbKlfAKZOBGK9/9XRD0iPEIMFv/xBONm1kFxzm1mIF3RsiiRjIrXY4A6qWQDsMA1ssINt4J0G/rZTZHFn1053q4CI01eYUVuJqnll/bGAMbxOzXbJh+sVslZ6cM1kUWk8tMZNDn/5lZYw70NscsF7Rz3MQsmQd3TlFYEcr5n/c7+inugN3Z2OdR0aWWqTDuYrIbIdzbIPaEobNoF3Cm7U/AaE/INnpLBPaXXN/+xsH14zJ2wR70Bez3y/YHS27mHe2g+XBJJjhqTPZJioVg2v44+B7fW+0dpendTsq4LXv9VwLAuVqedkUmV4+CsiRoXAxecwLD+px96C5/edfJW05EKolCDVT6rp+9W3v0Q37Y3dHTeWQ/JJk+7Pz8A6BTY5lYhGtyiCkwAvRQSsaCZvWNvvcw3sZ0Wbf0tVCgbdZ/QCwVTR/BXcB7wubIUfwxUlrWaQzIdN8Nxf5iP4eCHLb+VcDvudNEGDv3k9kxMjPVu1DgAfJhgj+3QwnIUW0o2Qoxtg3lDph2+cygA/2i75L4ukO2NLr8hXJ5DF9n1edfei/KJKgW6YFW4IMEfYfRIEmsO4H35LXcQIO5w9jApuIOnZ+B4lJhpUIBeSFV86HCbcPP65vkhSche/wM8Jy7ysvSFHV01OKiQ7FzTgy9/cidMAcCm5gzW45IVtsr1dRHQ+/wKwfkyRbxDBDOc7/IyNNRmBAsex5V0OSRGurgBU/jzhxlGUDhYY7l5SHhbmyEhrle/v9uxYAuwQ++QhXjYuRrEXQTSFoDwAid2/EIYMydgpBkStfMDBuWsmSeX6vlLZyC9d4B1qzVBhQWSF022NYYJh/Lk6WOZ2yzzf4PnKeJXOJDlmUvjGpPSCQ2UxplNokqfhQ8/FeBxIsp2sLp1xOpNkpAeWw6XyV/RocvuWwYcOa/y3nJ5+NT1PIp2Q26GZ8Dy5LvzPy/wzDJO4103jB2Newb1H4/KSwTXgRcKLTa8YvX6zxJdZ8S8Rw2W1eAkIYlPJIT1dPLGJwY/aGGvfscIMe+6A1IDANeGMl0oH/qlq0JkJ9dYBniOJD6nYlqOAHW+e+uqRyxLlipt8Xqc+aX2982/8zrpTmBl58GCnwiYrkfoOPA0L/LJN32EFG1GlmZTmQE+UKvgEDUUCH1oAG+16VhuMCgGwh0hgBPfFlhHBOVt+LBoiKZoQ3CZTPp8xbINh47WIcTISHJeVShscnIzHyl6LnP7dKdpJQzuRJuSWC5GpBI/itCl9SX5xFnvf4ZR6IDURfDpV22PBQH2e8KjmQB/ruP3vSMDEJ9LkCsUle+Wo7zGv1l+j+7uYX+iVQ/KHkgJsn88uOwlTcbhG0nAtMNW9scjOeJQppykzpDXmPEpxSXh7LPUssgUF3M9loaBLIk83aIvzwPNJJ9z5vNhciu+ZINIwlSSKCLoGqaF3unjVZ60dqFHm6GLroMhyD6FDeohTzz13G3D/rEThC285i+NAFTo3wKiVW9AGIAfTtO5+aIFuOIOmm+lvFMQhf3D5pywWXKEna72dtMWC1c2QDfz0MsdkVF9Ppu0AZ2ragKCA4cs2Kv+i7L9XxWiuWEZYaigyYtscVNDW3ZMwT+6Ry6vWZMXmuDqOiaCy0aqjGY1tSoVUMY3B5YKAmt8l27R7yetlD6Rr5GbS7WQ5/R2VSaIT6FJujrS4UdegyIuYdMVDQNO/+TR2sKYWfH0/CDB9hVUpg3gnxpCfmyFMEgzElh1Y0ASVLCHfS7JBnNUGhXvjK6ikA+uwDclazFFhJ8NjZOPC+PcPyx1MXvHv4eBBD+8d2JdMoOsVAbi11VmP3VDTrmhS81Wdd2NhBQsr3mYelRG7vQHjtI2IysmMogzrP11BCT15uZ2AzAcJSBUulKzk/P91ks39HthcnA0Y5dc2RtFtpYDNuWg8dMqudAM1w+0gblus0Ns8JjNVZ8ppV63qP/2AEU4C8G1yQ2A+0sSqhjsOH71X8gXQzHW2ahRnT9MSsnQm+hWDSaYhvFRvalOH1JhO8VTvgIwifsyJJjBTZzMjIFcSqv/71VMRkEVeKvbF+AkekZlPG34zQGC3ePzYq4d5gH9XZ38G9TqZ15YovMFHUQo4PJ33jjtvzEC7BIxAwClbbvjy1VJDHRzEsjsurFps6Nw/gV6/4U3zJafyJBM/VlFvfyCPFoh7xmHp7wBM78gdLGwEPQLIVzyW/2WVcU+yD8pf38nVOM0fayNTjgtBL/yaAOzurnCKB567rCigVVvjGQWSEnRH9vTiCL0q2KHzx8LWyQI2+TMxGJXrvyWycGs04o+JucqGutP7itcnCgCCEEq9U39qpFluQGUSqSlyMWm+zCmIZ2zL7R+e5JDX5FijRTnEIJkaNrHyAy5O6bOU4QwHUvOgc4nR6Q1TXmBv7IiQjy5LUNsoYsozLSyiudKR9d+4dcFLuP69JX2iNnn4sJyvhQz0Krbfg6AGReFdxdbgPykWs5ThnbyMxMN+qb5xcUpm6tJSYX+4oARIbRgL7E7Ps2NU2rFS4hJFvSyJZBVQLMWv7m++vPgzgYjxpuZscw888pj2uCZGFqlMd6nLPNHTagrKdDlI/GWs6LqVMkkf9yKrD3i7RAaB1etFprJ9RXVcemF/DfsI+IPupZDy8yYYqqrnfu8pkJf2OW7mIEyfFrzDeYy3xXe1X+qTAfbtdqEdYhj9QkdCf2qq4Sr3Dj3REJIQ6bVuEsoJGfFIWNCeNnHISgNchErEcrpsbCNgpqfn3vDqdE+hxlJlG4Kp9VjdI3Fwn5HcChv+hkFajo6YUzTQLxx3UGwYAHOW7QTy2MyMtQz/MzC+541Z79X+d/clF8BHOU7Bee14cyXSxpAkFnPCfJv6GHAX8QKXS6v/iqtc0ndLMvLx4ctBH3Q+0VIKiDwsCdRKAdORxNnBSoxvURjUFbuKJYizm0wnHyW9/wbEQTp7Ta/EspjtJ9F3e9k7Zd61mM8mQ2GjQGxC1/Vm+p2oVvTRdOD63P5dlRdenRhExp0ad/00OzzzdqLPlVMPlgNWCQ1uGoQatgbg9u4IDjC53u+8ACMfVGgKrkyNMdXafPufOGhhoHxOB/onygaYM6ngIxz6vhhlWUuN/3aWPpED3qqf06m25uKfHhKO15NGnzjX+1jtSF9KlxbPMChKu7c6eROLZg1B5wpW8tY41QwS2IdrZu35O++smXmpavqzIlC9fSsh8h3cqIWpM7zY2gV3vqZwCAPuKi1QnV0xTSA4jI7EIJKV3h5t5pCzD2YvExYTxjfvwUBcZXiFeZ/kfeLLZgT9UmfZu5pdrEjhjQP2kV3FxPEn7UTTeO/oYts1HMbhfXFJ19wBRu4ZbZDKDs3AxyggFHq2N9aQERsI21CyMDWHmQHzDbeqdHQzzYsCrTldTH0WFgSxrwb2vUs5FLwstew6JqydI9NmE2pBgwF2bu+IvyWHJV4/g2Ay0+Q8+XDkRvCbcdUkimfOVG1VJiYUreUH9Ray61xMagx0Uwl/cLAtrS95DVSNaZLbiFEJ0h20jYRhy4klpWyLgs7+ZTnQnY9Xd3qDSqMs0RHgaiN2X0dihGVFL4e2jbBHtiRKJiW8LasGGVs81nu3e/OHk7B6ATh4bqUeljOyonTP+9qDkG+XzGrwunqsCForO9OjXq4DZs0F9FG7QbN+lrA5kURrWtxC1G2On2cK5zCftHuvBeoj48xF7v/YZiOAP7AgdLZWWM+Ju5QN7KyhMw/35rUL67cEh3SMBXZW8BsgswCWJhUZofQCOJwXrbnH419mMDlfPcRJAWSKXkW2+zCra04FDzzLBzAUnXriLmCBFxJoN9d3j+lL0jD1y0eHBbNqKgF/i7DRMZnCg2NLmaojYmo1GzQ8J0XDEjQqgv+1hOrAKtSrBdrZh5X+5SsMo1YNLohJmqxldEmP6eIcsNB8b/4AxfMmWgeEl5zwcqd6KSd4FwHAUh/6ECH8YlE14WhjUIvx6nWb5i00XXadMsnC8vQAYLBH6lRBNgSQeNpG9NxER89z2HOsLv2KyytHt98dp2jZPkD01nzhHP+aGf2zyRynqkJcV/1ZGsdhF/4mgsN/GOK7ZghTxm5FPGvlKFRRpflOD5MDiblbc8uRlurqryJwaLx7ycSg+vgotgWIz73730a8YRM++hpGTIEP/o0oxlIZQ9Hm/NYMkJwjwKPCIlWVKIwtkzyortbbqHnsOtZws23NjG+WYky6F4HyBlqCZoRLx+2ycIf1yDKEldgTnyok9N93YefVEhviBsPbxl7CzNWbYvdJ1SiJce0NHGOvajhA93GeCv/5/11tqmnGOpNahAueRoGbXRSkH2eNrdk+FIUYCGXwdiJ/KLgQ9+J9jXrg51NW/KcvlYAHwJCrVhnZX27Rt8/GpRzcnf0cMYpDWYvEVL+TPRqa3md7ZPXyY5paPzPF1spz0gzJI+dyGdkBV97Iln4qc51CIGSE3EyCTxJeeO93ho/NJgFdTM7/U6zylKbHx9d+MdKeuA8cqnboeFffnQMFqLcSBVTcolIxir6gP/q5lUdmDGYJB6tInnppQcyd/prN8gc+1mYKWT1bm7gaiuH1bwHLR3omXkOr15IySFywqnSZUwqER6+Chz2w1KDQ0pPpucGX0n3VKjoTFBZ6nBRcdK+KJs5VdfRFYrGk9TIN6QhtWKRQ17Mw9sHZ9LUxneCXi4KhsVCim7Td1Q8gafoIpndntUUXG548t/dLcm54KUxcRu/4O2ylU6vt5nfn1fyE/ADVB2cPBo7uEtuysYdlLyc3tM8jJOlTryJ/VDp0A5uUaZpyX4BVibYJHgd1WjLwBRGVCHIjg2e7iJcB+dVdw0S2lsl81EJeATzqoe9zCWx4FMKrjqMSvRnKCedxgKsU7qVqa1AaPKfp5nRIR6e+dpOcddzV5DXISGKckOhvZLz8mba24aYxjDqJUOVpZyADdV1XgcRL5IAx3jvv2LntrhIKgWBs0tm1OJ6UiljcPuNrH6zV1M97XQDT/BPvJC+sC2DVYIKlWoFPghVuvwyUmlMsErS5TPlhZUiidCnjaHTVtC50k0ngCjCKW0Zqt3e7QmgzkwmheU5zwHXF69IkvqKIIiHrAZDPmhVnm4cHW4LjWBqTpIqmvN1Yj1UBrFpcUxY0OuKX1ij7OyLqSqOrN/4NS+YgAKuT298sJTpzepshh643olcxYSOG3J4L0VQzLTXhc6+KHJTCuHp0U+agG1Ckvk4c+6yqUakOAQkEHVySWqXztMWiPyAF3iglZ+1j/eiGBRmkb5D8XYDtupcUsktNqlLuYOdBd4kuhT8f2zYLDSPqLvkapTs4YAoE0FeHGpxMgbEKJ0XZ0arw5APRUERsJR6fybObKOyoENaS0UKdXCpJq2t1SjGlgqT9eVS+WDgrlui0nOyQ3lbIAkD8PPsofYGy04D+cDI4Bo5mH5OCQnxcMGT3yxNzhooXrJO9OrU4QEqYqbXpgXmftbB8BvJlqX76RbNVNggYaWw+4WTpyLujXqW60IK3dDnwMQbVRqj6r5WmmLNGdQYiqU68BCl+KI5MYpjZstx30Y9uLiHiflgI6SCp+D8rfxmrWtrci6f2OEk4YRu5NtffqrlmRV0YUj3ma40RC9bVGO2AM41GJdD0Ffa1JacVnVlbN2SW6qPKVnZc2Wj/E5qLvNKF9GfMQDjm+Px+to4u1zUvH0TgZvPj9qlbOeD1+mSsMY7tcsYfuTH1l18iXCAyScnsApyXVNzMJGuLj8XUMqEMbZdRiVFqOLJ/eY4XQN3IqKiB0vbC+7nz1NsMLo4ZnY8ExsREF6i4KGECVIIiNmMBk2AKPK0mWBEcQ5ZiGHGcY3jkXyHVDZ2vdTfvwt4upgd1hnacxO9FClPRFeg3d5DuSVWsTJIPbo5yPQaRzrlI+f86bVduJzAd3ngbdMrPrUhTuUdrx/sdLKXZRKQXofPGWMG6EABlsO+fOwNcngduRYhy1sRUhW2SoM+8hosG6mbKlwBDsMwI5WOHi7KEBR/Q6FogesmJYnt4H8znwHvXFN80T5T42CKBfjWUhLWVkENNY4hO4B7fu/npSLJ8E1ronpCqMER3rFOrM+GjCZxWo1oKAONq6xfhIBEEKUJX3yV7nSnWIrPNBIufqKl+YK7HWRbUDf6SyzK/wUTXqq2Mqwv56a5kW3pui4k15dDjvKLGtCUyIUIe3Fnpwy68OhhR7jCHklMrrEgXQ2ToyiL3kIWTDoTvSLzttyxMngN/E986ElheA5fmqK2hcwOG/z2QFMIOtqeGTwJeDAtpCNxMHQGfqXMxDD92l2GCYrgnnYZDHkrngzQvTfUh9v2UY/lw4rb0eVTVM/BZvrGTntOrJV4QWQ4t0stUTMxT5PMGAOuBtCJJYbW6evIJaz0e9RBRix5dTKfrmGz4SojqZk7r6sEi/kX6twaSyuyRsn2RI5HdwIxxdJ+S98bvLGoc3ry2XjvFFvQ0qTYUrOBtvkD74Na+aCwZnu6Eo5P9gI95PxS9mZcI4viGRNmjoUTaodJHSireOn56rYvQuf1PpIIt5Oql01RxVONVmfhlMbIda/jADrWukXEKa3KezPwZevfQGHJ+SOlRIus+bHOtXsKIvJg30XWKaes2Qy1Bj5UG21zjq/C5omgzIBQrK9COWs6eebFTpg3ZhAUej3s7BJ3DEkdgYH9k18PcTOfmgG53qjCq/4DErip4rmZqsiRnPY053G5gifE8VVS5orkN0eqR5HrwSOhx8ZfQJwoO9riMHsnae74Ts6TFnVAfDFrBmDKM0cfsD+M8p7alEMgk9nrz3GfNhGWD1h6cUOYpLPL1TZCdTyH9kRSfuKhRSAmRY6Nl2TsSzOMg5SsLZKbnKgtKeAYWIcmTakCnSceF1J+xXXHugHaBfWLKWk8TN+SxcEqi2L1oQ+CmbR6ArDjK8SnekR6ypjKA35KpAxTH+IEK8mm4opwsteU/GWt6BuZMFlO/+zaS5qwU6+rqDyI/SXC85SPR3fJA5KP5S20ZZ5G2yTdIRGlYpfPhv2IMHWo6zd55J5q6LzTAwJeG8O96fAUo4MchLCqnEWDqFdUEtLGeaemwV8lM/gH4U3nDqPeC5HuAePi9yD5EuedsEkR9XcwT2Bq8cFu60EPKsdjNUddrkK1MzqbmU7KYkv4GEHVePAlOSLBhDLfRcvLjGCde27YXfwblYsOEFv7Zj+yahhdLGbsZUajY3HSibnlxeeayja04XaJ62+rnuRZTW3mTO47X4L47ndLQeZmJaMTlR6niUbPDCk3usfgAfKtz0hx+wLAH3ndC1+ITx9/WQ5+9dESJEN7GiZo3EUsbHeLoiGrLVgtROUx4239efVEEMCkoQK4FcBo2/adx64AP8LnNWShpKwvsMc7IOl5PMwlBhmQd/4m+YtWRxGGmF429y67c4xmYqqRLyfCwRgBVd8kk714AjDGIi2xnFx1gXZmY8yFuBHA7iclymFW/INOyWz3GQrPi9vRndeeYE14kwIaNJwZWbPmj36Htb6b4zUd/8oZ5Qm4+fGGraIRXPJIjjP/T6hiVrocjjqTwZlSXpZ1ed+4oN3dhwDrIIpm3JaJH5/6t4DgBZfV6aFNhM2Jo3ZyMZQQJI1meZeERa1uzpMLyRmFFrKsG9ObelljoGk6ha/umZRza8+XJvWKypblsTAn3Kw3X24PNyEdMqjxMxjLrk0JXAAZiDBBFsheuDFpx+MNq4jTyM2EudaLWhuF30qAcPFaiZm5INao0RRRU4We9wcZ0ldB0UYyZ5Em1wPSKjvJsRrvoy2A19yf9S1WOzJY8GOwhAkdCP4blVYDkioRz8NGTXsp6vNny+sckhNXBk9mxpQTfYyJ6SHS+CYTtxjQFEcqzIbyX8kM9pUhkRyUC24PQzSuWlYqItQBaFcrBBXweB6vC6FkEw93NbdKqGGuOYGDh2w0eNtLgWjeG3eeNZXO7gzE/YIYBSnWbvl42TgWNII/82Shz58jXk/27jKDvnXs2ulRhIX38rIZJz3Dqj/R10bp6IJmr5wDGYcQgTgbHaNDfgLgchQOU3Yiafi9tMlzicJt+8m3OeRurU7skFVa3DrIVDLK3XA1xjevZtgWfkXsF3Jew7lNSAjLjkSzeKDjadZLC+D1zyWWwKNxlereR5R8KyaG9FJ7XfpeRPtxpxjUwVGR0H8lTOQKP88zfhxXk1nfCkmkUaqXELfgtbWW4HNyx7EsiGldf8HNDpxIB2hLWQQ1E6j4xPY+IVUudHQ+FKS98hsMSSNbpSXX7hQnWpjGKDXBr+jQiXEM4scu+i18+7PVo6UCWRiNFjA1gDx39woBjd7tRcgjndmNF70ktABwn5mo8zRIxzN8GlQg863WdzT9Eu87c94MjOgDjQnlB3/LSDujCzSb+lm+HPWF8Le+xkR8p+drX+79tQHBpKhBYD6PhiJpbTMiN9Ii764oi18ws4UpRdSErnz30VhFKmyz6JsNtDHBVkpjBsYSwgq7jD89k8J39bR+76hpVl4CGHp8vTyLEFDA7ihibDVjO+JtXuoYbIsV3wGJgojr9PGp/ZLg722OuqNVfy0Fc3X09yQhEYvLECNgfHb4rwxMCmsqD6ijUimGb9QC2k5rulL8nYlNz45OSmLpjkIDMxvYN/7WQDkbKUr/slBU49WAPuucKFySOQ1+ZLho6MqGdQIXKZl6bEvXrmmhtTw4vwPVck5L1xYFDx8W2w+ycoQ5OalQ3EuWOpNUmZFrTcwV5R/OGyVFrPBCJKkgTsxeKsd/5XYW66kwljf9VHiHtbTA1n+J18W3nPr5HWbIHt91ZjuLB/DjICJR7QGG/rmEvsVqzISscJyrJgNBuelPVWL2CJSmA02oHTpzFCnqsrSmx3OQBklk6rqckHhvdXL1akga5Qz4x1lbF2KjxjW+BE0MpKpC5jJcTxjIM54wMnnH1N2inrk0trFtvsMu9piFgOav4SggXKaehma8gqMYXnWB+MtWcGS/auH/Wb+YA3tdE8Mt4ZsZOmbo45cgoGCxASmJKd2h/vx2yBcHbTL4yEy10MsrgjsvJgzZvwDA1XWjubOxR1n5DPVxFvJLCuwo78Czc4ZHWi9I8ALXUbq2alDwyyCm7klJW6xhkJBerAG83D7htEXCIIUQahcxV6xG3RMLSPIppzsDRUoMRcLUo4hdFsO3vX9MsazGlkm3MtQgSSt3ay6trlet7Qr8IKxZzo/o+KS3UFIMC72AnkJxym+7isl0G9tWKDB9/Yf7+cSs/2I/29tbz1m0BOlRA8zyqo+DCN/+nXblIYzX600XXOAWiCfJAAa9sr/m2xCbP2sqc0QtNGzdzpUbbDDgaEcWIp6/pKFJDKs39xR0+0uF9OYbB1fGQc3M9ZfHE7yLa1+BYrQjqN44BD4T72rlLzoHPPcknS3qLZ3Z89YfmGWEXPrrAZbGKO+wqWUpgIJmhlK7dOcHSkVhLDQyE3rUe2emiX3EeYz/zfoodTUUgaB3Xb+smSRDxKAUL85HuAqsa64GzgwAkD84CCnWQhds1QWB9YD9uOL0ex4p6WhS4V3awEna9n2P00KgnlK08nCbfpLwrc5SpDyQ7NUxwzWPCwvwcwob9+61N+5tlsvD1PocNHMTd+TdkWMOEE9k8mXRMQ3YAfwO5MnQ1z7ZkWLZYQQlfibIydtyNKUYxP14nx5G76NUfSPTt71i1PEAlVeMcfUrxkNpiJeUuRHJpSTWkSCjNofx8HDureZ7vxwpF9hpuZ1vcp08nwF/419zujApAO4qbsvQNKp3Du961A7qq8GsbOA/f/YWIxr1zBLgAipdFUmSq3KzTYaQK1eeO+teRsivf1tk/qTX6t/9AizKzSOpQHqD1dcqIpUEKA9ElgqmvU6g9SZJsEa08CEbf6zFFFVaTf94y+N0BM0zDWHONuqfNqw5Tg0uGontsjQNHu46hkQJUu+ts/5sgwNRfuG6p0A0gTtOkpOSNIPcWYMLz+EEd/Fr6hchu/6ByC1iLnZlSeKPg+W4QpNm95wlby3hm5AoOUvfpz2OKyVPjjkSQdfvxdvz1ntjANO1U3oNgStiZtMXHv9OqFUB/lkKKyk0j9PP1r95EcLXR1urgklgsY1U+NYYDM1ELGLNcPdCVUxF6li2JRy2B8TkjbAVrO2+ZOC42jMYrh4mhoaN/v87RbSg8/Y42NriUye/zphaTdAYMaXaV7A5gRyUG0u7Oa6BivsfMI6kGBS2THGEf99Ju9SEqT+hqDG6dLMHhWJ24P24vkGeKoOFuix6/le3zaHqTpD8oVRdTdu33OXrMHbX5TBanALBmWqxSlJlaWKmUww0DlUOKq0FwSGwMIiIlhGFMqUU3Mz7sPIfkG2no6SoL/+CxL+GPw0Bb6STKBnkGbQhiaKtRBq0qV2Q3SPa/cv83SXUGGmwnUn161U6e2HH3NAlpgA4geoFR1Ol8qVkUvwzjBnSKGS7JkLm49m8h+AYIpE7PK4fGwZKr32KU64NknGT6PQm43oZA9jNwpHNdFteEr8D9sDFpMCuiuL7WDmT54U0ANCLSi6sADvJ47kLClgqOmR6EGx8ahz+YkiYD6l5qW4l7L/g8skFPufP71nisDy+3hIPTFF22JVJTgF/+S5yLyF4jEyrTA1F6jIYhYgYi3/9QH8y+LSp2lVUlfThNBvLnK58bm3Nlj372J+ViKr2DQ74F06gkp/radAnc6qrqc8J4Xf4yiF78TI+YAvr+lHk2wcQGZRmr5VSeY1zF4NtdNse543Fe4zCHf+A+yZ/YuBN1sub7lwfL3GfltKBOwiqQQoj5fgkfzEfq4+KWOI8a1o0h+TbiNC+FfNiG5B+Zrayw7u0grpjribBHo8kxV1e4DAwObCkpyyRnN3imtSo+9SoMauH+YLLmBi1tpKvLgVC0AMB8SeLqIls8piGB0LjckNbrrFx0Tme0Ncv4Rr5E1QezgpbKzFI4yI8MwWimxCtAv7CyvPJPiL87N+UTGgtPKVmM1vVNifP7rMkfPy8Ut9Gr6Z7e+rET70Km3d2n6eKyM5WyI56F4N7dCZj3Hfqb9w8ceQl77K/FzMRj2kRaDHKnbfmqlK+YlgCFy5SBmtQPVbJ+6d+C99ebYXJd2xIkZhecCy84yUIXtRYQ+HjHSRenlly+sDWv4BLk0m79M8y06T/gB23Pt6miov+LMpC1F7qScx9j9sMGhGgfhbSD4VBgSVpU7Z7U6msr9tbbzUqQBAlMC8hHLLJkbhNTc95sOYLaIp38eNxH+w+gRq1nh2yKyFePhWplP3ooZp1Zskzv3ZI8oTMH2u+KAlVAWrg2LT57hPvGakRHsT4f5o8Mtc3XugKJim37Yg2xaf2/B02qCTKeXwUDCRT15N9nEcUtJXDWeYeleQT88pL+ovA4VwAdu8BEEI0T62LjmhFznTjc/hCTu6gvEaU7FIhEZQF9g7ZJSXESVIdV7706vb+DhaCCRQqfD8rhKpgYzGlLALbTn+9qlXk7zLuh8OrNAu6DzumWUUQd+csQYnuDGHHSGyNq3J4EtJWlOpWUKjLnwBSAEOAdpFXSGDaVnGb70PvmF4XVxsFe1ZfHrB5EEOD8hsZvRigPZwP/RQ7U8xmMTBHZ3vmHb2LBz085ADJ1327OY5yKy8Ir/9DIDILzrd1s7XTkQv2mKixs1t/DdOneFbAF3nc8WnHRe6m0DGps7xy5SxgWy8INk+UEwdLZGDscE/8R87OnIU1q1Rv98DNT++TLXXL21MirhFoe+s6Jy+2usVKGUfwa8dtySETx4lsJ7tLP/cEDfJGP1egwMor0/tPwTq1d9A1ZY9UCW6YZGUKGz3tKsWRGlUJg4oE8Q5flIoyqRZF8SiMtWxjTlvQB5rju5yT9xSdTPg93E+Cd1DrINH6931pF91hVPvOFRLU6cq2AJCJOgvoT16H6jW6KliB693KtbLZ9Zh3cZ4Lv+0IFIPp8t4jVbiBP62ng3SWDwUqe4b/blyjHuI7QxxLRdquW83brSX5hWgZKWtxyfvkg1yhvQYwUPzk1/+4VMOXohsmdyr5NYssLwLso2QYak48k2g3Q+ps6Zx43qjH+39aR48Jd5V16Fp/9R2MoRL1SHydl8flj+i4SlTaGxJk3ePv3iB9SLnckfZBtN5juMeSsp/0Dbq8QQmddMrJpRmn3Yo4LBXHkKcwK4PipKWoAQP7DkxqRgNVhC92C+43ekTKsM+3ISSmVsx+VrCs7Z/mCFfIyMvecYVpcogW0xDy42a9AX+zNDApPEUWqW320NDxDv8COQ8FO97juPyB2eiQOPt/j1AzJkqgw+lpEBUbuXwMaJYpipy3BMMpmqCmgHcPUR/3+XVSw9rNBS77u1bZxcsKzSetr+zRwYn/OyF61XUXf1+M6e5/Bswktmb2ehdV+xGCWvNyjKoScwOM8F2/91Pz36JV5SezADAhcDQfy8dGeFfw+27lYiX/++sOlBEKYVUF0nvobCQU5FoLdtzCfooUVMnD2At3m7SnWJ22xvVQkIe61/s3Rt/HQ7n11YiLYfcahLmzPFjfnJXZVvoFIG+0t0Xy85uUy8rlFUrF2yPC4p6uW5kXavDpb/OgM3lXtPiBfplnnLPYgQ/N6zWrVC0Hy1EZt1xjnoXDqIJ25SboYGR/vjMGLSziKhYZEUAxmPnbd80LI/F+KkBes8xBJvlS/oqDRh0Wh7MZ1YIgUNiTyK19HpuHqSajX8AJ9rx6I/kKQxrxDP3gsiHLtAywZVljU+UN/Y3iB3NDui2FWslYpBbVZYKtrYAgqYqaV9kq/TUs6jQYaXwPLeAKlETm0SVup8F4Y1Bsd2v4h+zpZtM4sKC277OigPXbrcBkIZKihzaXj/sIqfLUfmPkvhUsarhXxgWFoFKKzazOTzzCorKWlEOoUk8SJh2L6D0ZAeOlHcZdO8W2IAfO3xwt+tVUogvyg4IeaC1BfEtJ4bBQ6V7SyHg/78Y7yUHKo2KdveVYTtT1dsQUPMsnDLcEDdbul+psMTshqKWGNF9KvKyrTG8y9eidN9aARWVz/324CyR1t4Uq21vFAKYDGPS308b1ss717hxtQ+6woIYU2hFMRCecq7oYV2dNdkRw1FAYzJbWM0f703spAq8kP1WsgZfhkEIQLNuNCQVbT6ms/O9k5ty+RE0OzHSCTNH9TT5ELEE22wFvsgZYYTV6LPUEVp8WivTA+2oqviGlZXHX3Wb2JF4x0xuFADJ8Oawt1FULYQApcDmPZeJLq0Z1eqbquEyOPDQx4hRmajA1tyjrZD2m/ANotVVZeSQhrxF8BVSiQ4QUIBBqNoMlmPoqspXIkYyqJd4XhmYZpglKi0Xjj9aHQhHJE1anB3nKYxtzHY83MShGymUx2i8UNif/XL/0lkUsgvUOUs0UjeK3dKJIqjtIT9dxJFcCXillA0NUpk3NcwV2fapmSfhGBaRJ+UK4O3aojAf1puxFKu978X1pE6AYYNKwoA/2yQhJZLjRf3J8qQ6HibpKQ8qEvlYXSkJPal5Vx972RA8Q6lgUxjxgV+0PAyeczOPkAj54sRRHqLufqC4RvSCL4fJaooF1u4uoC7oc9Da3Z2DtCnssd884jYmRCm2FuT1rPKZV8vb7XmJn36t2ALaNJUD2zMQhQ3E77FmdHTSiKgH9deA0943p15/PTgl1VlHKILDabffwgxzotFLZDArO8SKU5UGPIuCYOfjO0MXrJ3WLhRv44Q13vDijhZF0Ji8uYTRcyTU1rDzF/s8eGlcA5GIh61V+74aJl//HoA8w4+TWSMTvsAEnQXmWUbjzYZXLmuMRZCnvmXCPDymaOBI1YxQedEQt4GGwm0FMfbzMAfLS6GnP5t8u3YzJM9qGUZxXgoz1uOgqxryzk1zuMpDd7aNgLZi6nQhqk7jUfXRKJGHATa/Dl5JZim30Tyk3kxIvEDu1ieBoRPJ4P8J4SftZJI/PLMVL5kvwHxMtRh4JhZzX81vl+nv0oDj0UrTR1aEvhVRtxUpqKLEN2P2yT38cz4bKW9Nm+o/78Vhq311J4J4K2NRRIYXO7BpnKfvbODy15qHmuXW/664mQCR+z4SiLd7zdO1/PkwAPtA3ingyFsxSG+HXO6p/i8oAzYFJo7eNS8bGQcnwMXZFA+KLtcRB7Ew9omclXnLBIWXsIihgQqkulKur7Zs6hukPGfNVzWMYn1x13ch4CaRL34Apn3570a2Iz9iuJ0bTCbOfR60mmr5IwH+7rEIQMYPvopNJ8bY23HqhORVnLMKKV6A4wZbCGh93FI48L7L9VbECUmHx2StDrGS1r2Bq30Hi4p43ly5tdxhm2Lib6Qbt9QdM7EDQEVZsQ1GKQs46b085UniGboQM5UinXYEuVL0sT6aCIQNWfAo6XRmtKDur3Ge5E2VuoPloCa0CkvkQ+qyaAYnxxr9igR89H/SidZi7oQ5luXTseVYO2JR+t99SpZaFPMtPlCl8nSswMFtD5hocuiP/P95/kETo+Nd3V/t7tYuPBcsQrcQh/pYn7WXyfXhffT4F5OJmYZLg10mIRW+KKJ/kzeHQMzXbMnFGWd8VU/zeK6wwU8QOGmXgeA3LgkJZpxQZoEjcqC2HbFQGrHMRsc3UQGN8eZAY5wvcpdv1NkntrpH3zBBFzPQEFh+SL8F8TjbSKxdKsahdluGVKHfEUCmTIT1qYZDOm7I8TwF6fk3HeZm0ybelbUTTc1sM64pEWCXD4Um9O5m9E8q7/w2nEA6pl60KFlIbpObI742+peOr/qjnjVl0vrvuNc1pPOZahgGG22vxEGSycXB4kHnludoUZwV3DjRtJyPxYMULmP42UFFvT+gWeNsa9t8vpoIiVdDG0nT7Ktn9UtpMe/mpp6f1mfQfGr10Ls30NxsQVhGxRv6Un/fNhWwMfxjOGat+zb3biqBrgC7kJdQUiy+YMFqke30HEzsvhyimjN7ERzw+4AvqzqiUNhuvA7XkLh1dkKXMQzfTQwJHB40t4RHKllC/h0lOroUk2V1JY44vaP0IEdYDG1uIw/Ml0DjqVha4OfhuPnADaYX2+2Gpb2pPZMfOCnsEkfKtmdiwvfXODy5rbQ4T4NYOZnN1ViRmfD8C0a0zdx+PknoqkMUKgTv/NBm1vkZ2BUuEZYhcRGx/QVzGU/b9rwkAXq2MGPoJxUkY7+3B94yQcdsb7enpYZUINuY2s2FdFLhc9bInzQW0AI0hLxV4rzbSbbkawSVtYMAI9blff9MgEFrkqyDvRbXLr+n0cJC9h75hgHDtsty4bX+WJ+80LdLxxKGKwmYP1yIY7IJwRGJ7KTlDVBw1mp6Tb3m+FrGV+F1OyWXBpwtIDByMIt/aQ/hxC2GjgICjSyfVnq53+jAKi3vT6+NvKfY0U8rDX03LeBIupq4zo8XGNQhvfK5D3jwuW9jlqeCEYUYUFxY/LCMQL7tEve8Z3MBSmCKfMpkn1cyt0FBlydl3UZYdcv7mIrHswvdGdVJM8RP39dZKinZufVkXpreFyA61RMGR8g/NskfYZfGK1Hu+oE4AN4JhVagmEQH93Iy51iJsI+NT7yxJLkTZnlNOJ/Q8F+CtZHP2mHTx0DGyHBhNuCxDpqqEmoDPCTC4OUuzVhnkNFsAOckeNLjRIR3XM3qGtkQQYpHeZqW7mnOQdXoHmHaXwmPyob2N+lkOHan6lO1Nw8+1Hes50eN56LmS0sCCz61RjQnMQAlwpH+xGDD1vxdJgMEF0V1ffbGuUcg1FjCZvmOUrSn4x26Rh6G33GDS/j0EmqpaO3UN1045AwKvTVSIihzhKxahWfzlRre+hXWb182XKW9ND8kzhbBqNIxXzV4vSPLqI6lBWHzkooDm67lp77r/dJSUTjwuaKkWcKZUiAYEM+PQuXW40Xz8zgi/O80RLEgW+qLyvkGVenqRpFjKDAc9fKvH3bMZfFWBsKUnLADvId9psaPezUJmQg/AJET575hhi1l7hTLBhwHYqYwQAtomnrKf6p6OyNG8ZHygrmLdieEAahkJzZ866td7AEpEVw79/C1wVk4/6Wp1u69w3H8OzIf4mx2fT8XstQ+yt1+ofr1z9kA0ZsVURv/gCgL/vel3xBYorqRGRvE+zBI4G1A+DDN+okPSpBWSMIb92ZrGW6quw0yyBIg7mizABblIuWikPlUElLnJtMo8ybtwTeM9c0cJqviWXnpwGln+DvM2fP1dI36npbFxmZL+JjvyeOZJO0JQKemcrtKX4OxZJ1cpHadoRf509uenpjNa1S1YHkqnICeqm/geGeUIxHAqJnSfKD+krgErykd2blw/wIEuxv9PoDra+R9goMc4iaWuLeefWNTLfSW6IYeiBy7RotvsCulQkPEMBVEInNZ9XSNFq1GyXtXBL1YSXJ4IkKWXTtrNrPuw6rC+AtSfeVbo41Il2hidBslI6v/Zx2OrvYS9p8Yl3CNv9PlcrL/c6qT0yQoo6d1319I6RCNMRzgvq4eeMxN1FV2waVy2WPSXUXvRvWAiD8R5K+jLywqv1M7n33ffk5C+l62KQW4sZpyk+0Naj0iSCP11eZWuJ8tmYCNcYlDtaDfsHYLdNNdShu+9yL700E8lQ3he3mVc+ZXZQHNvHc4oh3t3FKNVQPb/gL4ayzgAUnKa6H6XI2413SX+ghahdgsIh1INP3wA+RgMuy0Q6VhZHk/CbPsXVPUgr4ZPRNLUsLaGttzlc+QwG1+5HgT/l5UK92Q8J23aloOH3FIvzWAORyyNcWBWoZ/OZsycQ+v64wfz2TtGYBSgIobxeuHUVoVJn6ZS+glW5oIzi6Van6nPWDcquRmV9GpxUKx2ND4ht3KCVROHDRIs+IypcZ4Lp1Ymz24xkdK0jycTG9cnMqj3/pwJKMzJkIO1K7BPjHIhtVlnErbcP77hw4DY6aPxFIJDnw6rC4r2XOJNIojQwn7nmZLWMJ48jV87X6Mkywuk3hYYWolzcof5j8XFpEyLRX3GSZVrYeO34hwpTMcpJNd0fI2kdeG/eM92YlmJkZRcydkb58k7PqSFIihXaRx/N+cwrfNwZG2C3WsvHwWQ/uHKH5zZONzjtV/QxSZ6jdbLyzVTrfCRF3C6USDjQrLNAiQgBaBfWNmhJ5pW1FhAtXJA/tmaHjda/WGl+c2e0/MRwu1Tl52SqmBZVtyRsOWTKg1Yc8ImZzS5y0ToMjGYds2aBvqvba6iXiqjmNcHyiKfdrjrdXyh3NwEtn6P/6LBV+Xibn2jM46rvORzzSWUJlMtKp9AM4rCnOYX7AWXcXKzLbBt6pwed2CZOp/o+HhHnp+0o0ilDfBFskTI2jx5/ZGFXS1WCdMsZh9dmobiyMcn8M3IaEz6H1w7oObx+FpolaGxbHN0bToQrU1jEkIoIcoYLaEusHovoJeDBbKPmww+l1rHH2WDkl+bG2SGFwdB0HNleYvAjmRY/pCVQRhUdGCnro4HgMi6UwhemnhczkBjYBjl7taTABWHihMGAM26ajQzlh1mvZlkkqJ/wjYd4TFHaV0lltYK9TPHKr3XkNbVnJzi3kqwB6B7AiM/MXG8JJJHkFya0A2CkFWNt9iueHxYdJKyS39R2IiynLciMZYRceqKC5XlwDEtoBniDxdJW7pPWTWwV9jnzASjftn+rxOLt7hr99vk+VIjkVtmhaqX41Q+SzjBSspz/uyejG7+URUfcQYWZn7DZjP6LD8i1sUtRXj6jis+Ww15Omomu+RyaoahAJ6IRjagf3qato2afFRMnVp026Lrh3f+UYoD02YpOBWNHI3K3/7Pfb4r8Mxi0ya9zsFPJgxtQpUznS3CUGxDF7TZ6v74b2gqPtXhJIRSrPI47KfLJSotf4PasywFZJpYqoRh6JmJ7awmbB50l1/S10TLPMsBzwom1zhVgSrmm75TBANj+gtGcMgEeDOyYd72hFzaiLLTFtEvAKYQm1XE0iSgZ/PXJFA+0cAkNUIXt5pLqmlBwXpy0rw95IyKMiIJPHEorkCLWG3kKKSoFSL5HRvHTnd/Iyh2v/WgF8Soq3Gk2xIKesQS1defPVwOEpvODAbeks49lCiS5vAS2b07ld41L/kG0jtbUNkuBlH5qpWI1kDHD1pd4Eiu4xCXNHTC6uttaoFX1395ejUuc1V830q86WG8F8MNjIGWJTrKjX6U4xVK0ZpzHtn4rKtvXL9dgfxKv3Ty7MpXGHMbwcFaDhjtyFgPbwt2AamcMXgU44itf/cK88wikMcYizD27LzTwp2XQPKuNN7xbcy+n9w5MAvlTMIEmsAzc7S6QKubS/wTiK6ej7Anp5+iH7q5MLhJ35JglGLdy/K0JjGJVpQS5ULUQbrAUs5C0IGpatn/Z3ryDsKQDCJLtyczjYH0W9zrIi+1WzBoyuKnmvHRFDT/r4DxKZIl68X0LDwTjHVMSdlP/SQg24D0E4INsNcYLRmwLtmWsH7doHjVAttE1JNG/ApQCQpFyvxZ4NtxDllT56eiXSbXwemW3c5P92LZexD85ar414PhSpYmWoyYZynqzYFZOhYeB/CuNczuQdca5eJRPZ3kiPJx+tjcDWse7fiVN0CUyXYe1S9HmtqC4Ui+F4bKNQZoFlANXzZ5FUaZpAWxDa9hwhTKkqa2BxnHOHRZRonmsko7iR/lBCUsZFzrYBSkcJ6aq2M6J9tffwy9SkQjZPVgCzO29OTHhU/x7mKd3B+tzRomQYZ77ypZpXAytM6VLBDJzdZBmAn0HV2VTos4PxBqGXMVSJziyKnVH5QQq7FXUj9I0gnHtxJjOPcTiYQbtc4UhcE1/ODGMAk6kVc7/Q24RtbVMyDkg7HO1BfvaIq/noYfN3BWpS3juncmgviJqTHTr35Mk0qTgpZqf1K9fDwjFDVCXUQ52SApF5NgRTkaD1SLy1Sftxxx8h99wrQ2tYff0Ne0yld+jQNMtVp1dfQ5nveBXrPDmLxLybzi7IEhUqfJ07WWvA5y/+oPfNkaHLPg9ruJKauT8478Z7t18Bdna8rRSYr8xMg8L1z8vUIh2KftGrIs9PPi4+PxlSVn/FhT6o9MrPXnIVUXy33sxksdGUuX04VeIH+xX+MtLLqc54DnonC0XrqAq4tP58SN4E9KRXFWajcCVofbiT9zUUjz0/3u5WArJdwD9GTU5Ya4dN58G8t1LLR6CCCb1e2xMitevVgTT1mFXDBFG+r8vLCI/UGCCz3d5V9gatKRuVtXxi7rTNNuo0dUi6+UZ+GRfBf0yWsdKU8+9yko4/3hws+W44aTlw/EKvY6FDXmdkPZ7RTCO8iXtQ5HJaME9QPy9XeL77rq1Dyk9XXJ0jHqbIsrdWrtMDM2OVGCsl25f1f5EALi0M3TmqbZzjl+RljMuzTBPCtSQk4uPmQwpzx2XjkgZDvKApOiBwT+cBc7c+TKnJ4K47bz6DuMDZiarrmiq69ekg+mYaPShHmuVZadvPIkKn5/8rjoLtlbsz4rgjb9EFC7sFmx3GSdxvQ8JrBCH6TZwiCAT8BXOMBJngJWac5Q+Byb6CuYZHJ3fh4gKhgCQgWoLQTm72YvEhb05X+dHfpmL5Aa6DpYV82qHBMpd/wzOi0ccdiJfAsdriRBWxwRMI1ybhCA4N1i/TgIz0y1gq5lPw0NF3sKfnmCvN6YouhM4HR84HUOc0DUur9PprPbd6rOWVs7g0YkbOlMalLaknxTmX+95vZBBuDaCaz96FFStROwigD5b1toli5ECvgNudQVFAaKtxRdaQs14Y5Ms1TItyIOKk7u4rKynL5UPYERzl5MFCWJA4qSy5rqgsx4jy12XlzAPbBtcqn60ke325clfKOTVtRMSHybi+wMyVZ2B92chU/k0+arFOfJrQHHlgBBy9ZSRvwzq3/tCtkZi12Q08PHfZeuigVmlcnPnnQVF4jXvrD51E+rBofRIS4JusIBNF7/ts3pDZc4SQfxegNKa8/YKfu+6NmjOIlih2ydWnYMRYVqJBM6sSuoZyfCCnpidTGvbvZJb+3QPWlh/2rzQKeJgaPHWBoDYOaA614IR98gxDslW/2/AwjknqnGoJSoAh38HGitWwUeoLGJ1usqw53Zc8mXwv1vEgL33Zv3ikUGYpibA6UHgNfuoiI3nhaxqF8B/3Uj7WUw1pJTDhyaSu2LUEMpNCEUWxdasaI0RYfyHhYY1tVaWLeu6Ou0GjrRzutYE7OJVd5Rrr8Cd+LqEe6CwI2V4mdu9seRoyKii01qHSLBBtiUBz6rNYIMasfOOgDZbP+md90Kyf3Ic9h1ysaHj2xfhi8WU2Rok+OwEuOAPUUIwAvhFTPApbBbBnXR5IZ3D/N6kTZgFdrID9bHz4HI3XlsOM6cl2cnOq7M+xs6T0tuPbgIoNfxnurLG4Crrq6Y0ra3hcio60Kda1cCybP4rOgMXUWvnxahebCUGnCUqtblZMxW7X5ANQhOF97IsgmRHx3gantY0iyfu4JzH5Bh11TImVf+dqDVpbNu96Pc0MeEask3UchChnqNJsN1u1f9FuRs63vWbANG4kH4WY9H5OLFH1T0yY2FNwhyK7577X53YSfCLQ90bZZLskMm3oU1Q7X6h2rGhiri3+4rcN003ZaGvSV46QJTSpH9WR4tHrosdQv10pxIlAHlzRapd58Sb/i8/1/xguXoVoKTU2pc1kZ3d2V5wGfDuD7Ry5F74upSTbsCHItA9g6wR4uZJfGg02BwZ9RqYAAXrVu5zcMz4U1VvtHSIx7fyAMZE2cCwfAxaN/qZluJCYafEUD8EfJWAQnHtjQmRppYwiF7ocqSPdnM7OfA7a0b4x5u/VJWtBNSEQvkYCy4BypadGCahe1S6gad8SWfmAu+aYe1w0/esQTygJAHbCNd8ZNH6Eo5sSTWMdaQ7N4jXzxHTNEf6vXbEHDJ+HBKbSwykVX4qIAejMrLU8+l1vvMehNiKtAS/x3feY4cwmPupNzZf41/MHw6weI+OPT5h6X8KQnfIQtyOj6oO/4udUEC3ApySorm8TsOcfCT/gJAQWwAAAAG8mjRUhgDniiIE7auT6AAApWrCrbNCF9xnnFaML1QiWZjmHK/RDDYXWPj51J1IurtvSN9CP+aizaWy3sp/qQ+UB2/2pRXb6MWQi9xcfNXBoqcJMlIiPxtKHURFRvmACUdcInePDmbIjp8HPusoGJIZlxUVaYAt9IEWOMZqK7HJv4mBw45/fbYnPSM8H7Rb4xK+rbhnOq1OS4Sf1XVqsc1M5E6TiPRYgikJt/tatyLGSm3MWwfK1HmkdYW2n1pfPqM6hC99Z5LDvjMx/JhMdD+QqsvFr/VopFTIVG3r9N9Z/iTBzaivcmgbo+HTYsl46tV2KWkfZSzoxN4mb4/O1LKfagxm6suSW1S3oG60XlhXuxHn0DwvvCRamiMZ0EOjZASk5PLXollZgkS7qMy++o6eNwcCVdpCNb3dRetCleoOpOE/wwO/Cr9jOiYN0XZcE0RhGh2dbetuZ+s5kjP3RIHX4akGS0kJYXYS7klZJofquxi1BPhs4qqpinUEoDPI0HqJAVvwNg00chjWOVIPRRMOynZqWXC71aBsyobAAhwsSfzCe8JRiwkr/JQbRYbKYGuBITFfy2JH6h34SLOWnQWdNkjwL2y47RMaO/Qv57lwaWuH1FVD6UkN0Ab1s3m6XLET0IPqfiusBI6s+SqOIqOjIytCMwJp3sqWQv3Q5CL9sp2FMoal3gaXTKHFjgelhR+BzAHcgjndFtC+dyMPq5QHvvNdF3MnEnFsWAs7wZodn3T61lOMCk5JbdxK4xv8WZRtqL5NF7mdCqlznir+q3mYXJKNBbTU4TdhMeEGEOk7iEkv5kWQ0MdGisn2WrIYOiEU3DBVhHBD61NZtd9I3XG1JrF1fwASlpHFoxDGcZI5CANAANwwHhAAAAAAAAZE1kAAAA==" alt="JC ALPHA EDGE" width="156" height="156"><small>PRECISIÓN · CONTROL</small>
+</div>
+<div class="side-state">
+<span class="muted">ESTADO</span>
+<span class="tag" id="sideStatus">PAUSADO</span>
+</div>
+<nav class="nav">
+<button class="active" data-page="resumen">
+<span>◈</span>Resumen</button>
+<button data-page="operacion">
+<span>⚙</span>Operación</button>
+<button data-page="entradas">
+<span>↗</span>Entradas</button>
+<button data-page="registro">
+<span>▤</span>Registro</button>
+<button data-page="senal">
+<span>◎</span>Señal</button>
+<button data-page="conexion">
+<span>⌁</span>Conexión</button>
+</nav>
+<div class="mini-radar">
+<strong>0%</strong>
+<small>OBJETIVO ACUMULADO</small>
+</div>
+<footer>
+<span class="gold" id="executionFooter">ENTORNO REAL</span>
+<br>BTC · Rondas de 15 minutos<br><span id="accountTypeLabel">Cuenta de prueba individual</span><br>
+<span class="green"><span id="feedStatus">● Esperando datos</span></span>
+</footer>
+</aside>
+<main>
+<header class="topbar">
+<div>
+<small>ESTADO DEL BOT</small>
+<strong id="status">PAUSADO</strong>
+</div>
+<div>
+<small>MERCADO</small>
+<strong>BTC · 15 MINUTOS</strong>
+</div>
+<div>
+<small>SESIÓN</small>
+<strong><span id="sessionTime">HORA DE MIAMI</span></strong>
+</div>
+<div>
+<small>MODO</small>
+<strong class="green" id="executionModeLabel">● REAL</strong>
+</div>
+</header>
+<div class="demo"><span id="liveMessage">Conectando el motor con Kalshi y Coinbase…</span></div>
+<div class="section-title">
+<b id="pageNum">01</b>
+<span id="pageTitle">Resumen</span>
+</div>
+<section id="resumen" class="page">
+<div class="summary">
+<article class="panel radar-panel">
+<h2>Radar de sesión</h2>
+<p class="radar-sub">Lectura de mercado · Confirmación · Ejecución</p>
+<div class="top-controls body" style="padding-top:0;padding-bottom:0">
+<span class="chip">MERCADO<span class="gold" id="marketLabel"> · ESPERANDO</span>
+</span>
+<span class="chip">LÍMITE DE ENTRADA <b id="entryLimit">60 ¢</b>
+</span>
+</div>
+<div class="radar paused" id="radar">
+<div class="sweep">
+</div>
+<span class="rnum n">00</span>
+<span class="rnum e">15</span>
+<span class="rnum s">30</span>
+<span class="rnum w">45</span>
+<div class="radar-core">
+<b id="radarSignal">ALPHA</b>
+<small id="radarMode">EDGE</small>
+</div>
+</div>
+<div class="radar-meta">
+<span class="chip">DIRECCIÓN<b id="activeSignal">ESPERANDO</b>
+</span>
+<span class="chip">PRIMERA SEÑAL<b id="firstSignal">—</b>
+</span>
+<span class="chip">RONDA<b id="roundClock">— / 15:00</b>
+</span>
+</div>
+</article>
+<article class="panel">
+<h2>Posición</h2>
+<div class="position">
+<div class="position-money">
+<div><span class="label">PAGÓ</span><div class="amount" id="positionPaid">$0.00</div></div>
+<div><span class="label">GANANCIA / PÉRDIDA ACTUAL</span><div class="amount" id="unrealized">—</div></div>
+</div>
+<span class="muted" id="positionNote">Sin operaciones</span>
+<hr>
+<strong id="openContracts" hidden>0 CONTRATOS</strong>
+<hr>
+<strong class="gold" id="positionSide">SIN POSICIÓN</strong>
+</div>
+</article>
+</div>
+<article class="panel performance">
+<h2>Performance</h2>
+<div class="body metrics">
+<div>
+<span class="label">RESULTADO ACUMULADO</span>
+<strong data-metric="result">$0.00</strong>
+</div>
+<div>
+<span class="label">GANANCIA REALIZADA</span>
+<strong data-metric="result">$0.00</strong>
+</div>
+<div>
+<span class="label">META ACUMULADA</span>
+<strong class="gold" id="goalDisplay">$50</strong>
+</div>
+<div>
+<span class="label">PROGRESO DE LA META</span>
+<div class="strength">
+<i>
+</i>
+</div>
+<small class="muted" id="progressText">0% · Sin operaciones</small>
+</div>
+</div>
+</article>
+<div class="controls">
+<button class="primary" id="start" disabled>▶ INICIAR PRUEBA</button>
+<button id="pause">Ⅱ PAUSAR</button>
+<button class="danger" id="close">□ CERRAR TODO</button>
+</div>
+<div class="notice"><span id="radarNotice">El radar sigue las señales confirmadas. Pausar entradas conserva la gestión de salidas.</span></div>
+<article class="panel price-chart">
+<h2>BTC · Ronda actual <span id="chartStatus">Esperando precios de Kalshi</span></h2>
+<div class="body">
+<div class="chart-quotes">
+<div><small>Target Kalshi</small><strong id="chartTarget">—</strong></div>
+<div><small>BTC actual · Kalshi</small><strong id="chartPrice">—</strong><span id="chartDistance"></span></div>
+<div class="chart-round-clock"><small>Tiempo restante</small><strong id="chartRoundClock" role="timer">—</strong></div>
+</div>
+<canvas id="roundPriceCanvas" role="img" aria-label="Precio de BTC durante la ronda frente al target de Kalshi"></canvas>
+</div>
+</article>
+</section>
+<section id="operacion" class="page hidden">
+<article class="panel" style="margin-bottom:12px">
+<h2>Plan de operación</h2>
+<div class="body">
+<div class="top-controls">
+<span>BTC · 15 minutos</span>
+<span class="gold"><span id="savedState">AJUSTES DEL SERVIDOR</span></span>
+</div>
+<div class="strength">
+<i style="width:100%">
+</i>
+</div>
+<div class="metrics">
+<span>01 · Lectura</span>
+<span>02 · Señal</span>
+<span>03 · Entrada</span>
+<span>04 · Salida</span>
+</div>
+</div>
+</article>
+<form id="settings">
+<div class="settings-grid">
+<article class="panel">
+<h2>Control principal</h2>
+<div class="body">
+<div class="field">
+<label>Capital asignado al bot ($)<small><span id="cashLabel">Capital de esta prueba</span></small>
+</label>
+<input type="number" name="balance" value="50" min="1" max="1000000" required>
+</div>
+<div class="field">
+<label>Meta de ganancia acumulada ($)</label>
+<input type="number" name="goal" value="50" min="0" required><small>No se reinicia cada día. Ejemplo: capital $20 + meta $10 = saldo objetivo $30. Al alcanzarla se detienen las entradas.</small>
+</div>
+<input type="hidden" name="contracts" value="1">
+<input type="hidden" name="maxTrade" value="10">
+
+<div class="field">
+<label>Porcentaje del saldo por apuesta (%)<small>Se aplica cuando la martingala está apagada.</small></label>
+<select name="riskPct"><option value="5">5%</option><option value="10" selected>10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
+</div>
+<div class="field">
+<label for="martingaleEnabled">Martingala ×2</label>
+<input id="martingaleEnabled" type="checkbox" name="martingale" aria-controls="martingaleFields">
+</div>
+<div id="martingaleFields" class="hidden">
+<div class="field">
+<label for="martingaleInitial">Monto inicial ($)</label>
+<input id="martingaleInitial" name="martingaleInitial" type="number" value="0.50" min="0.01" max="100000" step="0.01" inputmode="decimal" required>
+</div>
+<div class="field">
+<label for="martingaleLevels">Máximo de niveles</label>
+<input id="martingaleLevels" type="number" name="martingaleLevels" value="4" min="1" max="12" step="1" inputmode="numeric" required>
+</div>
+<div class="martingale-levels" id="martingaleRows"></div>
+</div>
+<div class="field">
+<label>Máximo de entradas por ronda</label>
+<input type="number" name="entries" value="1" min="1" max="100" required>
+</div>
+</div>
+</article>
+<article class="panel">
+<h2>Precios y protección</h2>
+<div class="body">
+<div class="field">
+<label>Precio máximo de compra (¢)</label>
+<input type="number" name="maxEntry" value="60" min="1" max="99" required>
+</div>
+<div class="field">
+<label>Tomar profit (%)<small>Porcentaje del contrato en Kalshi: 90% = vender a 90¢ o más. Se aplica al guardar, también a posiciones abiertas.</small></label>
+<select name="tp"><option value="0">Desactivado</option><option value="5">5%</option><option value="10">10%</option><option value="15">15%</option><option value="20">20%</option><option value="25">25%</option><option value="30">30%</option><option value="40">40%</option><option value="50">50%</option><option value="60">60%</option><option value="70">70%</option><option value="80">80%</option><option value="85">85%</option><option value="90">90%</option><option value="95">95%</option><option value="100">100%</option></select>
+</div>
+<div class="field">
+<label>Stop loss (%)<small>Porcentaje de pérdida sobre lo pagado; 0 desactiva.</small></label>
+<select name="sl"><option value="0">Desactivado</option><option value="5">−5%</option><option value="10">−10%</option><option value="15">−15%</option><option value="20">−20%</option><option value="25">−25%</option><option value="30">−30%</option><option value="40">−40%</option><option value="50">−50%</option><option value="60">−60%</option><option value="70">−70%</option><option value="80">−80%</option><option value="85">−85%</option><option value="90">−90%</option><option value="95">−95%</option><option value="100">−100%</option></select>
+</div>
+<div class="field">
+<label>Cerrar por señal contraria<small>Ajuste de salida; no fija la dirección del cerebro</small>
+</label>
+<input type="checkbox" name="reverse" checked>
+</div>
+<input type="hidden" name="fee" value="2">
+</div>
+</article>
+</div>
+<button type="submit" class="primary save">GUARDAR Y APLICAR AJUSTES</button>
+</form>
+<div class="notice">La meta usa la ganancia acumulada. El historial se conserva al cambiar el capital.</div>
+</section>
+<section id="entradas" class="page hidden">
+<article class="panel">
+<h2>Entradas de la sesión <button id="exportCSV" style="float:right;padding:4px 10px;font-size:10px">EXPORTAR CSV</button></h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>Hora</th>
+<th>Ronda</th>
+<th>Dirección</th>
+<th>Contratos</th>
+<th>Precio</th>
+<th>Estado</th>
+</tr>
+</thead><tbody id="entriesRows"></tbody>
+</table>
+</div>
+<div class="empty" id="entriesEmpty">Sin entradas. Activa la simulación para comenzar.</div>
+</article>
+</section>
+<section id="registro" class="page hidden">
+<article class="panel">
+<h2>Registro de operaciones y eventos</h2>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+<th>Hora local</th>
+<th>Acción</th>
+<th>Detalle</th>
+</tr>
+</thead>
+<tbody id="logs">
+</tbody>
+</table>
+</div>
+</article>
+</section>
+<section id="senal" class="page hidden">
+<div class="settings-grid">
+<article class="panel">
+<h2>Lectura del cerebro</h2>
+<div class="body">
+<div class="empty">
+<div class="gold" style="font-size:28px;margin-bottom:15px"><span id="signalTitle">ESPERANDO DATOS</span></div><span id="signalDetail">El motor está arrancando.</span></div>
+<div class="field">
+<label>Dirección actual</label>
+<strong id="signalDirection">—</strong>
+</div>
+<div class="field">
+<label>Primera señal de la ronda</label>
+<strong id="signalFirst">—</strong>
+</div>
+<div class="field">
+<label>Precio de BTC</label>
+<strong id="btcPrice">—</strong>
+</div>
+<div class="field">
+<label>Objetivo de la ronda</label>
+<strong id="targetPrice">—</strong>
+</div>
+</div>
+</article>
+<article class="panel">
+<h2>Indicadores</h2>
+<div class="body">
+<div class="field">EMA 9 / EMA 21<strong id="emaValue">—</strong>
+</div>
+<div class="field">RSI 14<strong id="rsiValue">—</strong>
+</div>
+<div class="field">Momentum<strong id="momentumValue">—</strong>
+</div>
+<div class="field">Volumen relativo<strong id="volumeValue">—</strong>
+</div>
+<div class="notice"><span id="indicatorNote">Indicadores del cerebro original. No son probabilidades calibradas.</span></div>
+</div>
+</article>
+</div>
+</section>
+<section id="conexion" class="page hidden">
+<article class="panel">
+<h2>Conexión Kalshi</h2>
+<div class="body">
+<p class="muted">Con Dinero virtual encendido se prueba sin una cuenta real. Apaga el switch para usar la conexión REAL. Conectar verifica la cuenta y deja las entradas pausadas; INICIAR activa las operaciones.</p>
+<div class="field">
+<label>Cuenta REAL de Kalshi</label>
+</div>
+<div class="field">
+<label>API Key ID</label>
+<input id="apiKey" class="wide" style="max-width:360px" type="text" placeholder="API Key ID del entorno elegido" autocomplete="off">
+</div>
+<div class="field">
+<label>Clave privada</label>
+<textarea id="privateKey" class="wide" style="max-width:360px;min-height:100px;background:#090f23;color:white;border:1px solid #a58d52;padding:9px" placeholder="Clave privada PEM del entorno elegido" spellcheck="false" autocomplete="off"></textarea>
+</div>
+<p class="muted">Para reconectar tras reinicios, guarda una vez KALSHI_API_KEY_ID y KALSHI_PRIVATE_KEY en los secretos del servidor. Las claves pegadas solo aquí duran hasta el reinicio. Al volver a la página se recupera la cuenta conectada en este servidor.</p>
+<div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:15px"><button id="testApi" class="primary">CONECTAR</button></div><div class="notice"><span id="connectionNotice">Cuenta sin conectar.</span></div>
+</div>
+</article>
+</section>
+</main>
+</div>
+<div class="toast hidden" id="toast" role="status">
+</div>
+<script>
+const $=s=>document.querySelector(s),esc=v=>String(v??'—').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const money=v=>v==null?'—':new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(v),cents=v=>v==null?'—':Number(v).toFixed(1)+'¢';
+const localtime=v=>v?new Date(v).toLocaleTimeString('es-US',{timeZone:'America/New_York',hour12:true}):'—';
+const names={balance:'starting_balance',goal:'daily_goal_dollars',contracts:'contracts',maxTrade:'max_trade_dollars',riskPct:'risk_pct',martingale:'martingale_enabled',martingaleLevels:'martingale_levels',martingaleInitial:'martingale_initial',entries:'max_entries_round',maxEntry:'max_entry_cents',tp:'take_profit_pct',sl:'stop_loss_pct',reverse:'close_on_reverse',fee:'fee_cents_per_contract'};
+const titles={resumen:'Resumen',operacion:'Operación y ajustes',entradas:'Entradas',registro:'Registro',senal:'Señal',conexion:'Conexión'};
+let dirty=false,loaded=false,current=null,pending=null,sequence=0,acknowledged=new Set(),endAt=null;
+function post(type,extra={}){window.parent.postMessage({isStreamlitMessage:true,type,...extra},'*')}
+let lastHeight=0;function height(){let h=Math.max(650,document.documentElement.scrollHeight);if(h!==lastHeight){lastHeight=h;post('streamlit:setFrameHeight',{height:h})}}
+function toast(msg){$('#toast').textContent=msg;$('#toast').classList.remove('hidden');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>$('#toast').classList.add('hidden'),4500)}
+function busy(on){for(const s of ['#start','#pause','#close','#testApi','#exportCSV','#settings button[type=submit]'])$(s).disabled=on}
+function action(action,payload={}){if(pending){toast('Esperando confirmación del servidor.');return}let id=Date.now()+'-'+(++sequence)+'-'+Math.random().toString(36).slice(2);pending=id;busy(true);post('streamlit:setComponentValue',{value:{id,action,payload},dataType:'json'});setTimeout(()=>{if(pending===id){pending=null;busy(false);toast('Sin confirmación del servidor. Revisa Registro antes de repetir.')}},25000)}
+document.querySelectorAll('[data-page]').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('.page').forEach(p=>p.classList.add('hidden'));$('#'+b.dataset.page).classList.remove('hidden');document.querySelectorAll('[data-page]').forEach(n=>n.classList.remove('active'));b.classList.add('active');$('#pageTitle').textContent=titles[b.dataset.page];$('#pageNum').textContent=String(i+1).padStart(2,'0');height()});
+$('#start').onclick=()=>{if(current?.execution_mode==='live'&&!confirm('¿Iniciar el bot en tu cuenta REAL de Kalshi con los ajustes actuales?'))return;action('command',{command:'start'})};$('#pause').onclick=()=>action('command',{command:'pause'});$('#close').onclick=()=>{if(confirm('¿Pausar compras y cerrar las posiciones del bot en el modo actual?'))action('command',{command:'close'})};
+const form=$('#settings');
+let levelLayout='';
+function martingalePreview(){
+  const {martingale,martingaleLevels,martingaleInitial}=form.elements;
+  const enabled=martingale.checked;
+  $('#martingaleFields').classList.toggle('hidden',!enabled);
+  martingaleLevels.disabled=!enabled;
+  martingaleInitial.disabled=!enabled;
+  if(!enabled)return;
+  const levels=martingaleLevels.validity.valid?martingaleLevels.valueAsNumber:0;
+  const initial=martingaleInitial.validity.valid?martingaleInitial.valueAsNumber:NaN;
+  const layout=JSON.stringify([levels,initial]);
+  if(layout===levelLayout)return;
+  levelLayout=layout;
+  const rows=$('#martingaleRows');rows.replaceChildren();
+  for(let i=0;i<levels;i++){
+    const row=document.createElement('div');row.className='martingale-row';
+    const label=document.createElement('span');label.textContent='Nivel '+(i+1);
+    const amount=document.createElement('strong');amount.textContent=Number.isFinite(initial)?money(initial*2**i):'—';
+    row.append(label,amount);rows.append(row);
+  }
+}
+form.oninput=()=>{dirty=true;$('#savedState').textContent='CAMBIOS SIN GUARDAR';martingalePreview()};
+form.onsubmit=e=>{
+  e.preventDefault();const cfg={};
+  for(const name of ['goal','riskPct','entries','maxEntry','tp','sl','reverse','martingale','martingaleLevels','martingaleInitial']){
+    const el=form.elements[name];
+    if(!el.disabled)cfg[names[name]]=el.type==='checkbox'?el.checked:Number(el.value);
+  }
+  if(!form.elements.balance.disabled)cfg.starting_balance=Number(form.elements.balance.value);
+  action('settings',cfg);
+};
+$('#testApi').onclick=()=>{const key_id=$('#apiKey').value.trim(),pem=$('#privateKey').value;if(!key_id||!pem.trim()){toast('Para REAL completa el API Key ID y la clave privada PEM.');return}action('verify_demo',{environment:'live',accept_real:true,key_id,pem})};
+$('#exportCSV').onclick=()=>action('export');
+function setText(el,value){
+  const text=String(value??'');
+  if(el.textContent!==text)el.textContent=text;
+}
+function setRows(el,html){
+  if(el.lastRenderedRows===html)return;
+  el.innerHTML=html;
+  el.lastRenderedRows=html;
+}
+const chartClock=new Intl.DateTimeFormat('en-US',{timeZone:'America/New_York',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'});
+// In the reference plot, an existing feature moves about 1/30 of the width per second.
+const chartWindowSeconds=30;
+const chartFinalWindowSeconds=30;
+const chartStrongDistanceFraction=.0005;
+function chartNearClose(series,latest,now){
+  const secondsRemaining=series?.end-now/1000;
+  return !!latest&&secondsRemaining>0&&secondsRemaining<=chartFinalWindowSeconds
+    &&now-latest[0]*1000<=10000;
+}
+const reducedChartMotion=window.matchMedia('(prefers-reduced-motion: reduce)');
+let chartModel=null, chartFrame=0, chartKey='';
+const mixChart=(a,b,f)=>a+(b-a)*f;
+function chartBounds(series,latest){
+  const start=latest[0]-chartWindowSeconds;
+  const prices=series.points.filter(point=>point[0]>=start).map(point=>point[1]);
+  prices.push(chartTip(series.points,start)[1]);
+  const min=Math.min(...prices),max=Math.max(...prices),pad=Math.max((max-min)*.12,.5);
+  return {low:min-pad,high:max+pad};
+}
+function chartFrameAt(model,now){
+  const p=model.duration?Math.min(1,Math.max(0,(now-model.began)/model.duration)):1;
+  const progress=1-(1-p)**2;
+  const position=mixChart(model.fromTime,model.latest[0],p);
+  const bounds={
+    low:mixChart(model.from.low,model.to.low,progress),
+    high:mixChart(model.from.high,model.to.high,progress)
+  };
+  return {position,bounds,done:p>=1};
+}
+function chartSlope(points,i){
+  const [t,p]=points[i],before=points[i-1],after=points[i+1];
+  const left=before?(p-before[1])/(t-before[0]):null;
+  const right=after?(after[1]-p)/(after[0]-t):null;
+  if(left===null||right===null)return left??right??0;
+  if(left*right<=0)return 0;
+  const dtLeft=t-before[0],dtRight=after[0]-t;
+  const a=2*dtRight+dtLeft,b=dtRight+2*dtLeft;
+  return (a+b)/(a/left+b/right);
+}
+function chartTip(points,stamp){
+  if(stamp<=points[0][0])return points[0];
+  for(let i=1;i<points.length;i++){
+    const [a,p]=points[i-1],[b,q]=points[i];
+    if(stamp<=b){
+      const dt=b-a,t=(stamp-a)/dt,u=1-t;
+      const p1=p+chartSlope(points,i-1)*dt/3;
+      const q1=q-chartSlope(points,i)*dt/3;
+      const price=u*u*u*p+3*u*u*t*p1+3*u*t*t*q1+t*t*t*q;
+      return [stamp,price];
+    }
+  }
+  return points.at(-1);
+}
+function animatePriceChart(now){
+  chartFrame=0;
+  const model=chartModel;
+  if(!model)return;
+  const frame=chartFrameAt(model,now);
+  paintRoundPrice(model.state,model.fresh,frame,model.nearClose);
+  if(!frame.done)chartFrame=requestAnimationFrame(animatePriceChart);
+}
+function drawRoundPrice(state,now=Date.now()){
+  const series=state?.price_chart;
+  const points=series?.points||[], latest=points.at(-1);
+  const canvas=$('#roundPriceCanvas');
+  if(!canvas.clientWidth||!canvas.clientHeight)return;
+  const fresh=latest&&now-latest[0]*1000<=30000&&now<series.end*1000;
+  const nearClose=chartNearClose(series,latest,now);
+  const key=JSON.stringify([canvas.clientWidth,canvas.clientHeight,window.devicePixelRatio,series,state?.target,!!fresh,nearClose]);
+  if(key===chartKey)return;
+  chartKey=key;
+  setText($('#chartStatus'),fresh?'Kalshi en vivo':latest?'Último dato de Kalshi':'Esperando precios de Kalshi');
+  setText($('#chartTarget'),money(state?.target));
+  setText($('#chartPrice'),money(latest?.[1]));
+  const target=state?.target;
+  const distance=latest&&Number.isFinite(target)?latest[1]-target:null;
+  setText($('#chartDistance'),distance===null?'':(distance>0?'+':'')+money(distance));
+  $('#chartDistance').style.color=distance>0?'#34d399':distance<0?'#f87171':'#efc864';
+  if(chartFrame){cancelAnimationFrame(chartFrame);chartFrame=0;}
+  if(!latest){chartModel=null;paintRoundPrice(state,false,null);return;}
+  const began=performance.now();
+  const previousModel=chartModel?.state.price_chart.ticker===series.ticker?chartModel:null;
+  const previous=previousModel?chartFrameAt(previousModel,began):null;
+  const to=chartBounds(series,latest);
+  const fromTime=previous?Math.max(points[0][0],previous.position):latest[0];
+  const gap=latest[0]-fromTime;
+  const animate=previous&&previousModel.fresh&&fresh&&!reducedChartMotion.matches&&gap>0&&gap<=5;
+  chartModel={state,fresh,nearClose,latest,to,from:animate?previous.bounds:to,
+    fromTime:animate?fromTime:latest[0],began,duration:animate?gap*1000:0};
+  animatePriceChart(began);
+}
+function paintRoundPrice(state,fresh,frame,nearClose=false){
+  const series=state?.price_chart,points=series?.points||[],latest=points.at(-1);
+  const target=state?.target;
+  const canvas=$('#roundPriceCanvas'),w=canvas.clientWidth,h=canvas.clientHeight;
+  if(!w||!h)return;
+  const ratio=Math.min(2,window.devicePixelRatio||1);
+  if(canvas.width!==Math.round(w*ratio))canvas.width=Math.round(w*ratio);
+  if(canvas.height!==Math.round(h*ratio))canvas.height=Math.round(h*ratio);
+  const ctx=canvas.getContext('2d');
+  ctx.setTransform(ratio,0,0,ratio,0,0);ctx.clearRect(0,0,w,h);
+  ctx.font='11px system-ui,sans-serif';
+  const green='#34d399',red='#f87171',gold='#efc864',muted='#a6b8df';
+  const directionColor=price=>!Number.isFinite(target)||price===target?gold:price>target?green:red;
+  if(!latest){
+    ctx.fillStyle=muted;ctx.textAlign='center';ctx.fillText('Esperando datos de la ronda',w/2,h/2);
+    return;
+  }
+  const left=20,right=w-82,top=25,bottom=h-24;
+  if(right<=left)return;
+  const end=frame.position,start=end-chartWindowSeconds;
+  const tip=chartTip(points,end);
+  const low=Math.min(frame.bounds.low,tip[1]-.25);
+  const high=Math.max(frame.bounds.high,tip[1]+.25);
+  const x=t=>left+(t-start)/chartWindowSeconds*(right-left);
+  const y=price=>top+(high-price)/(high-low)*(bottom-top);
+  const tipX=x(tip[0]),tipY=y(tip[1]);
+  const visibleTarget=Number.isFinite(target)&&target>=low&&target<=high;
+  const railX=3,railWidth=6,railHeight=bottom-top;
+  ctx.fillStyle='#253957';
+  ctx.beginPath();
+  ctx.roundRect(railX,top,railWidth,railHeight,railWidth/2);
+  ctx.fill();
+  if(Number.isFinite(target)&&tip[1]!==target){
+    const above=tip[1]>target;
+    const range=above?high-target:target-low;
+    const distance=Math.abs(tip[1]-target);
+    const strongDistance=target*chartStrongDistanceFraction;
+    const latestDistance=(latest[1]-target)*(above?1:-1);
+    const fillRange=nearClose&&strongDistance>0&&latestDistance>=strongDistance
+      ?Math.min(range,strongDistance):range;
+    const fillHeight=railHeight*Math.min(1,distance/fillRange);
+    const fillTop=above?bottom-fillHeight:top;
+    const barColor=ctx.createLinearGradient(0,above?bottom:top,0,above?fillTop:fillTop+fillHeight);
+    barColor.addColorStop(0,above?'#08735a':'#8a243b');
+    barColor.addColorStop(1,above?'#37ffb6':'#ff4869');
+    ctx.save();
+    ctx.shadowColor=above?'#37ffb6':'#ff4869';
+    ctx.shadowBlur=7;
+    ctx.fillStyle=barColor;
+    ctx.beginPath();
+    ctx.roundRect(railX,fillTop,railWidth,fillHeight,railWidth/2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.strokeStyle='#253957';ctx.fillStyle=muted;ctx.textAlign='left';ctx.lineWidth=1;
+  for(let i=0;i<4;i++){
+    const rate=i/3, py=top+(bottom-top)*rate;
+    ctx.beginPath();ctx.moveTo(left,py);ctx.lineTo(right,py);ctx.stroke();
+    if(!fresh||Math.abs(py-tipY)>14)ctx.fillText(money(high-(high-low)*rate),right+10,py+4);
+  }
+  ctx.textAlign='center';
+  const tickSeconds=w<480?10:5;
+  for(let t=Math.ceil(start/tickSeconds)*tickSeconds;t<=end;t+=tickSeconds){
+    const tx=x(t);
+    if(tx>=left+23&&tx<=right-23)ctx.fillText(chartClock.format(new Date(t*1000)),tx,h-5);
+  }
+  if(Number.isFinite(target)){
+    const ty=visibleTarget?y(target):target>high?top-9:bottom+5;
+    ctx.strokeStyle=gold;ctx.setLineDash(visibleTarget?[5,5]:[]);
+    ctx.beginPath();ctx.moveTo(left,ty);ctx.lineTo(right,ty);ctx.stroke();ctx.setLineDash([]);
+    const label=visibleTarget?'Target Kalshi':target>high?'Target Kalshi ↑':'Target Kalshi ↓';
+    ctx.textAlign=visibleTarget?'left':'center';
+    const width=ctx.measureText(label).width+10;
+    const labelX=visibleTarget?left+5:(left+right)/2;
+    ctx.fillStyle='#0b132c';
+    ctx.fillRect(visibleTarget?left:labelX-width/2,ty-8,width,16);
+    ctx.fillStyle=gold;ctx.fillText(label,labelX,ty+4);
+  }
+  const firstIndex=Math.max(0,points.findIndex(point=>point[0]>=start)-1);
+  const [firstTime,firstPrice]=points[firstIndex],firstX=x(firstTime),firstY=y(firstPrice);
+  const curve=new Path2D(),area=new Path2D();
+  curve.moveTo(firstX,firstY);
+  area.moveTo(firstX,firstY);
+  let lastX=firstX;
+  for(let i=firstIndex+1;i<points.length&&points[i-1][0]<end;i++){
+    const [a,p]=points[i-1],[b,q]=points[i];
+    const dt=b-a,ax=x(a),bx=x(b),drift=(bx-ax)/3;
+    const p1=p+chartSlope(points,i-1)*dt/3;
+    const q1=q-chartSlope(points,i)*dt/3;
+    for(const path of [curve,area])path.bezierCurveTo(ax+drift,y(p1),bx-drift,y(q1),bx,y(q));
+    lastX=bx;
+  }
+  area.lineTo(lastX,bottom);area.lineTo(firstX,bottom);area.closePath();
+  ctx.save();ctx.beginPath();ctx.rect(left,top,Math.max(0,tipX-left),bottom-top);ctx.clip();
+  const fill=ctx.createLinearGradient(0,top,0,bottom);
+  fill.addColorStop(0,directionColor(tip[1])+'30');fill.addColorStop(1,'#0b132c00');
+  ctx.fillStyle=fill;ctx.fill(area);
+  function stroke(color,from,to){
+    if(to<=from)return;
+    ctx.save();ctx.beginPath();ctx.rect(left-4,from,right-left+8,to-from);ctx.clip();
+    ctx.strokeStyle=color;ctx.lineWidth=2.4;ctx.lineCap='round';ctx.stroke(curve);ctx.restore();
+  }
+  if(visibleTarget){const split=y(target);stroke(green,top,split);stroke(red,split,bottom);}
+  else stroke(directionColor(tip[1]),top,bottom);
+  ctx.restore();
+  if(fresh){
+    ctx.globalAlpha=.22;ctx.fillStyle=directionColor(tip[1]);
+    ctx.beginPath();ctx.arc(tipX,tipY,8,0,Math.PI*2);ctx.fill();ctx.globalAlpha=1;
+  }
+  ctx.fillStyle=directionColor(tip[1]);
+  ctx.beginPath();ctx.arc(tipX,tipY,4,0,Math.PI*2);ctx.fill();
+  if(fresh){
+    ctx.textAlign='left';ctx.font='600 11px system-ui,sans-serif';
+    ctx.fillText(money(tip[1]),right+10,tipY+4);
+  }
+}
+new ResizeObserver(()=>drawRoundPrice(current)).observe($('#roundPriceCanvas'));
+let settingsSignature='';
+function update(s){current=s;const fresh=s.updated&&Date.now()-Date.parse(s.updated)<15000&&s.status!=='SIN DATOS',active=fresh?s.signal:null;
+setText($('#status'),s.status);setText($('#sideStatus'),s.running?'ACTIVO':'PAUSADO');$('#radar').classList.toggle('paused',!fresh);setText($('#radarSignal'),active||'ALPHA');setText($('#radarMode'),active?'CONFIRMADA':'ESPERANDO');setText($('#activeSignal'),active||'ESPERANDO');setText($('#firstSignal'),s.first_signal||'—');setText($('#marketLabel'),fresh?' · DATOS ACTIVOS':' · SIN DATOS');setText($('#feedStatus'),fresh?'● Mercado conectado':'● Esperando datos');setText($('#liveMessage'),(s.mode||'REAL')+' · '+s.message);const linked=!!s.execution_mode;setText($('#start'),s.execution_mode==='paper'?'▶ INICIAR PRUEBA':'▶ INICIAR REAL');$('#start').disabled=!linked;setText($('#executionModeLabel'),'● '+(s.mode||'REAL'));setText($('#executionFooter'),s.mode||'ENTORNO REAL');setText($('#accountTypeLabel'),s.execution_mode==='paper'?'Saldo virtual · sin cuenta real':(linked?'Cuenta de Kalshi conectada':'Cuenta REAL sin conectar'));for(const id of ['apiKey','privateKey','testApi'])$('#'+id).disabled=s.execution_mode==='paper';$('#positionNote').dataset.connected=String(linked);
+setText($('#radarNotice'),(s.retention||'Pausar entradas mantiene las salidas. Cerrar todo espera liquidez y precios actuales.')+' · '+(s.market?.ticker||'Sin ronda verificada'));setText($('#entryLimit'),s.settings.max_entry_cents+' ¢');setText($('#goalDisplay'),money(s.settings.daily_goal_dollars));setText($('#sessionTime'),'MIAMI · '+localtime(new Date().toISOString()));
+let metrics=document.querySelectorAll('[data-metric]');[s.totals.accumulated,s.totals.realized].forEach((value,i)=>{setText(metrics[i],(value>0?'+':'')+money(value));metrics[i].style.color=value>0?'#34d399':value<0?'#f87171':'inherit'});let progress=s.settings.daily_goal_dollars?Math.max(0,Math.min(100,s.totals.accumulated/s.settings.daily_goal_dollars*100)):0;$('.performance .strength i').style.width=progress+'%';setText($('#progressText'),progress.toFixed(0)+'% · '+s.totals.completed+' cerradas');setText($('.mini-radar strong'),progress.toFixed(0)+'%');
+let count=s.positions.reduce((n,p)=>n+p.quantity,0);setText($('#openContracts'),count+' CONTRATOS');setText($('#positionSide'),s.positions[0]?.side||'SIN POSICIÓN');let net=0,marked=true;for(const p of s.positions){if(!fresh||p.ticker!==s.market?.ticker){marked=false;break}let left=p.quantity,value=0;for(const [price,n]of s.book?.[p.side]?.bids||[]){let take=Math.min(left,n);left-=take;value+=take*price;if(left<=0)break}if(left>0){marked=false;break}net+=(value-p.entry*p.quantity)/100-p.entry_fee-s.settings.fee_cents_per_contract*p.quantity/100}
+setText($('#positionPaid'),money(s.positions.reduce((total,p)=>total+p.entry*p.quantity/100+p.entry_fee,0)));setText($('#unrealized'),marked?((net>0?'+':'')+money(net)):'—');$('#unrealized').style.color=marked&&s.positions.length?(net>0?'#34d399':net<0?'#f87171':'inherit'):'inherit';setText($('#positionNote'),s.positions.length?(marked?'Neto estimado · comisiones de salida estimadas':'Esperando liquidez / liquidación'):'Sin operaciones');setText($('#cashLabel'),'Disponible del bot: '+money(s.totals.cash)+(s.execution_mode==='live'?' · Cuenta: '+money(s.account_balance):' · virtual'));
+const signature=JSON.stringify(s.settings);
+if(!loaded||(!dirty&&settingsSignature!==signature)){settingsSignature=signature;for(const [name,key]of Object.entries(names)){let el=form.elements[name];if(el.type==='checkbox')el.checked=s.settings[key];else {let raw=s.settings[key];let value=(raw!==undefined&&raw!==null&&Number.isFinite(Number(raw)))?Number(raw):(name==='tp'?90:name==='sl'?10:Number(el.value)||0);if(el.tagName==='SELECT'){for(const o of Array.from(el.options)){if(!Number.isFinite(Number(o.value))||o.textContent.includes('undefined')||o.textContent.includes('NaN'))o.remove()}if(!Array.from(el.options).some(o=>Number(o.value)===value)){let option=document.createElement('option');option.value=String(value);option.textContent=value===0?'Desactivado':(name==='sl'?'−':'+')+value+'%';el.add(option)}}if(el.value!==String(value))el.value=String(value)}}loaded=true;setText($('#savedState'),'AJUSTES DEL SERVIDOR')}form.elements.balance.disabled=s.running||s.positions.length>0;
+martingalePreview();
+setRows($('#entriesRows'),s.trades.map(t=>'<tr><td>'+localtime(t.opened)+'</td><td>'+esc(t.ticker)+'</td><td>'+esc(t.side)+'</td><td>'+t.quantity+'</td><td>'+cents(t.entry)+'</td><td>'+esc(t.reason||'ABIERTA')+(t.closed?' · '+money(t.pnl):'')+'</td></tr>').join(''));$('#entriesEmpty').classList.toggle('hidden',s.trades.length>0);
+setRows($('#logs'),s.events.map(e=>'<tr><td>'+localtime(e.at)+'</td><td>'+esc(e.kind)+'</td><td>'+esc(e.message)+'</td></tr>').join(''));
+setText($('#signalTitle'),active||(!fresh?'ESPERANDO DATOS':'ANALIZANDO'));setText($('#signalDetail'),s.quality||s.message);setText($('#signalDirection'),active||'—');setText($('#signalFirst'),s.first_signal||'—');setText($('#btcPrice'),money(s.price));setText($('#targetPrice'),money(s.target));setText($('#emaValue'),s.ema==='BULL'?'ALCISTA':s.ema==='BEAR'?'BAJISTA':'—');setText($('#rsiValue'),s.rsi?.toFixed(1)||'—');setText($('#momentumValue'),s.metrics?.mom5==null?'—':s.metrics.mom5.toFixed(3)+'% · 5 min');setText($('#volumeValue'),s.metrics?.vol_ratio==null?'—':s.metrics.vol_ratio.toFixed(2)+'×');setText($('#indicatorNote'),(s.source||'Sin fuente')+' · Lectura: '+localtime(s.updated)+' · '+(s.quality||'Esperando'));
+endAt=s.market?.close_time?Date.parse(s.market.close_time):null;setText($('#connectionNotice'),(s.connection?.message||'Cuenta sin conectar.')+(s.pending_orders?' · ÓRDENES PENDIENTES: '+s.pending_orders:''));height();tick()}
+function tick(){
+  const now=Date.now();
+  drawRoundPrice(current,now);
+  const sec=Number.isFinite(endAt)?Math.max(0,Math.floor((endAt-now)/1000)):null;
+  const remaining=sec===null?'—':String(Math.floor(sec/60)).padStart(2,'0')+':'+String(sec%60).padStart(2,'0');
+  setText($('#roundClock'),remaining+' / 15:00');
+  setText($('#chartRoundClock'),remaining);
+  if(current?.updated&&now-Date.parse(current.updated)>15000){
+    setText($('#marketLabel'),' · DATOS ATRASADOS');
+    setText($('#activeSignal'),'ESPERANDO');
+    $('#radar').classList.add('paused');
+  }
+}
+window.addEventListener('message',e=>{if(e.source!==window.parent||e.data?.type!=='streamlit:render')return;const args=e.data.args||{};let reply=args.reply;if(reply&&acknowledged.has(reply.id))reply=null;if(reply&&reply.ok&&reply.kind==='verify_demo'){$('#privateKey').value=''}if(reply&&reply.ok&&reply.kind==='settings'){dirty=false;loaded=false;if(reply.saved_settings){if(args.snapshot)args.snapshot.settings=reply.saved_settings;form.elements.goal.value=String(reply.saved_settings.daily_goal_dollars);$('#goalDisplay').textContent=money(reply.saved_settings.daily_goal_dollars)}}if(args.snapshot)update(args.snapshot);if(reply&&reply.id&&!acknowledged.has(reply.id)){acknowledged.add(reply.id);if(acknowledged.size>100)acknowledged.delete(acknowledged.values().next().value);if(pending===reply.id){pending=null;busy(false)}if(reply.csv){let a=document.createElement('a');a.href=URL.createObjectURL(new Blob(['\ufeff'+reply.csv],{type:'text/csv;charset=utf-8'}));a.download='alpha_historial.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000)}toast(reply.message);post('streamlit:setComponentValue',{value:{id:'ack-'+reply.id,action:'ack',payload:{}},dataType:'json'})}});
+window.addEventListener('resize',height);new ResizeObserver(height).observe(document.body);setInterval(tick,1000);post('streamlit:componentReady',{apiVersion:1});height();
+
+</script></body></html>
+"""
+
+class Controller:
+    def __init__(self,bot):
+        self.bot=bot
+        self.connection_root=bot
+        self.seen={}
+        self.connection={'message':('Prueba virtual · datos públicos; sin órdenes reales.' if getattr(bot,'execution_mode',None)=='paper' else 'REAL · Cuenta pendiente de conectar.')}
+        active=[]  # Explicit mode selection owns which ledger is shown.
+        if len(active)==1:
+            self.bot=active[0]
+            self.connection={'message':'Cuenta REAL recuperada.','environment':'live'}
+    def handle(self,event):
+        if not isinstance(event,dict) or event.get('action')=='ack':
+            return None
+        action=event.get('action');event_id=event.get('id')
+        if not isinstance(event_id,str) or len(event_id)>160:
+            return None
+        if event_id in self.seen:
+            return self.seen[event_id]
+        reply={'id':event_id,'ok':True,'kind':action}
+        try:
+            payload=event.get('payload',{})
+            if not isinstance(payload,dict):raise ValueError('Solicitud inválida.')
+            if action=='command':
+                if getattr(self.bot,'execution_mode',None)!='paper' and not isinstance(self.bot,ConnectedBot):raise ValueError('Conecta la cuenta REAL de Kalshi antes de operar.')
+                command=payload.get('command')
+                self.bot.command(command)
+                reply['message']={'start':('Prueba virtual activada.' if getattr(self.bot,'execution_mode',None)=='paper' else 'Operaciones en Kalshi activadas.'),'pause':'Entradas pausadas; salidas vigiladas.',
+                                  'close':'Cierre solicitado; esperando liquidez actual.'}[command]
+            elif action=='settings':
+                self.bot.save_settings(payload);reply['saved_settings']=dict(self.bot.settings);reply['message']='Ajustes guardados. Meta acumulada: $'+str(self.bot.settings['daily_goal_dollars'])+' de ganancia; no se reinicia cada día.'
+            elif action=='public':
+                market=self.bot.feed.current();book=self.bot.feed.book(market['ticker'])
+                reply['message']='Kalshi responde: '+market['ticker']
+                self.connection={'message':'Consulta pública verificada: '+market['ticker'],'verified_at':stamp()}
+            elif action=='verify_demo':
+                if getattr(self.bot,'execution_mode',None)=='paper':raise ValueError('Apaga Dinero virtual antes de conectar una cuenta real.')
+                self.auto_disabled=False
+                self.connection=_connect_kalshi(self,payload)
+                reply['message']=self.connection['message']
+            elif action=='sync_account':
+                if not isinstance(self.bot,ConnectedBot):raise ValueError('Primero conecta una cuenta de Kalshi.')
+                with self.bot.lock:
+                    self.bot.reconcile_orders()
+                    self.bot.account_cash=self.bot.account.balance();self.bot.balance_at=time.monotonic()
+                    unresolved=len(self.bot.pending_orders())
+                reply['message']=f'Sincronizado. Órdenes por confirmar: {unresolved}.'
+            elif action=='export':
+                stream=io.StringIO();writer=csv.writer(stream)
+                with self.bot.lock:
+                    cursor=self.bot.db.execute('SELECT * FROM trades ORDER BY id')
+                    writer.writerow([x[0] for x in cursor.description]);writer.writerows(cursor.fetchall())
+                reply.update(csv=stream.getvalue(),message='Historial completo exportado.')
+            else:
+                raise ValueError('Acción desconocida.')
+        except ValueError as e:
+            reply.update(ok=False,message=str(e))
+        except Exception as exc:
+            if action=='verify_demo':
+                stage=getattr(self,'connection_stage','preparar la conexión')
+                if isinstance(exc,ImportError):
+                    message='Falta cryptography en el servidor. Añade cryptography>=43,<47 a requirements.txt y vuelve a desplegar.'
+                elif isinstance(exc,(OSError,sqlite3.Error)):
+                    message=f'No se pudo preparar el historial de Kalshi ({type(exc).__name__}). Comprueba que ALPHA_DB apunte a una carpeta escribible.'
+                else:
+                    # Report type/stage only: raw exceptions may contain credentials.
+                    message=f'No se pudo conectar al {stage} ({type(exc).__name__}). No se activaron compras.'
+                reply.update(ok=False,message=message)
+            else:
+                reply.update(ok=False,message='No se pudo completar la operación. No se confirmó el cambio.')
+        if action=='verify_demo':
+            self.connection={**self.connection,'message':reply['message'],
+                             'state':'connected' if reply['ok'] else 'error','checked_at':stamp()}
+        self.seen[event_id]=reply
+        if len(self.seen)>500:self.seen.pop(next(iter(self.seen)))
+        return reply
+    def snapshot(self):
+        result=self.bot.view()
+        with self.bot.lock:
+            result['has_trades']=bool(self.bot.db.execute('SELECT 1 FROM trades LIMIT 1').fetchone())
+        result['connection']=self.connection.copy()
+        result['mode']='SIMULACIÓN' if getattr(self.bot,'execution_mode',None)=='paper' else 'REAL'
+        if getattr(self.bot,'execution_mode',None)!='paper' and not isinstance(self.bot,ConnectedBot):
+            result.update(running=False,execution_mode=None)
+            if result.get('status') != 'SIN DATOS':
+                result['message']='Lectura activa · conecta una cuenta solo para operar en real.'
+            result['totals']={k:0 for k in result['totals']}
+            result['has_trades']=False
+        return result
+
+
+
+def _saved_kalshi_credentials(secrets_source=None):
+    def read(name):
+        value=os.environ.get(name)
+        if value is None and secrets_source is not None:
+            try:value=secrets_source.get(name,'')
+            except Exception:value=''
+        return value.strip() if isinstance(value,str) else ''
+    key_id=read('KALSHI_API_KEY_ID');pem=read('KALSHI_PRIVATE_KEY')
+    # Accept multiline secrets as well as escaped newlines in environment values.
+    return key_id,pem.replace('\\n','\n')
+
+def _auto_connect_saved(controller,credentials):
+    if getattr(controller,'auto_disabled',False) or isinstance(controller.bot,(ConnectedBot,PaperBot)):return
+    key_id,pem=credentials
+    if not key_id and not pem:return
+    root=controller.connection_root
+    with root.lock:
+        if time.monotonic()<getattr(root,'saved_retry_at',0):return
+        if not key_id or not pem:
+            controller.connection={'message':'Completa KALSHI_API_KEY_ID y KALSHI_PRIVATE_KEY en los secretos del servidor.'}
+            return
+        if root.running:return
+        identity=hashlib.sha256(('live:'+key_id).encode()).hexdigest()[:24]
+        linked=getattr(root,'connected_accounts',{}).get(identity)
+        if linked is not None and not linked.stop_event.is_set():
+            controller.bot=linked
+            controller.connection={'message':'Cuenta REAL conectada con las claves guardadas en el servidor.','environment':'live'}
+            return
+        try:
+            controller.connection=_connect_kalshi(controller,dict(environment='live',accept_real=True,key_id=key_id,pem=pem))
+            controller.connection['message']='Cuenta REAL conectada automáticamente. Entradas pausadas; pulsa INICIAR para comprar.'
+        except Exception as exc:
+            root.saved_retry_at=max(time.monotonic()+30,getattr(controller,'connect_retry_at',0))
+            message=str(exc) if isinstance(exc,ValueError) else 'No se pudo completar la conexión automática.'
+            controller.connection={'message':message+' Se reintentará automáticamente en al menos 30 segundos.','state':'error'}
+
+
+
+PAPER_RUNTIME_REVISION = "martingale_sim_kalshi_chart_v1"
+
+def _refresh_runtime_bot(root, paper_mode):
+    """Rebind cached resources after Streamlit re-executes class definitions."""
+    with root.lock:
+        if paper_mode and getattr(root,"runtime_revision",None)==PAPER_RUNTIME_REVISION:
+            root.start_worker()
+            return root
+        root.__class__=PaperBot if paper_mode else Bot
+        if paper_mode:
+            root.runtime_revision=PAPER_RUNTIME_REVISION
+        root.settings={key:root.settings.get(key,value) for key,value in DEFAULTS.items()}
+        root.feed.__class__=MarketData
+        for linked in getattr(root,'connected_accounts',{}).values():
+            with linked.lock:
+                linked.__class__=ConnectedBot
+                linked.account.__class__=KalshiAccount
+                linked.feed.__class__=AccountMarketData
+    root.start_worker()
+    return root
+
+
+
+def _runtime_registry():
+    # This module survives Streamlit script reruns and cache invalidation.
+    import sys
+    candidate=types.ModuleType('_alpha_edge_runtime_app84_paper_only')
+    candidate.lock=threading.RLock()
+    candidate.bots={}
+    return sys.modules.setdefault(candidate.__name__,candidate)
+
+
+def _shared_runtime_bot(paper_mode):
+    db=Path(os.environ.get('ALPHA_DB',ROOT/'data'/'alpha.sqlite3'))
+    if paper_mode:
+        db=db.with_name(db.stem+'_paper_app84'+db.suffix)
+    db=db.resolve()
+    key=str(db)
+    registry=_runtime_registry()
+    with registry.lock:
+        bot=registry.bots.get(key)
+        if bot is not None:
+            return _refresh_runtime_bot(bot,paper_mode)
+        # Recover a worker from the preceding script version in this process.
+        # Keep its ledger and file lock; never bypass a lock held elsewhere.
+        matches={}
+        for worker in threading.enumerate():
+            owner=getattr(getattr(worker,'_target',None),'__self__',None)
+            held=getattr(owner,'_process_lock',None)
+            if (owner is None or held is None or held.closed or
+                    type(owner).__name__ not in ('Bot','PaperBot')):
+                continue
+            if Path(held.name).resolve()==Path(key+'.lock'):
+                matches[id(owner)]=owner
+        if len(matches)>1:
+            raise RuntimeError('Hay motores antiguos duplicados. Reinicia la app una vez para cargar esta versión.')
+        if matches:
+            bot=next(iter(matches.values()))
+            workers=[t for t in threading.enumerate()
+                     if getattr(getattr(t,'_target',None),'__self__',None) is bot]
+            if len(workers)>1:
+                raise RuntimeError('Hay motores antiguos duplicados. Reinicia la app una vez para cargar esta versión.')
+            registry.bots[key]=bot
+            return _refresh_runtime_bot(bot,paper_mode)
+        db.parent.mkdir(parents=True,exist_ok=True)
+        held=open(key+'.lock','a+')
+        bot=None
+        try:
+            if os.name=='nt':
+                import msvcrt
+                held.seek(0);held.write('0');held.flush();held.seek(0)
+                msvcrt.locking(held.fileno(),msvcrt.LK_NBLCK,1)
+            else:
+                import fcntl
+                fcntl.flock(held,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            bot=PaperBot(db) if paper_mode else Bot(db)
+            bot._process_lock=held
+            if paper_mode:
+                bot.runtime_revision=PAPER_RUNTIME_REVISION
+            bot.start_worker()
+        except Exception:
+            if bot is not None:
+                bot.stop_event.set()
+                if bot.thread is not None:
+                    bot.thread.join(timeout=10)
+                if bot.thread is not None and bot.thread.is_alive():
+                    # Retain ownership if a worker has not stopped yet.
+                    registry.bots[key]=bot
+                    raise
+                bot.db.close()
+            held.close()
+            raise
+        registry.bots[key]=bot
+        return bot
+
+
+def streamlit_main():
+    import streamlit as st
+    import streamlit.components.v1 as components
+    import tempfile
+    st.set_page_config(page_title='ALPHA EDGE · BTC 15 MIN',layout='wide',initial_sidebar_state='collapsed')
+    st.markdown('<style>.block-container{padding:0!important;max-width:100%!important}header,footer{display:none!important}.stApp{background:#080e22}</style>',unsafe_allow_html=True)
+    try:
+        password=os.environ.get('ALPHA_PASSWORD') or st.secrets.get('ALPHA_PASSWORD','')
+    except Exception:
+        password=os.environ.get('ALPHA_PASSWORD','')
+    if password and not st.session_state.get('alpha_authenticated'):
+        supplied=st.text_input('Contraseña de ALPHA EDGE',type='password')
+        if st.button('Entrar'):
+            if hmac.compare_digest(supplied.encode(),password.encode()):
+                st.session_state.alpha_authenticated=True;st.rerun()
+            else:st.error('Contraseña incorrecta.')
+        st.stop()
+
+    try:
+        bot=_shared_runtime_bot(True)
+    except (OSError,RuntimeError):
+        st.error('El motor anterior sigue ocupando el historial. Reinicia la app para cargar esta versión.')
+        st.stop()
+    controller=st.session_state.get('alpha_controller')
+    if controller is None or controller.bot is not bot:
+        controller=Controller(bot)
+        st.session_state.alpha_controller=controller
+        st.session_state.alpha_reply=None
+    controller.__class__=Controller
+    st.caption('MODO PRUEBA · SALDO VIRTUAL')
+    digest=hashlib.sha256(_TERMINAL_HTML.encode()).hexdigest()[:16]
+    directory=Path(tempfile.gettempdir())/('alpha_terminal_'+digest)
+    directory.mkdir(parents=True,exist_ok=True)
+    index=directory/'index.html'
+    if not index.exists():index.write_text(_TERMINAL_HTML,encoding='utf-8')
+    terminal=components.declare_component('alpha_edge_terminal',path=str(directory))
+
+    @st.fragment(run_every=2)
+    def live_terminal():
+        event=terminal(snapshot=controller.snapshot(),reply=st.session_state.get('alpha_reply'),key='alpha_terminal',default=None)
+        if isinstance(event,dict) and event.get('action')=='ack':
+            st.session_state.alpha_reply=None
+        elif isinstance(event,dict) and event.get('id') not in controller.seen:
+            reply=controller.handle(event)
+            if reply:
+                st.session_state.alpha_reply=reply
+    live_terminal()
+
+if __name__=='__main__':
+    from streamlit.runtime.scriptrunner import get_script_run_ctx
+    if get_script_run_ctx(suppress_warning=True) is None:
+        import sys
+        from streamlit.web import cli as streamlit_cli
+        sys.argv=['streamlit','run',str(Path(__file__).resolve()),
+                  '--server.address',os.environ.get('BIND','127.0.0.1'),
+                  '--server.port',os.environ.get('PORT','8501'),'--server.headless','true']
+        raise SystemExit(streamlit_cli.main())
+    else:
+        streamlit_main()
