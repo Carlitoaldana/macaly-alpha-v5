@@ -113,7 +113,7 @@ def get_btc_data():
     return _fetch_current_btc_candles()
 
 
-def _chart_ut_markers(candles, atr_period=10, sensitivity=1.0):
+def _chart_ut_state(candles, atr_period=10, sensitivity=1.0):
     """UT Bot Alerts by QuantNomad, using regular candles and Wilder's ATR."""
     ranges = []
     markers = []
@@ -152,7 +152,10 @@ def _chart_ut_markers(candles, atr_period=10, sensitivity=1.0):
             markers.append({"time": int(candle.time.timestamp()), "direction": "UP"})
         elif prior_close >= prior_stop and close < stop:
             markers.append({"time": int(candle.time.timestamp()), "direction": "DOWN"})
-    return markers
+    side = None
+    if stop is not None and previous_close != stop:
+        side = "UP" if previous_close > stop else "DOWN"
+    return markers, side
 
 
 def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=None, round_df=None):
@@ -172,7 +175,7 @@ def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=
         frame.loc[idx, "close"] = price
         frame.loc[idx, "high"] = max(float(frame.loc[idx, "high"]), price)
         frame.loc[idx, "low"] = min(float(frame.loc[idx, "low"]), price)
-    reversal_markers = _chart_ut_markers(frame)
+    reversal_markers, ut_side = _chart_ut_state(frame)
     close = frame["close"].astype(float)
     frame["ema9"] = close.ewm(span=9, adjust=False).mean()
     frame["ema21"] = close.ewm(span=21, adjust=False).mean()
@@ -214,7 +217,7 @@ def _neon_payload(df, live_price, target, active, timeframe, sig, whale, market=
     resistance = max((r["high"] for r in recent_levels), default=None)
     if rows:
         reversal_markers = [mark for mark in reversal_markers if mark["time"] >= rows[0]["t"]]
-    return {"rows": rows, "reversal_markers": reversal_markers,
+    return {"ut_side": ut_side, "observed": int(now.timestamp()), "rows": rows, "reversal_markers": reversal_markers,
             "candle_source": df.attrs.get("candle_source", "COINBASE"), "timeframe": timeframe, "price": price or latest,
             "target": float(target) if target is not None else None,
             "signal": active if active in ("UP", "DOWN") else "ESPERANDO",
@@ -311,6 +314,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 .expanded-chart #canvas{height:max(180px,calc(100dvh - 260px))!important}
 </style>
 <section class="panel">
+<div style="padding:8px 16px;color:#f1d6a5;font-size:14px">Ronda Kalshi · <strong id="round-clock" style="font-variant-numeric:tabular-nums">—</strong></div>
 <!-- Panel BTC/USD y tarjetas visuales retirados. Se conservan los nodos que usa el JavaScript para actualizar datos. -->
 <div style="display:none!important" aria-hidden="true"><span id="subtitle"></span><span id="price"></span><span id="live"></span><span id="signal"></span><span id="model"></span><span id="status"></span><span id="updated"></span></div>
 <details id="whale"><summary>🐋 WHALE FLOW <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>🐋 WHALE FLOW — LIVE</h3><div class="note">Operaciones observadas de Coinbase · últimos 30 s</div><div class="watch" id="watch"></div><div class="metrics"><div class="metric"><small>BUY FLOW</small><b class="green" id="buy"></b></div><div class="metric"><small>SELL FLOW</small><b class="red" id="sell"></b></div><div class="metric"><small>DIFERENCIA</small><b id="diff"></b></div><div class="metric"><small>ACTIVIDAD</small><b id="activity"></b></div><div class="metric"><small>FUERZA DEL DESEQUILIBRIO</small><b id="strength"></b></div></div><div class="bars"><div class="bar">BUY<div class="track"><i id="buybar" style="background:#00dfb5"></i></div><b id="buytotal"></b></div><div class="bar">SELL<div class="track"><i id="sellbar" style="background:#e64b4b"></i></div><b id="selltotal"></b></div></div><div class="count"><div class="metric"><small>🐋 BUY WHALES</small><b class="green" id="buys"></b></div><div class="metric"><small>🐋 SELL WHALES</small><b class="red" id="sells"></b></div></div><div class="metric difference"><small>DIFERENCIA DE OPERACIONES</small><b id="countdiff"></b></div><p class="note">«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. En el laboratorio, el flujo puede apoyar una candidatura solo con confirmación técnica; no decide por sí solo.</p></div></details>
@@ -336,7 +340,17 @@ $('expand').addEventListener('click',()=>{
 });
 function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
 for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
+function updateRoundClock(){
+ const label=$('round-clock');
+ if(!Number.isFinite(D.round_close_ms)){label.textContent='Esperando ronda';return;}
+ const seconds=Math.max(0,Math.ceil((D.round_close_ms-Date.now())/1000));
+ label.textContent=seconds
+   ? Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0')
+   : '0:00 · Esperando nueva ronda';
+}
+setInterval(updateRoundClock,1000);
 function refreshLabels(){
+ updateRoundClock();
 $('subtitle').textContent=D.timeframe.toUpperCase()+' · '+(D.candle_source||'COINBASE')+' · BTC SIGNAL';$('price').textContent=usd(D.price);$('live').textContent=D.price==null?'● SIN COTIZACIÓN':'● PRECIO RECIBIDO';$('model').textContent=fmt(D.signal==='UP'?D.up:D.signal==='DOWN'?D.down:Math.max(D.up,D.down),1)+'%';$('status').textContent=D.rows.length?'DATOS RECIBIDOS':'SIN VELAS';$('updated').textContent='Actualizado '+D.updated;$('viewtf').textContent=D.timeframe+' · VELAS REALES';$('signal-state').textContent=D.signal_status||'';
 const F=D.flow,total=F.buy+F.sell,known=F.ok;
 $('watch').textContent=!known?'SIN DATOS DE FLUJO':total===0?'ESPERANDO OPERACIONES':F.direction==='NEUTRAL'?'FLUJO EQUILIBRADO':'WATCH '+F.direction;
@@ -524,22 +538,25 @@ def confirmed_chart_signals():
     return threading.Lock(), {}
 
 
-def confirm_live_markers(payload, saved, flow_side, current_minute):
+def confirm_round_marker(payload, saved, market, flow_side):
+    now = payload["observed"]
+    minute = now // 60 * 60
     rows = payload["rows"]
-    if rows:
-        visible = {row["t"] for row in rows}
-        for timestamp in list(saved):
-            if timestamp < rows[0]["t"]:
-                del saved[timestamp]
-        for marker in payload["reversal_markers"]:
-            if marker["time"] == current_minute and marker["direction"] == flow_side:
-                saved.setdefault(current_minute, flow_side)
-        payload["reversal_markers"] = [
-            {"time": timestamp, "direction": direction}
-            for timestamp, direction in sorted(saved.items()) if timestamp in visible
-        ]
-    else:
-        payload["reversal_markers"] = []
+    for ticker, marker in list(saved.items()):
+        if marker["time"] < now - 4 * 3600:
+            del saved[ticker]
+    active = market and _KalshiPublicReads._is_current(
+        market, datetime.fromtimestamp(now, timezone.utc))
+    ticker = market["ticker"] if active else None
+    side = payload["ut_side"]
+    if ticker and rows and rows[-1]["t"] == minute and side in ("UP", "DOWN") and side == flow_side:
+        saved.setdefault(ticker, {"time": minute, "direction": side})
+    visible = {row["t"] for row in rows}
+    payload["reversal_markers"] = sorted(
+        (marker for marker in saved.values() if marker["time"] in visible),
+        key=lambda marker: marker["time"],
+    )
+    return saved.get(ticker)
 
 
 class _KalshiPublicReads:
@@ -749,7 +766,7 @@ def kalshi_target_executor():
     return ThreadPoolExecutor(max_workers=1, thread_name_prefix="kalshi-target")
 
 
-def current_chart_target(state, reader):
+def current_chart_market(state, reader):
     future = state.get("kalshi_target_future")
     if future is not None and future.done():
         try:
@@ -760,7 +777,7 @@ def current_chart_target(state, reader):
     if future is None:
         state["kalshi_target_future"] = kalshi_target_executor().submit(reader.current_market)
     market = state.get("kalshi_target_market")
-    return get_target_from_market(market) if reader._is_current(market) else None
+    return market if reader._is_current(market) else None
 
 
 @st.fragment(run_every="2s")
@@ -789,24 +806,19 @@ def live_chart():
         except (ValueError, requests.RequestException):
             flow_status = "Error al consultar el flujo de Coinbase"
 
-    target = current_chart_target(st.session_state, _kalshi_public_reads())
+    market = current_chart_market(st.session_state, _kalshi_public_reads())
+    target = get_target_from_market(market) if market else None
     payload = _neon_payload(candles, price, target, None, "1m", {}, None)
     lock, saved = confirmed_chart_signals()
-    current_minute = int(pd.Timestamp(payload["updated"]).floor("min").timestamp())
-    rows = payload["rows"]
-    candidate = next((mark["direction"] for mark in payload["reversal_markers"]
-                      if mark["time"] == current_minute), None)
+    payload["round_close_ms"] = int(pd.Timestamp(market["close_time"]).timestamp()*1000) if market else None
     with lock:
-        confirm_live_markers(payload, saved, flow_side, current_minute)
-        confirmed = saved.get(current_minute)
-    if not rows or rows[-1]["t"] != current_minute:
-        status = "Esperando la vela del minuto actual"
-    elif confirmed:
-        status = f"{confirmed} confirmado en esta vela"
-    elif not candidate:
-        status = f"Esperando giro del UT · {flow_status}"
+        confirmed = confirm_round_marker(payload, saved, market, flow_side)
+    if confirmed:
+        status = f"Señal de la ronda · {confirmed['direction']}"
+    elif not market:
+        status = "Esperando ronda Kalshi"
     else:
-        status = f"UT {candidate} · {flow_status} · esperando confirmación"
+        status = f"Esperando coincidencia UT y flujo · {flow_status}"
     payload["signal_status"] = status
     safe_payload = json.dumps(payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
     st.session_state["_alpha_chart_html_initial"] = _NEON_HTML.replace("__PAYLOAD__", safe_payload)
