@@ -311,7 +311,6 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 .expanded-chart #canvas{height:max(180px,calc(100dvh - 260px))!important}
 </style>
 <section class="panel">
-<div style="padding:8px 16px;color:#f1d6a5;font-size:14px">Ronda Kalshi · <strong id="round-clock" style="font-variant-numeric:tabular-nums">—</strong></div>
 <!-- Panel BTC/USD y tarjetas visuales retirados. Se conservan los nodos que usa el JavaScript para actualizar datos. -->
 <div style="display:none!important" aria-hidden="true"><span id="subtitle"></span><span id="price"></span><span id="live"></span><span id="signal"></span><span id="model"></span><span id="status"></span><span id="updated"></span></div>
 <details id="whale"><summary>🐋 WHALE FLOW <small>EN VIVO · TOCA PARA ABRIR</small></summary><div class="detail"><h3>🐋 WHALE FLOW — LIVE</h3><div class="note">Operaciones observadas de Coinbase · últimos 30 s</div><div class="watch" id="watch"></div><div class="metrics"><div class="metric"><small>BUY FLOW</small><b class="green" id="buy"></b></div><div class="metric"><small>SELL FLOW</small><b class="red" id="sell"></b></div><div class="metric"><small>DIFERENCIA</small><b id="diff"></b></div><div class="metric"><small>ACTIVIDAD</small><b id="activity"></b></div><div class="metric"><small>FUERZA DEL DESEQUILIBRIO</small><b id="strength"></b></div></div><div class="bars"><div class="bar">BUY<div class="track"><i id="buybar" style="background:#00dfb5"></i></div><b id="buytotal"></b></div><div class="bar">SELL<div class="track"><i id="sellbar" style="background:#e64b4b"></i></div><b id="selltotal"></b></div></div><div class="count"><div class="metric"><small>🐋 BUY WHALES</small><b class="green" id="buys"></b></div><div class="metric"><small>🐋 SELL WHALES</small><b class="red" id="sells"></b></div></div><div class="metric difference"><small>DIFERENCIA DE OPERACIONES</small><b id="countdiff"></b></div><p class="note">«Whales»: operaciones individuales de al menos $10,000, no personas identificadas. Muestra recibida por la API; puede omitir operaciones entre consultas. Actividad: ritmo de los últimos 10 s frente a los 20 s anteriores. En el laboratorio, el flujo puede apoyar una candidatura solo con confirmación técnica; no decide por sí solo.</p></div></details>
@@ -337,17 +336,7 @@ $('expand').addEventListener('click',()=>{
 });
 function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
 for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
-function updateRoundClock(){
- const label=$('round-clock');
- if(!Number.isFinite(D.round_close_ms)){label.textContent='Esperando ronda';return;}
- const seconds=Math.max(0,Math.ceil((D.round_close_ms-Date.now())/1000));
- label.textContent=seconds
-   ? Math.floor(seconds/60)+':'+String(seconds%60).padStart(2,'0')
-   : '0:00 · Esperando nueva ronda';
-}
-setInterval(updateRoundClock,1000);
 function refreshLabels(){
- updateRoundClock();
 $('subtitle').textContent=D.timeframe.toUpperCase()+' · '+(D.candle_source||'COINBASE')+' · BTC SIGNAL';$('price').textContent=usd(D.price);$('live').textContent=D.price==null?'● SIN COTIZACIÓN':'● PRECIO RECIBIDO';$('model').textContent=fmt(D.signal==='UP'?D.up:D.signal==='DOWN'?D.down:Math.max(D.up,D.down),1)+'%';$('status').textContent=D.rows.length?'DATOS RECIBIDOS':'SIN VELAS';$('updated').textContent='Actualizado '+D.updated;$('viewtf').textContent=D.timeframe+' · VELAS REALES';$('signal-state').textContent=D.signal_status||'';
 const F=D.flow,total=F.buy+F.sell,known=F.ok;
 $('watch').textContent=!known?'SIN DATOS DE FLUJO':total===0?'ESPERANDO OPERACIONES':F.direction==='NEUTRAL'?'FLUJO EQUILIBRADO':'WATCH '+F.direction;
@@ -481,6 +470,76 @@ window.addEventListener('message',function(event){
 });
 draw();
 </script></html>'''
+
+
+@st.cache_data(ttl=1)
+def get_recent_coinbase_trades():
+    response = requests.get(
+        "https://api.exchange.coinbase.com/products/BTC-USD/trades",
+        params={"limit": 100},
+        timeout=3,
+    )
+    response.raise_for_status()
+    trades = {}
+    if not isinstance(response.json(), list):
+        raise ValueError("Operaciones BTC no disponibles.")
+    for row in response.json():
+        try:
+            trade_id = int(row["trade_id"])
+            timestamp = pd.Timestamp(row["time"]).timestamp()
+            price = float(row["price"])
+            size = float(row["size"])
+            # Coinbase reports the resting maker side, opposite the aggressor.
+            side = {"sell": "UP", "buy": "DOWN"}[row["side"]]
+        except (KeyError, ValueError, TypeError, OverflowError):
+            continue
+        if np.isfinite([timestamp, price, price * size]).all() and price > 0 and size > 0:
+            trades[trade_id] = (timestamp, price, price * size, side)
+    return trades
+
+
+def update_aggressor_flow(tape, trades, now):
+    tape.update(trades)
+    for trade_id, trade in list(tape.items()):
+        if trade[0] < now - 5:
+            del tape[trade_id]
+    recent = [trade for trade in tape.values() if now - 5 <= trade[0] <= now]
+    if not recent:
+        return None, None
+    latest = max(recent)
+    if now - latest[0] > 3:
+        return None, None
+    if len(recent) < 8:
+        return latest[1], None
+    buy = sum(trade[2] for trade in recent if trade[3] == "UP")
+    sell = sum(trade[2] for trade in recent if trade[3] == "DOWN")
+    imbalance = (buy - sell) / (buy + sell)
+    side = "UP" if imbalance >= 0.25 else "DOWN" if imbalance <= -0.25 else None
+    return latest[1], side
+
+
+@st.cache_resource
+def confirmed_chart_signals():
+    # Share signals observed by this server across browser sessions.
+    return threading.Lock(), {}
+
+
+def confirm_live_markers(payload, saved, flow_side, current_minute):
+    rows = payload["rows"]
+    if rows:
+        visible = {row["t"] for row in rows}
+        for timestamp in list(saved):
+            if timestamp < rows[0]["t"]:
+                del saved[timestamp]
+        for marker in payload["reversal_markers"]:
+            if marker["time"] == current_minute and marker["direction"] == flow_side:
+                saved.setdefault(current_minute, flow_side)
+        payload["reversal_markers"] = [
+            {"time": timestamp, "direction": direction}
+            for timestamp, direction in sorted(saved.items()) if timestamp in visible
+        ]
+    else:
+        payload["reversal_markers"] = []
 
 
 class _KalshiPublicReads:
@@ -690,7 +749,7 @@ def kalshi_target_executor():
     return ThreadPoolExecutor(max_workers=1, thread_name_prefix="kalshi-target")
 
 
-def current_chart_market(state, reader):
+def current_chart_target(state, reader):
     future = state.get("kalshi_target_future")
     if future is not None and future.done():
         try:
@@ -701,7 +760,7 @@ def current_chart_market(state, reader):
     if future is None:
         state["kalshi_target_future"] = kalshi_target_executor().submit(reader.current_market)
     market = state.get("kalshi_target_market")
-    return market if reader._is_current(market) else None
+    return get_target_from_market(market) if reader._is_current(market) else None
 
 
 @st.fragment(run_every="2s")
@@ -715,24 +774,40 @@ def live_chart():
         price = None
         error = str(exc)
 
-    market = current_chart_market(st.session_state, _kalshi_public_reads())
-    target = get_target_from_market(market)
+    flow_side = None
+    flow_status = "Flujo de Coinbase no disponible"
+    if candles.attrs.get("candle_source") == "COINBASE":
+        try:
+            trades = get_recent_coinbase_trades()
+            tape = st.session_state.setdefault("aggressor_tape", {})
+            trade_price, flow_side = update_aggressor_flow(tape, trades, datetime.now(timezone.utc).timestamp())
+            if trade_price is None:
+                flow_status = "Sin operaciones recientes"
+            else:
+                price = trade_price
+                flow_status = "Flujo sin presión suficiente" if flow_side is None else f"Flujo {flow_side}"
+        except (ValueError, requests.RequestException):
+            flow_status = "Error al consultar el flujo de Coinbase"
+
+    target = current_chart_target(st.session_state, _kalshi_public_reads())
     payload = _neon_payload(candles, price, target, None, "1m", {}, None)
+    lock, saved = confirmed_chart_signals()
     current_minute = int(pd.Timestamp(payload["updated"]).floor("min").timestamp())
     rows = payload["rows"]
     candidate = next((mark["direction"] for mark in payload["reversal_markers"]
                       if mark["time"] == current_minute), None)
+    with lock:
+        confirm_live_markers(payload, saved, flow_side, current_minute)
+        confirmed = saved.get(current_minute)
     if not rows or rows[-1]["t"] != current_minute:
         status = "Esperando la vela del minuto actual"
-    elif candidate:
-        status = f"UT {candidate} · vela abierta"
+    elif confirmed:
+        status = f"{confirmed} confirmado en esta vela"
+    elif not candidate:
+        status = f"Esperando giro del UT · {flow_status}"
     else:
-        status = "Esperando giro del UT"
+        status = f"UT {candidate} · {flow_status} · esperando confirmación"
     payload["signal_status"] = status
-    payload["round_close_ms"] = (
-        int(datetime.fromisoformat(market["close_time"].replace("Z", "+00:00")).timestamp() * 1000)
-        if market else None
-    )
     safe_payload = json.dumps(payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
     st.session_state["_alpha_chart_html_initial"] = _NEON_HTML.replace("__PAYLOAD__", safe_payload)
     st.html(
@@ -781,4 +856,3 @@ st.html(
     '})();</script>',
     unsafe_allow_javascript=True,
 )
-
