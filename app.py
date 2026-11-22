@@ -319,6 +319,7 @@ _NEON_HTML = r'''<!DOCTYPE html><html lang="es"><meta charset="utf-8"><meta name
 <div class="floatcounts"><div>🐋 BUY WHALES <b id="floatbuy"></b></div><div>🐋 SELL WHALES <b id="floatsell"></b></div></div>
 <div class="tooltip" id="tooltip">Arrastra velas y escala de precios · pellizca para zoom · AHORA regresa al presente.</div><div class="canvas" id="canvas"></div><div id="rsi-pane" style="height:110px;display:none;background:#06121a;border-top:1px solid #294c69"></div>
 <div class="chartnav"><button id="older" aria-label="Velas anteriores">←</button><button id="newer" aria-label="Velas siguientes">→</button><button id="zoomin" aria-label="Acercar">＋</button><button id="zoomout" aria-label="Alejar">−</button><button id="reset">AHORA</button><button id="expand" type="button" aria-pressed="false">AMPLIAR</button><span id="viewtf"></span></div>
+<div id="signal-state" role="status" style="padding:6px 12px;color:#c4d2e2;font-size:12px"></div>
 </section>
 <script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.2.3/dist/lightweight-charts.standalone.production.js"></script>
 <script>
@@ -336,7 +337,7 @@ $('expand').addEventListener('click',()=>{
 function persist(){try{localStorage.setItem('btc-neon-panel-v1',JSON.stringify({toggles,visible,offset,pricePan,whale:$('whale').open,momentum:$('momentum').open}))}catch(e){}}
 for(const name of ['whale','momentum']){$(name).open=!!saved[name];$(name).addEventListener('toggle',persist)}
 function refreshLabels(){
-$('subtitle').textContent=D.timeframe.toUpperCase()+' · '+(D.candle_source||'COINBASE')+' · BTC SIGNAL';$('price').textContent=usd(D.price);$('live').textContent=D.price==null?'● SIN COTIZACIÓN':'● PRECIO RECIBIDO';$('model').textContent=fmt(D.signal==='UP'?D.up:D.signal==='DOWN'?D.down:Math.max(D.up,D.down),1)+'%';$('status').textContent=D.rows.length?'DATOS RECIBIDOS':'SIN VELAS';$('updated').textContent='Actualizado '+D.updated;$('viewtf').textContent=D.timeframe+' · VELAS REALES';
+$('subtitle').textContent=D.timeframe.toUpperCase()+' · '+(D.candle_source||'COINBASE')+' · BTC SIGNAL';$('price').textContent=usd(D.price);$('live').textContent=D.price==null?'● SIN COTIZACIÓN':'● PRECIO RECIBIDO';$('model').textContent=fmt(D.signal==='UP'?D.up:D.signal==='DOWN'?D.down:Math.max(D.up,D.down),1)+'%';$('status').textContent=D.rows.length?'DATOS RECIBIDOS':'SIN VELAS';$('updated').textContent='Actualizado '+D.updated;$('viewtf').textContent=D.timeframe+' · VELAS REALES';$('signal-state').textContent=D.signal_status||'';
 const F=D.flow,total=F.buy+F.sell,known=F.ok;
 $('watch').textContent=!known?'SIN DATOS DE FLUJO':total===0?'ESPERANDO OPERACIONES':F.direction==='NEUTRAL'?'FLUJO EQUILIBRADO':'WATCH '+F.direction;
 for(const [id,value] of [['buy',F.buy],['sell',F.sell],['buytotal',F.buy],['selltotal',F.sell]])$(id).textContent=known?compact(value):'—';
@@ -515,6 +516,12 @@ def update_aggressor_flow(tape, trades, now):
     imbalance = (buy - sell) / (buy + sell)
     side = "UP" if imbalance >= 0.25 else "DOWN" if imbalance <= -0.25 else None
     return latest[1], side
+
+
+@st.cache_resource
+def confirmed_chart_signals():
+    # Share signals observed by this server across browser sessions.
+    return threading.Lock(), {}
 
 
 def confirm_live_markers(payload, saved, flow_side, current_minute):
@@ -768,21 +775,39 @@ def live_chart():
         error = str(exc)
 
     flow_side = None
+    flow_status = "Flujo de Coinbase no disponible"
     if candles.attrs.get("candle_source") == "COINBASE":
         try:
             trades = get_recent_coinbase_trades()
             tape = st.session_state.setdefault("aggressor_tape", {})
             trade_price, flow_side = update_aggressor_flow(tape, trades, datetime.now(timezone.utc).timestamp())
-            if trade_price is not None:
+            if trade_price is None:
+                flow_status = "Sin operaciones recientes"
+            else:
                 price = trade_price
+                flow_status = "Flujo sin presión suficiente" if flow_side is None else f"Flujo {flow_side}"
         except (ValueError, requests.RequestException):
-            pass
+            flow_status = "Error al consultar el flujo de Coinbase"
 
     target = current_chart_target(st.session_state, _kalshi_public_reads())
     payload = _neon_payload(candles, price, target, None, "1m", {}, None)
-    saved = st.session_state.setdefault("aggressor_markers", {})
+    lock, saved = confirmed_chart_signals()
     current_minute = int(pd.Timestamp(payload["updated"]).floor("min").timestamp())
-    confirm_live_markers(payload, saved, flow_side, current_minute)
+    rows = payload["rows"]
+    candidate = next((mark["direction"] for mark in payload["reversal_markers"]
+                      if mark["time"] == current_minute), None)
+    with lock:
+        confirm_live_markers(payload, saved, flow_side, current_minute)
+        confirmed = saved.get(current_minute)
+    if not rows or rows[-1]["t"] != current_minute:
+        status = "Esperando la vela del minuto actual"
+    elif confirmed:
+        status = f"{confirmed} confirmado en esta vela"
+    elif not candidate:
+        status = f"Esperando giro del UT · {flow_status}"
+    else:
+        status = f"UT {candidate} · {flow_status} · esperando confirmación"
+    payload["signal_status"] = status
     safe_payload = json.dumps(payload, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
     st.session_state["_alpha_chart_html_initial"] = _NEON_HTML.replace("__PAYLOAD__", safe_payload)
     st.html(
