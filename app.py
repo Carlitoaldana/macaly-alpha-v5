@@ -623,14 +623,14 @@ def _round_opening_crosscheck(state, candidate, signal, now, market):
     if not tape or observed-tape[-1][0] >= SIGNAL_CONFIRM_INTERVAL:
         tape = tape + [[observed, price]]
     state["opening_market_samples"] = tape
-    if len(tape) < 4 or tape[-1][0]-tape[0][0] < 6:
+    if len(tape) < 2 or tape[-1][0]-tape[0][0] < SIGNAL_CONFIRM_INTERVAL:
         return wait("Analizando lecturas nuevas de esta ronda")
     prices = [x[1] for x in tape]
     sign = 1 if candidate == "UP" else -1
     steps = [sign*(b-a) for a,b in zip(prices, prices[1:])]
     travel = sum(abs(x) for x in steps)
     net = sum(steps)
-    split = len(tape)//2
+    split = min(len(tape)//2, len(tape)-2)
     recent = sign*(prices[-1]-prices[split])
     if (travel <= 0 or net/travel < .60 or recent <= 0
             or sum(x > 0 for x in steps)/len(steps) < .60 or steps[-1] < 0):
