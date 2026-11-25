@@ -1543,9 +1543,7 @@ class Bot:
             return 'Entradas pausadas o posición en gestión.'
         if not signal or signal.get('data_valid') is not True:
             return 'Esperando datos válidos del mercado.'
-        # La dirección de compra es la primera señal registrada de la ronda.
-        # El cerebro puede cambiar su señal activa sin cambiar ni bloquear esta entrada.
-        # Se conservan los controles de datos, precio, liquidez, presupuesto y ronda.
+        # step() entrega la direccion activa confirmada de la ronda.
         routes = None
         if book['ticker']!=market['ticker'] or time.monotonic()-book['at']>5:
             return 'Libro atrasado; esperando datos actuales.'
@@ -1618,12 +1616,12 @@ class Bot:
                 if p['ticker']==market['ticker']:
                     self._arm_take_profit(p,market,book)
                     self.manage(p,book,active,remaining)
-            buy_side=state.get('first_direction')
+            buy_side=active
             message=self.enter(market,book,buy_side,remaining,signal=sig) if not had_position else 'Gestión de posición abierta.'
             if not self.positions() and self.close_requested:
                 self.close_requested=False
             if buy_side is None and not had_position:
-                message=state.get('opening_conflict') or 'Esperando primera señal confirmada de la ronda.'
+                message=state.get('opening_conflict') or 'Esperando señal activa confirmada de la ronda.'
             self.snapshot={'status':'ACTIVO' if self.running else 'PAUSADO','message':message,
                            'mode':'REAL','signal':active,'candidate':sig.get('candidate'),
                            'first_signal':state.get('first_direction'),'market':market,'seconds_left':remaining,
