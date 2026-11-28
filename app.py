@@ -2710,7 +2710,7 @@ def _direction_consistent(candidate, signal, active=None):
 
 
 def _round_opening_crosscheck(state, candidate, signal, market, now):
-    """Require fresh directional movement in this round before its first signal."""
+    """Validate the live price used for this round’s first signal."""
     state["opening_conflict"] = None
     if state.get("first_direction") in ("UP", "DOWN"):
         return candidate
@@ -2718,7 +2718,6 @@ def _round_opening_crosscheck(state, candidate, signal, market, now):
     signal = signal or {}
     market = market or {}
     price = _plan_number(signal.get("price"))
-    atr = _plan_number(signal.get("atr"))
     distance = _plan_number(signal.get("distance"))
     observed = _plan_number(signal.get("price_observed_at"))
     source = signal.get("price_source")
@@ -2728,44 +2727,14 @@ def _round_opening_crosscheck(state, candidate, signal, market, now):
         opened = end - pd.Timedelta(minutes=15)
 
     if (signal.get("data_valid") is False or source not in ("COINBASE", "KALSHI LIVE")
-            or price is None or price <= 0 or atr is None or atr <= 0
-            or distance is None or observed is None or pd.isna(opened) or pd.isna(end)
+            or price is None or price <= 0 or distance is None or observed is None or pd.isna(opened) or pd.isna(end)
             or not opened.timestamp() <= observed < end.timestamp()
             or not 0 <= now.timestamp() - observed <= SIGNAL_CONFIRM_MAX_GAP):
-        state.pop("opening_live_tape", None)
         state["opening_conflict"] = "Esperando lecturas en vivo de esta ronda"
         return None
 
-    # Persist the same observations for the dashboard and background worker.
-    tape = state.get("opening_live_tape") or {}
-    samples = tape.get("samples", []) if tape.get("source") == source else []
-    if samples and observed < samples[-1][0]:
-        state["opening_conflict"] = "Esperando una lectura más reciente"
-        return None
-    if samples and observed - samples[-1][0] > SIGNAL_CONFIRM_MAX_GAP:
-        samples = []
-    samples = [sample for sample in samples
-               if sample[0] >= opened.timestamp() and observed - sample[0] <= 15]
-    if not samples or observed > samples[-1][0]:
-        samples.append([observed, price])
-    else:
-        state["opening_conflict"] = "Esperando una lectura nueva de esta ronda"
-        return None
-    state["opening_live_tape"] = {"source": source, "samples": samples}
-
-    if len(samples) < 3 or observed - samples[0][0] < 4:
-        state["opening_conflict"] = "Reuniendo movimiento de esta ronda"
-        return None
     if candidate not in ("UP", "DOWN"):
         state["opening_conflict"] = "Esperando una dirección clara"
-        return None
-
-    direction = 1 if candidate == "UP" else -1
-    minimum_move = max(2.0, 0.12 * atr)
-    if (direction * distance <= 0
-            or direction * (price - samples[0][1]) < minimum_move
-            or direction * (price - samples[-2][1]) < 0):
-        state["opening_conflict"] = "Sin impulso claro a favor de " + candidate
         return None
     return candidate
 
@@ -2808,7 +2777,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state[key] = None
         state["pending_count"] = 0
         return
-    # La primera señal requiere movimiento de la ronda y un reloj válido.
+    # La primera señal requiere una lectura actual de la ronda y un reloj válido.
     if state.get("first_direction") is None and seconds_left is None:
         state["pending_direction"] = None
         state["pending_count"] = 0
@@ -2827,8 +2796,6 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         if seconds_left is not None and seconds_left <= 0:
             state["active_direction"] = None
             state["active_since"] = None
-        return
-    if state.get("opening_conflict") == "Esperando una lectura nueva de esta ronda":
         return
     source = signal.get("price_source") if signal else None
     if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
@@ -2855,52 +2822,54 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         state["pending_last_at"] = None
         return
 
-    last = state.get("pending_last_at")
-    if isinstance(last, str):
-        try:
-            last = datetime.fromisoformat(last)
-        except ValueError:
-            last = None
-    since = state.get("pending_since")
-    if isinstance(since, str):
-        try:
-            since = datetime.fromisoformat(since)
-        except ValueError:
-            since = None
+    if state.get("first_direction") in ("UP", "DOWN"):
+        last = state.get("pending_last_at")
+        if isinstance(last, str):
+            try:
+                last = datetime.fromisoformat(last)
+            except ValueError:
+                last = None
+        since = state.get("pending_since")
+        if isinstance(since, str):
+            try:
+                since = datetime.fromisoformat(since)
+            except ValueError:
+                since = None
 
-    if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
-                              or (now - last).total_seconds() < 0)):
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
-        last = since = None
-    if state.get("pending_direction") != candidate:
-        state["pending_direction"] = candidate
-        state["pending_count"] = 1
-        state["pending_since"] = now.isoformat()
-        state["pending_last_at"] = now.isoformat()
-        return
+        if (last is not None and ((now - last).total_seconds() > SIGNAL_CONFIRM_MAX_GAP
+                                  or (now - last).total_seconds() < 0)):
+            state["pending_direction"] = None
+            state["pending_count"] = 0
+            state["pending_since"] = None
+            state["pending_last_at"] = None
+            last = since = None
+        if state.get("pending_direction") != candidate:
+            state["pending_direction"] = candidate
+            state["pending_count"] = 1
+            state["pending_since"] = now.isoformat()
+            state["pending_last_at"] = now.isoformat()
+            return
 
-    if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
-        state["pending_count"] = int(state.get("pending_count", 0)) + 1
-        state["pending_last_at"] = now.isoformat()
+        if last is None or (now - last).total_seconds() >= SIGNAL_CONFIRM_INTERVAL:
+            state["pending_count"] = int(state.get("pending_count", 0)) + 1
+            state["pending_last_at"] = now.isoformat()
 
-    elapsed = (now - since).total_seconds() if since else 0
-    if (state["pending_count"] >= SIGNAL_CONFIRM_READINGS
-            and elapsed >= SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
-        state["active_direction"] = candidate
-        state["active_since"] = now
-        if state.get("first_direction") is None:
-            state["first_direction"] = candidate
-            state["first_signal_time"] = now
-            state["first_signal_seconds"] = seconds_left
-            state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
-                                           else get_no_ask(market))
-        state["pending_direction"] = None
-        state["pending_count"] = 0
-        state["pending_since"] = None
-        state["pending_last_at"] = None
+        elapsed = (now - since).total_seconds() if since else 0
+        if (state["pending_count"] < SIGNAL_CONFIRM_READINGS
+                or elapsed < SIGNAL_CONFIRM_INTERVAL * (SIGNAL_CONFIRM_READINGS - 1)):
+            return
+    state["active_direction"] = candidate
+    state["active_since"] = now
+    if state.get("first_direction") is None:
+        state["first_direction"] = candidate
+        state["first_signal_time"] = now
+        state["first_signal_seconds"] = seconds_left
+        state["first_signal_price"] = (get_yes_ask(market) if candidate == "UP"
+                                       else get_no_ask(market))
+    state["pending_direction"] = None
+    state["pending_count"] = 0
+    state["pending_since"] = None
+    state["pending_last_at"] = None
 
 
 def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left):
@@ -5029,9 +4998,9 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "unified_evidence_v8_round_movement":
+    if state.get("signal_engine_revision") != "unified_evidence_v9_single_read_opening":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "unified_evidence_v8_round_movement"
+        state["signal_engine_revision"] = "unified_evidence_v9_single_read_opening"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
