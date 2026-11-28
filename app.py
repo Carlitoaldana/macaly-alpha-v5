@@ -2707,25 +2707,65 @@ def _direction_consistent(candidate, signal, active=None):
     return agree >= 3 and agree > oppose
 
 
-def _round_opening_crosscheck(state, candidate, signal, now):
-    """Validate live data without an additional opening momentum gate."""
+def _round_opening_crosscheck(state, candidate, signal, market, now):
+    """Require fresh directional movement in this round before its first signal."""
     state["opening_conflict"] = None
     if state.get("first_direction") in ("UP", "DOWN"):
         return candidate
-    if not signal or signal.get("data_valid") is False:
-        state["opening_conflict"] = "Esperando datos actuales para la primera señal"
-        return None
+
+    signal = signal or {}
+    market = market or {}
     price = _plan_number(signal.get("price"))
     atr = _plan_number(signal.get("atr"))
-    if (price is None or price <= 0 or atr is None or atr <= 0
-            or signal.get("price_source") not in ("COINBASE", "KALSHI LIVE")):
-        state["opening_conflict"] = "Esperando precio en vivo para la primera señal"
+    distance = _plan_number(signal.get("distance"))
+    observed = _plan_number(signal.get("price_observed_at"))
+    source = signal.get("price_source")
+    end = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+    opened = pd.to_datetime(market.get("open_time"), utc=True, errors="coerce")
+    if not market.get("open_time") and not pd.isna(end):
+        opened = end - pd.Timedelta(minutes=15)
+
+    if (signal.get("data_valid") is False or source not in ("COINBASE", "KALSHI LIVE")
+            or price is None or price <= 0 or atr is None or atr <= 0
+            or distance is None or observed is None or pd.isna(opened) or pd.isna(end)
+            or not opened.timestamp() <= observed < end.timestamp()
+            or not 0 <= now.timestamp() - observed <= SIGNAL_CONFIRM_MAX_GAP):
+        state.pop("opening_live_tape", None)
+        state["opening_conflict"] = "Esperando lecturas en vivo de esta ronda"
+        return None
+
+    # Persist the same observations for the dashboard and background worker.
+    tape = state.get("opening_live_tape") or {}
+    samples = tape.get("samples", []) if tape.get("source") == source else []
+    if samples and observed < samples[-1][0]:
+        state["opening_conflict"] = "Esperando una lectura más reciente"
+        return None
+    if samples and observed - samples[-1][0] > SIGNAL_CONFIRM_MAX_GAP:
+        samples = []
+    samples = [sample for sample in samples
+               if sample[0] >= opened.timestamp() and observed - sample[0] <= 15]
+    if not samples or observed > samples[-1][0]:
+        samples.append([observed, price])
+    else:
+        state["opening_conflict"] = "Esperando una lectura nueva de esta ronda"
+        return None
+    state["opening_live_tape"] = {"source": source, "samples": samples}
+
+    if len(samples) < 3 or observed - samples[0][0] < 4:
+        state["opening_conflict"] = "Reuniendo movimiento de esta ronda"
         return None
     if candidate not in ("UP", "DOWN"):
-        state["opening_conflict"] = "Esperando candidato direccional válido"
+        state["opening_conflict"] = "Esperando una dirección clara"
+        return None
+
+    direction = 1 if candidate == "UP" else -1
+    minimum_move = max(2.0, 0.12 * atr)
+    if (direction * distance <= 0
+            or direction * (price - samples[0][1]) < minimum_move
+            or direction * (price - samples[-2][1]) < 0):
+        state["opening_conflict"] = "Sin impulso claro a favor de " + candidate
         return None
     return candidate
-
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
@@ -2738,7 +2778,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         candidate = None
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
     level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    candidate = _round_opening_crosscheck(state, candidate, signal, market, now)
     # Opening-only veto. Once the round has a confirmed first direction,
     # subsequent retention/reversal is governed by its separate checks.
     if state.get("first_direction") not in ("UP", "DOWN"):
@@ -2766,8 +2806,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state[key] = None
         state["pending_count"] = 0
         return
-    # La primera señal puede confirmarse desde la apertura con datos en vivo
-    # y un reloj de ronda válido.
+    # La primera señal requiere movimiento de la ronda y un reloj válido.
     if state.get("first_direction") is None and seconds_left is None:
         state["pending_direction"] = None
         state["pending_count"] = 0
@@ -2786,6 +2825,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         if seconds_left is not None and seconds_left <= 0:
             state["active_direction"] = None
             state["active_since"] = None
+        return
+    if state.get("opening_conflict") == "Esperando una lectura nueva de esta ronda":
         return
     source = signal.get("price_source") if signal else None
     if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
@@ -2993,7 +3034,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_multi_indicator49_v1_official_3m"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v3_round_movement"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -4962,6 +5003,8 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     _TRACE_CONTEXT.build_payload = None
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
+    sig["price_observed_at"] = (getattr(_PRICE_OBSERVATIONS, "values", {}).get(price_source)
+                                if live_price is not None else None)
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
         payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
@@ -4974,13 +5017,13 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "unified_evidence_v7_3m":
+    if state.get("signal_engine_revision") != "unified_evidence_v8_round_movement":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "unified_evidence_v7_3m"
+        state["signal_engine_revision"] = "unified_evidence_v8_round_movement"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
-        state.setdefault("opening_live_tapes", {})
+        state.pop("opening_live_tape", None)
         _reset_withdrawal(state)
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
