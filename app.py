@@ -1829,8 +1829,10 @@ def get_coinbase_whale_flow(flow_state=None):
 
     alert = flow_state.get("whale_flow_alert")
     if qualifies:
+        same_event = alert and alert.get("direction") == d10 and now - alert["time"] <= 12
+        event_start = alert.get("event_start", now) if same_event else now
         alert = {
-            "direction": d10, "time": now,
+            "direction": d10, "time": now, "event_start": event_start,
             "buy": b30, "sell": s30, "total": t30,
             "imbalance": i30, "buy10": b10, "sell10": s10,
         }
@@ -2707,25 +2709,65 @@ def _direction_consistent(candidate, signal, active=None):
     return agree >= 3 and agree > oppose
 
 
-def _round_opening_crosscheck(state, candidate, signal, now):
-    """Validate live data without an additional opening momentum gate."""
+def _round_opening_crosscheck(state, candidate, signal, market, now):
+    """Require fresh directional movement in this round before its first signal."""
     state["opening_conflict"] = None
     if state.get("first_direction") in ("UP", "DOWN"):
         return candidate
-    if not signal or signal.get("data_valid") is False:
-        state["opening_conflict"] = "Esperando datos actuales para la primera señal"
-        return None
+
+    signal = signal or {}
+    market = market or {}
     price = _plan_number(signal.get("price"))
     atr = _plan_number(signal.get("atr"))
-    if (price is None or price <= 0 or atr is None or atr <= 0
-            or signal.get("price_source") not in ("COINBASE", "KALSHI LIVE")):
-        state["opening_conflict"] = "Esperando precio en vivo para la primera señal"
+    distance = _plan_number(signal.get("distance"))
+    observed = _plan_number(signal.get("price_observed_at"))
+    source = signal.get("price_source")
+    end = pd.to_datetime(market.get("close_time"), utc=True, errors="coerce")
+    opened = pd.to_datetime(market.get("open_time"), utc=True, errors="coerce")
+    if not market.get("open_time") and not pd.isna(end):
+        opened = end - pd.Timedelta(minutes=15)
+
+    if (signal.get("data_valid") is False or source not in ("COINBASE", "KALSHI LIVE")
+            or price is None or price <= 0 or atr is None or atr <= 0
+            or distance is None or observed is None or pd.isna(opened) or pd.isna(end)
+            or not opened.timestamp() <= observed < end.timestamp()
+            or not 0 <= now.timestamp() - observed <= SIGNAL_CONFIRM_MAX_GAP):
+        state.pop("opening_live_tape", None)
+        state["opening_conflict"] = "Esperando lecturas en vivo de esta ronda"
+        return None
+
+    # Persist the same observations for the dashboard and background worker.
+    tape = state.get("opening_live_tape") or {}
+    samples = tape.get("samples", []) if tape.get("source") == source else []
+    if samples and observed < samples[-1][0]:
+        state["opening_conflict"] = "Esperando una lectura más reciente"
+        return None
+    if samples and observed - samples[-1][0] > SIGNAL_CONFIRM_MAX_GAP:
+        samples = []
+    samples = [sample for sample in samples
+               if sample[0] >= opened.timestamp() and observed - sample[0] <= 15]
+    if not samples or observed > samples[-1][0]:
+        samples.append([observed, price])
+    else:
+        state["opening_conflict"] = "Esperando una lectura nueva de esta ronda"
+        return None
+    state["opening_live_tape"] = {"source": source, "samples": samples}
+
+    if len(samples) < 3 or observed - samples[0][0] < 4:
+        state["opening_conflict"] = "Reuniendo movimiento de esta ronda"
         return None
     if candidate not in ("UP", "DOWN"):
-        state["opening_conflict"] = "Esperando candidato direccional válido"
+        state["opening_conflict"] = "Esperando una dirección clara"
+        return None
+
+    direction = 1 if candidate == "UP" else -1
+    minimum_move = max(2.0, 0.12 * atr)
+    if (direction * distance <= 0
+            or direction * (price - samples[0][1]) < minimum_move
+            or direction * (price - samples[-2][1]) < 0):
+        state["opening_conflict"] = "Sin impulso claro a favor de " + candidate
         return None
     return candidate
-
 
 
 def _confirmation_without_trace(state, candidate, market, seconds_left, now, signal=None):
@@ -2738,7 +2780,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         candidate = None
     level_gate = ((signal or {}).get("structure_internal") or {}).get("opening_level_gate") or {}
     level_wait = level_gate.get("first_signal_blocked", {}).get(candidate)
-    candidate = _round_opening_crosscheck(state, candidate, signal, now)
+    candidate = _round_opening_crosscheck(state, candidate, signal, market, now)
     # Opening-only veto. Once the round has a confirmed first direction,
     # subsequent retention/reversal is governed by its separate checks.
     if state.get("first_direction") not in ("UP", "DOWN"):
@@ -2766,8 +2808,7 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
             state[key] = None
         state["pending_count"] = 0
         return
-    # La primera señal puede confirmarse desde la apertura con datos en vivo
-    # y un reloj de ronda válido.
+    # La primera señal requiere movimiento de la ronda y un reloj válido.
     if state.get("first_direction") is None and seconds_left is None:
         state["pending_direction"] = None
         state["pending_count"] = 0
@@ -2786,6 +2827,8 @@ def _confirmation_without_trace(state, candidate, market, seconds_left, now, sig
         if seconds_left is not None and seconds_left <= 0:
             state["active_direction"] = None
             state["active_since"] = None
+        return
+    if state.get("opening_conflict") == "Esperando una lectura nueva de esta ronda":
         return
     source = signal.get("price_source") if signal else None
     if source in ("KALSHI LIVE", "COINBASE", "COINBASE CANDLE"):
@@ -2993,7 +3036,7 @@ def _process_round_signal_without_coordinator(ticker, sig, market, seconds_left)
 
 BACKGROUND_RUN_SECONDS = 12 * 60 * 60
 BACKGROUND_POLL_SECONDS = 2
-BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v2_multi_indicator49_v1_official_3m"
+BACKGROUND_DATA_REVISION = "continuous_history_ia_shadow_v7_active_market_discovery_recent_support_v1_candle_sources_v2_early_signal_v3_round_movement"
 _BACKGROUND_PRICE_SOURCE = threading.local()
 
 def _background_get_btc_data():
@@ -4308,6 +4351,15 @@ def live_dashboard():
         else None
     )
 
+    whale_alert = (whale or {}).get("alert") or {}
+    whale_event = None
+    if (active in ("UP", "DOWN") and state.get("ticker") == ticker
+            and seconds_left is not None and 0 < seconds_left <= 900
+            and whale_alert.get("direction") == active):
+        event_start = whale_alert.get("event_start")
+        if event_start is not None and event_start >= time.time() - (900 - seconds_left):
+            whale_event = f"{ticker}:{active}:{event_start}"
+
     # Read-only notices. These do not alter the official UP/DOWN or trading.
     # Render del panel de ballenas. Solo visual; no altera el motor v4.6.1.
     try:
@@ -4620,8 +4672,9 @@ def live_dashboard():
     # Cambia solo texto y atributos, manteniendo nodos existentes.
     # La UI vive fuera del fragmento; este fragmento sigue calculando cada 2 s.
     panel_data = json.dumps(panel_html, ensure_ascii=False).replace("<", "\\u003c")
+    whale_data = json.dumps(whale_event).replace("<", "\\u003c")
     st.html(
-        "<script>window.__alphaUpdatePanel(" + panel_data + ");</script>",
+        "<script>window.__alphaUpdatePanel(" + panel_data + "," + whale_data + ");</script>",
         unsafe_allow_javascript=True,
     )
 
@@ -4962,6 +5015,8 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
     _TRACE_CONTEXT.build_payload = None
     sig = _signal_engine_without_trace(df, target, seconds_left, live_price, whale=whale)
     sig["price_source"] = price_source
+    sig["price_observed_at"] = (getattr(_PRICE_OBSERVATIONS, "values", {}).get(price_source)
+                                if live_price is not None else None)
     try:
         candles = [[row.time.isoformat(), float(row.open), float(row.high), float(row.low), float(row.close), float(row.volume)] for row in df.itertuples()]
         payload = {"candles":candles, "candle_metadata":dict(df.attrs), "target":target, "seconds_left":seconds_left, "live_price":live_price, "signal":sig}
@@ -4974,13 +5029,13 @@ def build_signal(df, target, seconds_left, live_price=None, price_source=None, w
 
 def confirm_round_candidate(state, candidate, market, seconds_left, now, signal=None):
     before = dict(state)
-    if state.get("signal_engine_revision") != "unified_evidence_v7_3m":
+    if state.get("signal_engine_revision") != "unified_evidence_v8_round_movement":
         # Migrate state without deleting the already confirmed direction.
-        state["signal_engine_revision"] = "unified_evidence_v7_3m"
+        state["signal_engine_revision"] = "unified_evidence_v8_round_movement"
         state.update(pending_direction=None, pending_count=0,
                      pending_since=None, pending_last_at=None,
                      pending_price_source=None)
-        state.setdefault("opening_live_tapes", {})
+        state.pop("opening_live_tape", None)
         _reset_withdrawal(state)
     result = _confirmation_without_trace(state, candidate, market, seconds_left, now, signal)
     # Solo seguimiento: el resultado de confirmación y su primera señal no cambian.
@@ -5132,7 +5187,82 @@ _ALPHA_STABLE_PANEL = r"""
     }
   }
   window.__alphaSyncOfficialSignal = syncOfficialSignal;
-  window.__alphaUpdatePanel = function(html) {
+  const seenWhaleEvents = new Set();
+  let audioContext, swimmingWhale;
+  function resumeWhaleAudio() {
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    if (!Audio) return;
+    audioContext ??= new Audio();
+    if (audioContext.state !== 'running') return audioContext.resume();
+  }
+  function primeWhaleAudio() {
+    try {
+      Promise.resolve(resumeWhaleAudio()).catch(() => {});
+    } catch {
+      // Algunos navegadores restringen el audio antes de un gesto.
+    }
+  }
+  document.addEventListener('pointerup', primeWhaleAudio, {passive: true});
+  document.addEventListener('keydown', primeWhaleAudio);
+
+  async function whaleCall(whale) {
+    const started = performance.now();
+    try {
+      await resumeWhaleAudio();
+    } catch {
+      return;
+    }
+    if (audioContext?.state !== 'running' || !whale.isConnected
+        || performance.now() - started > 700) return;
+    const start = audioContext.currentTime;
+    const voice = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    voice.type = 'triangle';
+    voice.frequency.setValueAtTime(230, start);
+    voice.frequency.exponentialRampToValueAtTime(355, start + .32);
+    voice.frequency.exponentialRampToValueAtTime(125, start + 1.2);
+    gain.gain.setValueAtTime(.001, start);
+    gain.gain.exponentialRampToValueAtTime(.09, start + .18);
+    gain.gain.exponentialRampToValueAtTime(.001, start + 1.25);
+    voice.connect(gain).connect(audioContext.destination);
+    voice.start(start);
+    voice.stop(start + 1.26);
+  }
+  function showWhale(event) {
+    if (!event) {
+      swimmingWhale?.remove();
+      return;
+    }
+    if (seenWhaleEvents.has(event)) return;
+    seenWhaleEvents.add(event);
+    swimmingWhale?.remove();
+    const whale = document.createElement('div');
+    swimmingWhale = whale;
+    whale.textContent = '🐋';
+    whale.setAttribute('role', 'status');
+    whale.setAttribute('aria-label', event.includes(':UP:') ? 'Ballenazo comprador' : 'Ballenazo vendedor');
+    Object.assign(whale.style, {
+      position:'fixed', top:'0', left:'0', zIndex:'2147483640', pointerEvents:'none',
+      fontSize:'36px', lineHeight:'44px', width:'44px', textAlign:'center',
+      filter:'drop-shadow(0 0 9px #38bdf8)'
+    });
+    const bounds = root.getBoundingClientRect();
+    const left = Math.max(8, bounds.left + 8);
+    const right = Math.max(left, Math.min(innerWidth, bounds.right) - 52);
+    const top = Math.max(8, Math.min(innerHeight - 52, bounds.top + 8));
+    const bottom = Math.max(top, Math.min(innerHeight, bounds.bottom) - 52);
+    document.body.appendChild(whale);
+    const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const points = reduced ? [[right, top], [right, top]] :
+      [[left, top], [right, top], [right, bottom], [left, bottom], [left, top]];
+    const animation = whale.animate(points.map(([x, y], index) => ({
+      transform: `translate(${x}px, ${y}px) scaleX(${index < 2 ? -1 : 1})`,
+      opacity: index === points.length - 1 ? 0 : 1
+    })), {duration: reduced ? 1800 : 5200, easing:'linear'});
+    animation.onfinish = () => whale.remove();
+    whaleCall(whale);
+  }
+  window.__alphaUpdatePanel = function(html, whaleEvent) {
     const template = document.createElement('template');
     template.innerHTML = html;
     const incoming = template.content;
@@ -5145,6 +5275,7 @@ _ALPHA_STABLE_PANEL = r"""
     while (root.childNodes.length > incoming.childNodes.length)
       root.lastChild.remove();
     syncOfficialSignal();
+    showWhale(whaleEvent);
   };
 })();
 </script>
